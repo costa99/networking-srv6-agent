@@ -247,9 +247,11 @@ neutron-server from starting, and the traceback names an `ImportError` rather th
 feature is half-built. Each phase below ends by uncommenting its own group and confirming it
 resolves.
 
-Note `neutron.db.alembic_migrations` is **not** satisfied by an empty package: the target is an
-importable *attribute*, and a subpackage only becomes one once imported, so it needs `env.py`,
-`script.py.mako` and the `HEAD` files beside it before it can be enabled in P3.
+Note `neutron.db.alembic_migrations` is **not** satisfied by an empty package — but not for the
+reason it looks like. Neutron never imports that entry point: `neutron/db/migration/cli.py`
+`_get_root_versions_dir` **string-splits** `module:attr` into a directory path. So the `module:attr`
+form is a path convention, and what has to exist on disk is `env.py`, `script.py.mako` and the
+`EXPAND_HEAD` / `CONTRACT_HEAD` files beside a `versions/` directory.
 
 **P2 — Pure layers, no Neutron coupling.** Port `privileged/`, `common/sid.py`,
 `common/constants.py`, `common/config.py` and their tests. These should pass immediately; if they

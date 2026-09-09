@@ -1,0 +1,16 @@
+Alembic migrations for networking-srv6-agent.
+
+Driven by neutron-db-manage, which resolves the entry point
+
+    neutron.db.alembic_migrations =
+        networking-srv6-agent = networking_srv6_agent.db.migration:alembic_migrations
+
+by STRING-SPLITTING it into a directory path (neutron/db/migration/cli.py,
+_get_root_versions_dir) -- it is never imported. The module:attr form is a
+path convention here, not an attribute lookup.
+
+    neutron-db-manage --subproject networking-srv6-agent upgrade heads
+
+The whole schema is created by one expand revision. This is a new project,
+not a migration of the networking-bgpvpn tables: the table and column names
+differ, and nothing upgrades from those.
