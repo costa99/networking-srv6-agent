@@ -1,0 +1,4 @@
+hacking>=6.1.0
+oslotest>=4.5.0
+stestr>=3.2.1
+testtools>=2.6.0
