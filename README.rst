@@ -44,3 +44,19 @@ What it does not provide
 Route targets, route distinguishers, and federation with VPNs outside the cloud.
 Those are BGP capabilities: use ``networking-bgpvpn`` for them. The two are designed
 to run side by side.
+
+No router associations. A domain is an island: instances inside it reach each other
+across compute nodes, but north-south traffic (floating IPs, SNAT) and routing
+between domains go through ordinary Neutron, not through SRv6. A network that
+already has a Neutron router interface cannot be attached to a domain -- two
+gateways for one subnet is not a state this plugin tries to arbitrate. The
+mechanism for lifting this later is described in ``MIGRATION-PLAN.md`` section 8.1.
+
+Requirements
+------------
+
+**ML2/OVS only.** The per-node code runs as an extension of the Neutron OVS L2
+agent, which supplies the integration bridge and the local-VLAN mapping it needs.
+Under ML2/OVN there is no Neutron L2 agent, so this plugin has no host and will not
+run; under linuxbridge it refuses to initialise. Kernel 5.x or newer with
+``CONFIG_IPV6_SEG6_LWTUNNEL``, and an IPv6-routable underlay.
