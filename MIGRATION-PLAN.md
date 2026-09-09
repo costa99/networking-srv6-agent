@@ -182,9 +182,9 @@ migration retargets two foreign keys.
 ## 4. Resource model
 
 ```
-srv6_domain                     project-scoped, the grouping + isolation object
+srv6_domain                     project-scoped, many per project (8.2)
   id, name, project_id
-  srv6_behavior      (End.DT46; create-only)
+  srv6_behavior      (End.DT46 - the only valid value, 8.3; create-only)
   sid_function       (read-only, server-allocated)
   networks           (via associations)
 
@@ -210,6 +210,9 @@ Three decisions carried over from the TE design work:
   API an admin cannot discover valid host names, and a typo in `via_hosts` produces an empty
   segment list, which means "not steered". A silent no-op is the worst failure mode a steering
   command can have.
+- **Network associations only.** No router associations, and a network that already has a Neutron
+  router interface is refused (§8.1). A domain is an island: no north-south, no inter-domain
+  routing.
 - **Policy fails closed.** oslo.policy denies a rule it has never registered
   (`oslo_policy/policy.py:1089`, *"If the rule doesn't exist, fail closed"*). Any attribute
   carrying `enforce_policy: True` must have a registered default in the same commit, or every call
@@ -246,8 +249,17 @@ retargeted, the TE tables, one fresh initial migration. Port the DB tests. Watch
 **P4 — Service plugin and API.** Extension descriptors, plugin CRUD, policies. Domain create →
 function id allocated → visible over REST. Nothing programs a kernel yet.
 
+Carries three items from §8: `srv6_behavior` offers **only** `End.DT46` (§8.3); router
+associations are not implemented at all rather than implemented-and-rejected (§8.1); and network
+association validation rejects both `router:external` networks **and networks that already have a
+Neutron router interface** — the check the original design specified and never got (§8.1).
+
 **P5 — Agent and dataplane.** Port `dataplane.py` and `agent_extension.py` with their tests, and
 the RPC. This is the phase that reproduces the working system.
+
+Add the `driver_type` check in `initialize()` (§8.4): it is already a parameter and is never read,
+so a linuxbridge agent fails with an obscure `AttributeError` from `request_int_br()` instead of a
+clear refusal.
 
 **Gate:** the existing two-node lifecycle — domain create, network association, kernel state, VM
 to VM ping across nodes, delete, cleanup — passes exactly as it does today under BGPVPN. Compare
@@ -307,15 +319,103 @@ history is unrelated to it.
 
 ---
 
-## 8. Open questions
+## 8. Decisions
 
-1. **Does `srv6_domain` need router associations?** Rejected today. Without a router, inter-domain
-   and north-south traffic has no path. Fine for a thesis; needs stating.
-2. **One domain per project, or many?** Many is more flexible and matches the current model. One
-   would let the domain be implicit and remove a resource — at the cost of the any-to-any grouping
-   that makes this an L3VPN rather than a flat routed network.
-3. **Keep `End.DT46` only?** `End.DT4` / `End.DT6` are accepted by the API and rejected by the
-   driver today. The new API can simply not offer them.
-4. **Does the L2 agent extension remain the right host**, or should this be a standalone agent as
-   `networking-sr` chose? The extension keeps OVS and the gateway-port mechanism intact and is
-   working; a standalone agent would be a much larger change with no identified benefit.
+Resolved 2026-09-09. Each was a genuine fork; the reasoning is recorded so it does not get
+re-litigated.
+
+### 8.1 Router associations stay rejected — and the missing check gets written
+
+A domain accepts **network** associations only. `create_router_assoc_precommit` continues to raise,
+as it does today.
+
+Alongside that, write the validation that was specified and never implemented.
+`_validate_net_assoc` currently rejects only `router:external` networks; the design also called for
+rejecting **a network that already has a Neutron router interface**, and that check does not exist.
+Without it a routered network can be attached today, leaving two things routing for the same
+subnet — the SRv6 VRF gateway port `svp-<fid>-<vlan>` and the Neutron router port — with nothing
+validating the outcome. Rejecting it makes the island semantics true instead of merely intended.
+
+**Consequence to state plainly in the docs:** a domain is an island. Traffic between VMs inside it
+works; north-south (floating IPs, SNAT) and inter-domain routing do not. Instances keep their
+ordinary Neutron connectivity on their other interfaces, so this is a restriction on what the
+domain carries, not on what a VM can do.
+
+#### Implementing router associations later — how, and what it costs
+
+The mechanism is known, because bagpipe already does it for MPLS. A `RouterAssociation` supplies
+the subnet's real **gateway MAC** (`_get_gateway_mac_by_subnet`), and the agent installs an OVS
+flow redirecting frames addressed to that MAC into the VPN dataplane
+(`networking_bagpipe/agent/bgpvpn/agent_extension.py:570` `_redirect_br_tun_to_mpls`), plus an ARP
+responder so the VM gets an answer for a MAC no interface owns. bagpipe also keeps a synthetic
+default (`GATEWAY_MAC = "00:00:5e:00:43:64"`) for the no-router case. The SRv6 version would be the
+same shape, redirecting into the VRF rather than into MPLS.
+
+**Pros**
+
+- **North-south becomes possible.** Floating IPs and SNAT could traverse the domain instead of
+  bypassing it — today the domain cannot reach the outside world at all.
+- **Inter-domain routing becomes possible**, and with it the more interesting TE cases, since a
+  steered path that can also reach a gateway is far more useful than one that cannot.
+- **Removes the biggest practical restriction.** Most real tenant networks have a router. As it
+  stands, adopting an SRv6 domain means giving that up, which rules out most existing workloads.
+- **Attach-a-router is better UX** than attaching N networks one at a time.
+- It composes with the border-speaker design, which needs an egress point to exist at all.
+
+**Cons**
+
+- **It breaks the design's cleanest property.** `DESIGN.html` currently claims "the virtual switch
+  is never asked to understand any of it" — the gateway is a real OVS internal port owning a real
+  address inside the VRF, and traffic arrives by ordinary L3 forwarding. Redirect flows put
+  SRv6-specific state into `br-int` and that claim is gone.
+- **Two gateways, one subnet.** The Neutron router port and the VRF gateway port would both answer
+  for the subnet gateway. Which one owns ARP has to be decided and enforced, not left to timing.
+- **DVR and L3HA multiply it.** With DVR the router is distributed, so the redirect must be
+  installed on every node; with L3HA there is a VRRP master that moves. Both are ordinary Neutron
+  deployments and both complicate the flow lifecycle.
+- **Security groups get worse before better.** Risk R2 is already open — the gateway port bypasses
+  the OVS firewall by construction. Adding a second ingress path into the VRF widens that.
+- **Testing burden.** Every case above needs a scenario, and the testbed is two nodes.
+
+**Verdict:** correct as future work, wrong as thesis scope. Record it as a design chapter with the
+mechanism named, exactly as R5 already does, and do not build it.
+
+### 8.2 A project may own many domains
+
+Unchanged from the current model: a domain is a resource, a project can own several, each gets its
+own function id and VRF.
+
+The alternative — one implicit domain per project, derived from `project_id` — would delete the
+resource and its association API, a large share of §3.3's new code. It was rejected because it
+removes the grouping that is the feature: every network in a project would be permanently mutually
+reachable with no way to keep two sets apart, and TE would lose the ability to steer one workload
+group differently from another inside one tenant. Pool capacity does not decide it either way
+(4,095 function ids).
+
+### 8.3 `End.DT46` only, but keep the attribute
+
+The API offers `srv6_behavior` with exactly one valid value.
+
+Today the attribute accepts `End.DT4` and `End.DT6` and the driver rejects them, so the API
+advertises a choice the dataplane does not have. A fresh API should not inherit that. The attribute
+itself stays rather than being dropped: it documents the behaviour explicitly, and adding
+single-family support later becomes a new enum value instead of a new attribute. There is no
+identified use case — `End.DT46` serves an IPv4-only domain perfectly well.
+
+### 8.4 The L2 agent extension stays — and the restriction gets documented
+
+Per-node code continues to run as an extension of the OVS L2 agent, which supplies
+`agent_api.request_int_br()` for the integration bridge and `LocalVlanManager` for the
+network→local-VLAN mapping. A standalone agent would mean rebuilding both; `networking-sr` took
+that route and had to drop OVS entirely, writing its own agent, firewall driver and interface
+driver.
+
+Two things to add, because the restriction is currently invisible:
+
+- **Check `driver_type` in `initialize()`.** It is already a parameter and is never read. Under
+  linuxbridge `request_int_br()` does not exist, so the failure is an obscure `AttributeError`
+  rather than a clear message. Refuse to initialise on an unsupported agent and say why.
+- **State the ML2/OVS-only restriction in the README and the docs.** Under **ML2/OVN — the default
+  in modern OpenStack — there is no Neutron L2 agent at all**, so this plugin has no host and
+  cannot run. That is the honest boundary of the claim, and it is very likely why the sibling
+  project `costa99/networking-srv6` pursued an OVN-native design instead.
