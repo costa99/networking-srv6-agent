@@ -9,3 +9,4 @@ dist/
 .stestr/
 .coverage
 *.swp
+MIGRATION-PLAN.md

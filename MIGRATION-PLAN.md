@@ -224,7 +224,8 @@ Three decisions carried over from the TE design work:
 
 Each phase leaves the tree importable and testable.
 
-**P1 — Skeleton and packaging.** `setup.cfg` with the entry points below, `tox.ini`, `requirements.txt`, licence headers. Verify the package imports and `neutron.policies` resolves.
+**P1 — Skeleton and packaging.** `setup.cfg`, `tox.ini`, `requirements.txt`, licence headers.
+Verify the package imports and that every *live* entry point resolves.
 
 ```
 [neutron.service_plugins]        srv6 = networking_srv6.services.plugin:Srv6Plugin
@@ -239,15 +240,28 @@ Each phase leaves the tree importable and testable.
 > its `entry_points` section — the installed dist is the only surviving copy. Do not inherit that
 > failure mode.
 
+**Entry points are enabled per phase, not up front.** Only groups whose targets exist are live;
+the rest sit commented in `setup.cfg` under the phase that will create them. An entry point naming
+a missing module does not fail quietly — `service_plugins = srv6` with no plugin class stops
+neutron-server from starting, and the traceback names an `ImportError` rather than saying the
+feature is half-built. Each phase below ends by uncommenting its own group and confirming it
+resolves.
+
+Note `neutron.db.alembic_migrations` is **not** satisfied by an empty package: the target is an
+importable *attribute*, and a subpackage only becomes one once imported, so it needs `env.py`,
+`script.py.mako` and the `HEAD` files beside it before it can be enabled in P3.
+
 **P2 — Pure layers, no Neutron coupling.** Port `privileged/`, `common/sid.py`,
 `common/constants.py`, `common/config.py` and their tests. These should pass immediately; if they
 do not, something was BGPVPN-coupled that was not supposed to be.
 
 **P3 — Data model.** `srv6_domain` + associations, the allocation pool and locator registry
 retargeted, the TE tables, one fresh initial migration. Port the DB tests. Watch for skips.
+Ends by enabling `neutron.db.alembic_migrations`.
 
 **P4 — Service plugin and API.** Extension descriptors, plugin CRUD, policies. Domain create →
-function id allocated → visible over REST. Nothing programs a kernel yet.
+function id allocated → visible over REST. Nothing programs a kernel yet. Ends by enabling
+`neutron.service_plugins`, `neutron.policies` and `oslo.policy.policies`.
 
 Carries three items from §8: `srv6_behavior` offers **only** `End.DT46` (§8.3); router
 associations are not implemented at all rather than implemented-and-rejected (§8.1); and network
@@ -255,7 +269,9 @@ association validation rejects both `router:external` networks **and networks th
 Neutron router interface** — the check the original design specified and never got (§8.1).
 
 **P5 — Agent and dataplane.** Port `dataplane.py` and `agent_extension.py` with their tests, and
-the RPC. This is the phase that reproduces the working system.
+the RPC. This is the phase that reproduces the working system. Ends by enabling
+`neutron.agent.l2.extensions` — the last one, at which point the package becomes installable and
+functional.
 
 Add the `driver_type` check in `initialize()` (§8.4): it is already a parameter and is never read,
 so a linuxbridge agent fails with an obscure `AttributeError` from `request_int_br()` instead of a
