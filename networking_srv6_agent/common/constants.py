@@ -110,6 +110,19 @@ MAX_TE_VIA_HOSTS = 6
 # the table wins, so it only ever answers a miss.
 VRF_UNREACHABLE_METRIC = 4278198272
 
+# The priority of the policy rules that let a domain's VRF reach its OWN
+# remote decap SIDs through `main` -- just ahead of the l3mdev rule (1000).
+# Needed because the seal above also caught the domain's own traffic:
+# after seg6 encapsulates a packet that arrived on a gateway port, the
+# kernel routes the new OUTER IPv6 header in the same VRF, hit the IPv6
+# unreachable default, and dropped every packet (REPORT-P5-two-node §9,
+# Ip6InNoRoutes one per echo request). One rule per (domain, remote node):
+#     ip -6 rule add pref 999 iif sv6vrf-<fid> to <remote sid>/128 lookup main
+# `iif <vrf master>` matches traffic arriving on the VRF's enslaved ports,
+# so another domain's VRF gains nothing, and `lookup main` leaves the next
+# hop to the underlay however many hops away it is.
+SID_RULE_PRIORITY = 999
+
 # seg6 encapsulation overhead: outer IPv6 (40) + SRH fixed part (8) +
 # 16 bytes per segment. With a single-segment list that is 64 bytes.
 SRH_FIXED_OVERHEAD = 48

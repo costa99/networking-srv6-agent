@@ -588,3 +588,18 @@ idiom in the kernel's `Documentation/networking/vrf.rst`. Every steering guarant
 on it: a path that can be bypassed by addressing a SID directly is not a guarantee. Until P5 lands,
 the same two commands can be applied by hand per VRF on the testbed; `networking-bgpvpn` itself is
 not changed.
+
+**Amended 2026-09-10, after the two-node gate: the seal alone breaks encapsulation.** After seg6
+encapsulates a packet that arrived on a gateway port, the kernel routes the outer IPv6 header in
+the same VRF. The seal therefore dropped every cross-node packet: `Ip6InNoRoutes` +1 per echo
+request on both nodes (`REPORT-P5-two-node-2026-09-10.md` §9). The old build only worked through
+the very fall-through this section closes. So **do not** seal the old BGPVPN build by hand as the
+paragraph above suggests; it breaks the same way.
+
+The complete fix is the seal plus one rule per (domain, remote node), placed ahead of l3mdev:
+`ip -6 rule add pref 999 iif sv6vrf-<fid> to <own remote decap SID>/128 lookup main`
+(`P5-PLAN.md` §4.6). A domain may leave its VRF only toward its own decap SIDs. Every other SID
+and the underlay stay sealed.
+
+For P6 it fails closed: no rule is added toward transit End SIDs. Letting a VRF reach them needs
+SRH filtering or HMAC first.

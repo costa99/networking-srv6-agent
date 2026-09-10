@@ -96,6 +96,17 @@ ip -6 route show table main | grep seg6local     # this node's decap SID for the
 The table should also hold `unreachable default metric 4278198272` for IPv4 and IPv6. That route
 seals the VRF (`MIGRATION-PLAN.md` §8.6): without it, a VM could reach other domains' SIDs.
 
+Next to the seal there must be one rule per remote node, letting the domain's encapsulated traffic
+out toward that node's decap SID (`P5-PLAN.md` §4.6):
+
+```bash
+ip -6 rule show | grep '^999:'
+# 999: from all to fc00:0:2:<hex fid>:: iif sv6vrf-<fid> lookup main
+```
+
+If the VRF and the routes are there but this rule is missing, pings between nodes fail silently.
+`nstat -az Ip6InNoRoutes` then climbs by one per packet.
+
 Then ping from the instance on `net-a` to the instance on `net-b`.
 
 ## 6. Undo

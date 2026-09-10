@@ -214,6 +214,44 @@ routes carry `network_id`.
 
 ---
 
+### 4.6 SID rules — the seal must let the domain's own traffic out (found at the gate)
+
+§4.1 alone broke every cross-node packet, and the two-node gate caught it (`REPORT-P5-two-node-
+2026-09-10.md` §9). After seg6 encapsulates a packet that arrived on a gateway port, the kernel
+routes the new **outer** IPv6 header with the ingress device unchanged, which means in the VRF.
+The lookup for the remote decap SID hit the IPv6 `unreachable default`, so `Ip6InNoRoutes` went
+up once per echo request on both nodes and nothing reached the wire. The old build had only ever
+worked through the fall-through the seal closes. Mocked unit tests cannot see where that lookup
+happens.
+
+The fix is one policy rule per (domain, remote node), placed ahead of the l3mdev rule:
+
+```
+ip -6 rule add pref 999 iif sv6vrf-<fid> to <remote decap SID>/128 lookup main
+```
+
+- **`iif <VRF master>`** matches traffic arriving on that VRF's enslaved ports (the pre-4.8
+  `vrf.rst` pattern), so another domain's VRF gains nothing.
+- **`to <own SID>/128`**: the only new reach is the domain's own decap SIDs, which inject only
+  into itself.
+- **`lookup main`**: the underlay picks the next hop, however many hops away.
+
+The rules are derived from the routes the agent already installs, since a route's first segment
+is its outer destination. They are reconciled from the kernel like the routes:
+- `add_routes` adds;
+- `sync_routes` adds and prunes;
+- `delete_domain` removes them before the VRF;
+- `present_function_ids` counts rules whose VRF is gone (`[detached]`), so the orphan GC collects
+  them.
+
+The privileged wrappers are `add_sid_rule`, `delete_sid_rule` and `list_sid_rules`; the priority
+is `SID_RULE_PRIORITY = 999`.
+
+**It fails closed for TE.** When a route's first segment is a transit End SID (P6), no rule is
+added and the agent logs why. A VRF allowed to reach an End SID lets a tenant hand-craft an SRH
+through it toward another domain's SID. P6 needs SRH filtering at the gateway port, or HMAC, before
+it lifts this.
+
 ## 5. RPC contract test
 
 `P4-PLAN.md` §4.4 explains the failure: a kwarg the agent does not name lands in `**kwargs`, the
@@ -385,6 +423,9 @@ New files under `implementation/srv6-plugin/evidence/`, raw output, as the exist
 ---
 
 ## 11. Status (2026-09-10)
+
+**Update, same day, after the two-node gate:** §4.6 (SID rules) added. Suite now 367 tests,
+0 skipped, flake8 clean. The fix is not yet deployed to the testbed.
 
 **Implemented and unit-verified** (348 tests, 0 skipped, flake8 clean):
 

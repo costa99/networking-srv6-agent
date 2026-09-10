@@ -195,6 +195,62 @@ class TestListVrfNames(Seg6ArgvTestCase):
         self.assertRaises(RuntimeError, seg6.list_vrf_names)
 
 
+class TestSidRules(Seg6ArgvTestCase):
+    """P5-PLAN.md 4.6: the rules that let a domain's outer headers out."""
+
+    def test_add(self):
+        seg6.add_sid_rule('sv6vrf-2394', 'fc00:0:2:95a::')
+        self.assertEqual(
+            ['-6', 'rule', 'add', 'pref', '999', 'iif', 'sv6vrf-2394',
+             'to', 'fc00:0:2:95a::/128', 'lookup', 'main'],
+            self.argv)
+
+    def test_add_of_an_existing_rule_is_success(self):
+        self.ip_route_cmd.side_effect = \
+            seg6.processutils.ProcessExecutionError(
+                stderr='RTNETLINK answers: File exists')
+        self.assertIsNone(seg6.add_sid_rule('sv6vrf-2394', 'fc00:0:2:95a::'))
+
+    def test_add_other_errors_propagate(self):
+        self.ip_route_cmd.side_effect = \
+            seg6.processutils.ProcessExecutionError(stderr='Invalid argument')
+        self.assertRaises(seg6.processutils.ProcessExecutionError,
+                          seg6.add_sid_rule, 'sv6vrf-2394', 'fc00:0:2:95a::')
+
+    def test_delete(self):
+        seg6.delete_sid_rule('sv6vrf-2394', 'fc00:0:2:95a::')
+        self.assertEqual('del', self.argv[2])
+        self.assertEqual(['iif', 'sv6vrf-2394', 'to', 'fc00:0:2:95a::/128',
+                          'lookup', 'main'], self.argv[5:])
+
+    def test_delete_of_a_missing_rule_is_success(self):
+        self.ip_route_cmd.side_effect = \
+            seg6.processutils.ProcessExecutionError(
+                stderr='RTNETLINK answers: No such file or directory')
+        self.assertIsNone(seg6.delete_sid_rule('sv6vrf-2394',
+                                               'fc00:0:2:95a::'))
+
+    def test_list_keeps_only_this_packages_rules(self):
+        self.ip_route_cmd.return_value = (
+            '0:\tfrom all lookup local\n'
+            '999:\tfrom all to fc00:0:2:95a:: iif sv6vrf-2394 lookup main\n'
+            '999:\tfrom all to fc00:0:3:95a:: iif sv6vrf-2394 [detached] '
+            'lookup main\n'
+            '999:\tfrom all to 2001:db8::1 iif eth0 lookup main\n'
+            '999:\tfrom all to fc00:0:2:9e8:: iif sv6vrf-2536 lookup 100\n'
+            '998:\tfrom all to fc00:0:2:1:: iif sv6vrf-1 lookup main\n'
+            '1000:\tfrom all lookup [l3mdev-table]\n'
+            '32766:\tfrom all lookup main\n')
+        self.assertEqual([('sv6vrf-2394', 'fc00:0:2:95a::'),
+                          ('sv6vrf-2394', 'fc00:0:3:95a::')],
+                         seg6.list_sid_rules())
+        self.assertEqual(['-6', 'rule', 'show'], self.argv)
+
+    def test_list_failure_raises(self):
+        self.ip_route_cmd.side_effect = RuntimeError('boom')
+        self.assertRaises(RuntimeError, seg6.list_sid_rules)
+
+
 class TestLocatorRoute(Seg6ArgvTestCase):
 
     def test_locator_route_lands_in_table_main(self):

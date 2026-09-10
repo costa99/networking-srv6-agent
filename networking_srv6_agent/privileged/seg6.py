@@ -248,6 +248,69 @@ def list_vrf_names():
     return names
 
 
+def _sid_rule_args(verb, vrf_name, sid_address):
+    return ['-6', 'rule', verb, 'pref', str(constants.SID_RULE_PRIORITY),
+            'iif', vrf_name, 'to', '%s/128' % sid_address, 'lookup', 'main']
+
+
+def add_sid_rule(vrf_name, sid_address):
+    """Let one VRF reach one SID through `main`.
+
+        ip -6 rule add pref 999 iif <vrf> to <sid>/128 lookup main
+
+    The outer IPv6 header of an encapsulated packet is routed in the VRF
+    the tenant packet arrived in; without this rule the seal refuses it.
+    `ip rule add` is not idempotent in every iproute2, so an existing rule
+    ("File exists") counts as success.
+    """
+    try:
+        return ip_route_cmd(_sid_rule_args('add', vrf_name, sid_address))
+    except processutils.ProcessExecutionError as e:
+        if 'File exists' in str(e):
+            return None
+        raise
+
+
+def delete_sid_rule(vrf_name, sid_address):
+    """Remove one VRF's SID rule, tolerating its absence."""
+    try:
+        return ip_route_cmd(_sid_rule_args('del', vrf_name, sid_address))
+    except processutils.ProcessExecutionError as e:
+        if ('No such file' in str(e) or 'No such process' in str(e) or
+                'Cannot find' in str(e)):
+            return None
+        raise
+
+
+def list_sid_rules():
+    """[(vrf_name, sid), ...] for every SID rule this package installed.
+
+    Parses `ip -6 rule show`, whose lines look like
+        999:	from all to fc00:0:2:95a:: iif sv6vrf-2394 lookup main
+        999:	from all to fc00:0:2:95a:: iif sv6vrf-2394 [detached] lookup main
+    (a /128 prints without its length; `[detached]` once the VRF device is
+    gone). Only rules at SID_RULE_PRIORITY, with `lookup main` and an iif
+    carrying this package's VRF prefix, count: nothing else is ours. Raises
+    on failure, like list_vrf_names -- callers reconcile from this.
+    """
+    out = ip_route_cmd(['-6', 'rule', 'show'])
+    rules = []
+    for line in out.splitlines():
+        fields = line.split()
+        if not fields or fields[0] != '%d:' % constants.SID_RULE_PRIORITY:
+            continue
+        if 'to' not in fields or 'iif' not in fields:
+            continue
+        if fields[-2:] != ['lookup', 'main']:
+            continue
+        vrf_name = fields[fields.index('iif') + 1]
+        if not vrf_name.startswith(constants.VRF_PREFIX):
+            continue
+        sid_address = fields[fields.index('to') + 1].split('/')[0]
+        rules.append((vrf_name, sid_address))
+    return rules
+
+
 def route_exists(prefix, table, family_v6=False):
     args = ['-6'] if family_v6 else []
     args += ['route', 'show', prefix, 'table', str(table)]

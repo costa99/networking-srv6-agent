@@ -37,9 +37,14 @@ Per remote port:
     ip route replace <ip>/32 encap seg6 mode encap \
         segs [<transit End SID>,...]<remote sid> dev <underlay> table <table>
 
-Three things differ from the old build, each a defect it had (P5-PLAN.md 4):
-the table is sealed (4.1), flushed on delete (4.2), and a delete finds its
-gateway ports on the bridge rather than in memory (4.3).
+Per remote node the domain encapsulates to:
+    ip -6 rule add pref 999 iif sv6vrf-<fid> to <remote sid>/128 lookup main
+
+Four things differ from the old build, each a defect it had or one found at
+the gate (P5-PLAN.md 4): the table is sealed (4.1), the seal lets the
+domain's own outer headers out through the SID rules (4.6), the table is
+flushed on delete (4.2), and a delete finds its gateway ports on the bridge
+rather than in memory (4.3).
 """
 
 import collections
@@ -95,6 +100,14 @@ class Srv6DataplaneError(Exception):
 
 DomainState = collections.namedtuple(
     'DomainState', ['domain_id', 'function_id', 'vrf_table', 'vrf_name'])
+
+
+def _normalise_sid(address):
+    """One spelling per SID, whatever `ip rule show` or format_sid wrote."""
+    try:
+        return str(ipaddress.IPv6Address(address))
+    except ValueError:
+        return address
 
 
 def _normalise_prefix(prefix):
@@ -314,6 +327,15 @@ class Srv6LinuxDataplane:
         for port_name in sorted(ports):
             self._delete_gateway_port(port_name)
 
+        # Read from the kernel, like the ports, and while the VRF still
+        # exists: the rules name it as their iif.
+        for sid_address in sorted(self._sid_rules_for(vrf_name) or ()):
+            try:
+                priv_seg6.delete_sid_rule(vrf_name, sid_address)
+            except Exception as e:
+                LOG.debug("SRv6: removing rule %(v)s -> %(s)s: %(e)s",
+                          {'v': vrf_name, 's': sid_address, 'e': e})
+
         local_sid = sid.format_sid(self.locator, function_id)
         try:
             priv_seg6.delete_route('%s/128' % local_sid, 'main',
@@ -344,6 +366,14 @@ class Srv6LinuxDataplane:
         except Exception as e:
             LOG.warning("SRv6: could not list VRF devices: %s", e)
             return None
+        # A SID rule can outlive its VRF device (shown `[detached]`), so the
+        # rules count as presence too. An unreadable rule list only means
+        # those orphans wait for the next pass.
+        try:
+            names = list(names) + [vrf for vrf, _ in
+                                   priv_seg6.list_sid_rules()]
+        except Exception as e:
+            LOG.debug("SRv6: could not list SID rules: %s", e)
         present = set()
         for name in names:
             if not name.startswith(constants.VRF_PREFIX):
@@ -577,6 +607,10 @@ class Srv6LinuxDataplane:
         SID. A route without them is exactly the depth-1 route of the old
         build.
 
+        Also makes sure the domain's VRF may reach every remote decap SID
+        it now encapsulates to (_ensure_sid_rules); only adds, like the
+        routes. Pruning is sync_routes' job.
+
         Returns the normalised prefixes this node should hold an encap
         route for, which is what sync_routes reconciles the table against.
         A prefix is counted as wanted as soon as it is decided to be, not
@@ -584,10 +618,28 @@ class Srv6LinuxDataplane:
         from the table anyway, and treating it as unwanted would make a
         transient failure delete whatever is already there.
         """
-        wanted = set()
         state = self.domains.get(domain_id)
         if state is None:
-            return wanted
+            return set()
+        wanted, rule_sids = self._install_routes(state, routes, locators,
+                                                 local_host)
+        self._ensure_sid_rules(state, rule_sids)
+        return wanted
+
+    def _install_routes(self, state, routes, locators, local_host):
+        """The route loop. Returns (wanted prefixes, SIDs needing a rule).
+
+        A route's outer destination is its FIRST segment. When that is the
+        remote decap SID -- no transit -- the domain's VRF needs a rule to
+        reach it. When it is a transit End SID (P6), no rule is added: a VRF
+        allowed to reach an End SID lets a tenant hand-craft an SRH through
+        it toward another domain's SID. The route is installed but its outer
+        header stays behind the seal until P6 adds SRH filtering or HMAC --
+        it fails closed, and says so.
+        """
+        domain_id = state.domain_id
+        wanted = set()
+        rule_sids = set()
         for route in routes:
             host = route.get('host')
             if host == local_host:
@@ -600,8 +652,16 @@ class Srv6LinuxDataplane:
             prefix = route['prefix']
             wanted.add(_normalise_prefix(prefix))
             remote_sid = sid.format_sid(locator, state.function_id)
-            segments = (self._transit_segments(route.get('segments')) +
-                        [remote_sid])
+            transit = self._transit_segments(route.get('segments'))
+            segments = transit + [remote_sid]
+            if transit:
+                LOG.warning("SRv6: domain %(d)s route %(p)s starts at "
+                            "transit SID %(s)s; the VRF is not allowed to "
+                            "reach End SIDs until SRH filtering exists (P6), "
+                            "so this path is sealed",
+                            {'d': domain_id, 'p': prefix, 's': transit[0]})
+            else:
+                rule_sids.add(_normalise_sid(remote_sid))
             try:
                 priv_seg6.replace_seg6_route(
                     prefix, segments, self.underlay_interface,
@@ -613,7 +673,57 @@ class Srv6LinuxDataplane:
             LOG.debug("SRv6: domain %(d)s %(p)s -> segs %(s)s table %(t)s",
                       {'d': domain_id, 'p': prefix, 's': segments,
                        't': state.vrf_table})
-        return wanted
+        return wanted, rule_sids
+
+    # ------------------------------------------------------------------
+    # SID rules (P5-PLAN.md 4.6)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _sid_rules_for(vrf_name):
+        """This VRF's SID rules in the kernel, or None if unreadable.
+
+        The kernel, not memory, for the same reason as the gateway ports
+        and the routes: rules outlive the agent process.
+        """
+        try:
+            rules = priv_seg6.list_sid_rules()
+        except Exception as e:
+            LOG.warning("SRv6: could not list SID rules: %s", e)
+            return None
+        return {_normalise_sid(s) for vrf, s in rules if vrf == vrf_name}
+
+    def _ensure_sid_rules(self, state, sids):
+        present = self._sid_rules_for(state.vrf_name) or set()
+        for sid_address in sorted(set(sids) - present):
+            try:
+                priv_seg6.add_sid_rule(state.vrf_name, sid_address)
+            except Exception as e:
+                LOG.error("SRv6: could not let %(v)s reach %(s)s: %(e)s. "
+                          "Traffic from this domain to that node is dropped "
+                          "at the seal until the next resync.",
+                          {'v': state.vrf_name, 's': sid_address, 'e': e})
+                continue
+            LOG.info("SRv6: domain %(d)s may reach %(s)s via main",
+                     {'d': state.domain_id, 's': sid_address})
+
+    def _remove_unwanted_sid_rules(self, state, wanted):
+        """Drop rules toward SIDs no route of the domain uses any more.
+
+        Only this VRF's rules are ever considered. An unreadable list
+        deletes nothing.
+        """
+        present = self._sid_rules_for(state.vrf_name)
+        if present is None:
+            return
+        for sid_address in sorted(present - set(wanted)):
+            LOG.info("SRv6: domain %(d)s no longer encapsulates to %(s)s; "
+                     "removing its rule", {'d': state.domain_id,
+                                           's': sid_address})
+            try:
+                priv_seg6.delete_sid_rule(state.vrf_name, sid_address)
+            except Exception as e:
+                LOG.debug("SRv6: removing rule %(v)s -> %(s)s: %(e)s",
+                          {'v': state.vrf_name, 's': sid_address, 'e': e})
 
     def sync_routes(self, domain_id, routes, locators, local_host):
         """Make the domain's table hold exactly the routes the payload names.
@@ -630,9 +740,18 @@ class Srv6LinuxDataplane:
         Only _apply_domain calls this. routes_updated stays on add_routes
         and remove_routes -- it carries a delta, not the whole domain, so
         reconciling against it would delete every route it did not mention.
+        The SID rules follow the same split: a rule left behind by an
+        incremental remove only lets the VRF reach its own domain's SID, and
+        the next full sync prunes it.
         """
-        wanted = self.add_routes(domain_id, routes, locators, local_host)
+        state = self.domains.get(domain_id)
+        if state is None:
+            return
+        wanted, rule_sids = self._install_routes(state, routes, locators,
+                                                 local_host)
+        self._ensure_sid_rules(state, rule_sids)
         self._remove_unwanted_routes(domain_id, wanted)
+        self._remove_unwanted_sid_rules(state, rule_sids)
 
     def _remove_unwanted_routes(self, domain_id, wanted):
         state = self.domains.get(domain_id)
