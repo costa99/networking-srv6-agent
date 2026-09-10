@@ -62,6 +62,8 @@ class DataplaneTestCaseBase(base.BaseTestCase):
         self.set_sysctl = sysctl.start()
         self.addCleanup(sysctl.stop)
 
+        self.priv_seg6.list_sid_rules.return_value = []
+        self.priv_seg6.list_vrf_names.return_value = []
         self.bridge = mock.Mock()
         self.bridge.get_port_name_list.return_value = []
         self.device = self.ip_lib.IPDevice.return_value
@@ -790,6 +792,136 @@ class TestPresentFunctionIds(DataplaneTestCaseBase):
         self.priv_seg6.list_vrf_names.side_effect = None
         self.priv_seg6.list_vrf_names.return_value = []
         self.assertEqual(set(), self.dp.present_function_ids())
+
+
+class TestSidRules(DataplaneTestCaseBase):
+    """4.6: the seal must not stop the domain's OWN encapsulated traffic.
+
+    Found at the two-node gate (REPORT-P5-two-node §9): after seg6
+    encapsulates a packet that arrived on a gateway port, the kernel routes
+    the outer IPv6 header in the same VRF, hit the unreachable default, and
+    dropped every packet -- Ip6InNoRoutes one per echo request, on both
+    nodes. The mocks cannot model where that lookup happens, which is why
+    the unit tests never saw it; these pin the fix instead.
+    """
+
+    RED = 'sv6vrf-7'
+
+    def setUp(self):
+        super().setUp()
+        self._with_domain()
+        self.locators = {'node2': 'fc00:0:2::/48', 'node3': 'fc00:0:3::/48'}
+
+    def _route(self, prefix, host, segments=None):
+        route = {'prefix': prefix, 'host': host, 'port_id': 'p'}
+        if segments is not None:
+            route['segments'] = segments
+        return route
+
+    def _added(self):
+        return [c[0] for c in self.priv_seg6.add_sid_rule.call_args_list]
+
+    def _deleted(self):
+        return [c[0] for c in self.priv_seg6.delete_sid_rule.call_args_list]
+
+    def test_one_rule_per_remote_node_not_per_route(self):
+        self.dp.add_routes(self.domain_id,
+                           [self._route('10.0.0.5/32', 'node2'),
+                            self._route('10.0.0.6/32', 'node2'),
+                            self._route('10.0.0.7/32', 'node3')],
+                           self.locators, 'node1')
+        self.assertEqual([(self.RED, 'fc00:0:2:7::'),
+                          (self.RED, 'fc00:0:3:7::')], self._added())
+
+    def test_a_local_route_needs_no_rule(self):
+        self.dp.add_routes(self.domain_id,
+                           [self._route('10.0.0.5/32', 'node1')],
+                           {'node1': LOCATOR}, 'node1')
+        self.priv_seg6.add_sid_rule.assert_not_called()
+
+    def test_an_existing_rule_is_not_added_again(self):
+        self.priv_seg6.list_sid_rules.return_value = [
+            (self.RED, 'fc00:0:2:7::')]
+        self.dp.add_routes(self.domain_id,
+                           [self._route('10.0.0.5/32', 'node2')],
+                           self.locators, 'node1')
+        self.priv_seg6.add_sid_rule.assert_not_called()
+
+    def test_the_kernel_spelling_matches_ours(self):
+        # `ip rule show` may print a SID differently from format_sid.
+        self.priv_seg6.list_sid_rules.return_value = [
+            (self.RED, 'fc00:0:2:7:0:0:0:0')]
+        self.dp.add_routes(self.domain_id,
+                           [self._route('10.0.0.5/32', 'node2')],
+                           self.locators, 'node1')
+        self.priv_seg6.add_sid_rule.assert_not_called()
+
+    def test_a_transit_first_segment_gets_no_rule(self):
+        # Letting a VRF reach an End SID lets a tenant craft an SRH through
+        # it toward another domain. Fail closed until P6 filters SRHs.
+        self.dp.add_routes(
+            self.domain_id,
+            [self._route('10.0.0.5/32', 'node2', ['fc00:0:3:fff0::'])],
+            self.locators, 'node1')
+        self.priv_seg6.add_sid_rule.assert_not_called()
+        self.assertTrue(self.priv_seg6.replace_seg6_route.called)
+
+    def test_an_add_failure_is_contained(self):
+        self.priv_seg6.add_sid_rule.side_effect = [RuntimeError('boom'),
+                                                   None]
+        self.dp.add_routes(self.domain_id,
+                           [self._route('10.0.0.5/32', 'node2'),
+                            self._route('10.0.0.7/32', 'node3')],
+                           self.locators, 'node1')
+        self.assertEqual(2, self.priv_seg6.add_sid_rule.call_count)
+
+    def test_the_incremental_path_never_prunes(self):
+        self.priv_seg6.list_sid_rules.return_value = [
+            (self.RED, 'fc00:0:3:7::')]
+        self.dp.add_routes(self.domain_id,
+                           [self._route('10.0.0.5/32', 'node2')],
+                           self.locators, 'node1')
+        self.priv_seg6.delete_sid_rule.assert_not_called()
+
+    def test_a_full_sync_prunes_rules_no_route_uses(self):
+        self.priv_seg6.list_sid_rules.return_value = [
+            (self.RED, 'fc00:0:2:7::'), (self.RED, 'fc00:0:3:7::'),
+            ('sv6vrf-9', 'fc00:0:3:9::')]
+        self.dp.sync_routes(self.domain_id,
+                            [self._route('10.0.0.5/32', 'node2')],
+                            self.locators, 'node1')
+        # Only this VRF's stale rule; another domain's is never touched.
+        self.assertEqual([(self.RED, 'fc00:0:3:7::')], self._deleted())
+
+    def test_an_unreadable_rule_list_prunes_nothing(self):
+        self.priv_seg6.list_sid_rules.side_effect = RuntimeError('boom')
+        self.dp.sync_routes(self.domain_id, [], self.locators, 'node1')
+        self.priv_seg6.delete_sid_rule.assert_not_called()
+
+    def test_delete_removes_only_this_vrfs_rules_before_the_device(self):
+        self.ip_lib.device_exists.return_value = True
+        self.priv_seg6.list_sid_rules.return_value = [
+            (self.RED, 'fc00:0:2:7::'), ('sv6vrf-9', 'fc00:0:2:9::')]
+        order = []
+        self.priv_seg6.delete_sid_rule.side_effect = \
+            lambda *a: order.append('rule')
+        self.priv_ip_lib.delete_interface.side_effect = \
+            lambda *a: order.append('vrf')
+        self.dp.delete_domain(self.domain_id)
+        self.assertEqual([(self.RED, 'fc00:0:2:7::')], self._deleted())
+        self.assertEqual(['rule', 'vrf'], order)
+
+    def test_a_rule_without_its_vrf_is_still_an_orphan(self):
+        # `[detached]` after the VRF device went: GC must still see it.
+        self.priv_seg6.list_vrf_names.return_value = ['sv6vrf-7']
+        self.priv_seg6.list_sid_rules.return_value = [
+            ('sv6vrf-9', 'fc00:0:2:9::')]
+        self.assertEqual({7, 9}, self.dp.present_function_ids())
+
+    def test_an_unreadable_rule_list_still_reports_the_vrfs(self):
+        self.priv_seg6.list_vrf_names.return_value = ['sv6vrf-7']
+        self.priv_seg6.list_sid_rules.side_effect = RuntimeError('boom')
+        self.assertEqual({7}, self.dp.present_function_ids())
 
 
 class TestSegments(DataplaneTestCaseBase):
