@@ -100,6 +100,16 @@ DEFAULT_BEHAVIOR = BEHAVIOR_END_DT46
 # this project's own "--mtu 1400" guidance stops being satisfiable.
 MAX_TE_VIA_HOSTS = 6
 
+# The metric of the `unreachable default` route that seals every domain VRF
+# (MIGRATION-PLAN.md 8.6). Without it a lookup that misses in the VRF table
+# falls through the l3mdev rule to `main`, where every domain's End.DT46 SID
+# lives -- measured on node 1, evidence/vrf-fallthrough.txt: a tenant's
+# gateway port resolved another tenant's SID and would have decapsulated
+# into that tenant's VRF. The value is the one the kernel's
+# Documentation/networking/vrf.rst uses: high enough that anything else in
+# the table wins, so it only ever answers a miss.
+VRF_UNREACHABLE_METRIC = 4278198272
+
 # seg6 encapsulation overhead: outer IPv6 (40) + SRH fixed part (8) +
 # 16 bytes per segment. With a single-segment list that is 64 bytes.
 SRH_FIXED_OVERHEAD = 48

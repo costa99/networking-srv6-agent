@@ -128,6 +128,73 @@ class TestSeg6EncapRoute(Seg6ArgvTestCase):
         self.assertEqual('-6', self.argv[0])
 
 
+class TestVrfSeal(Seg6ArgvTestCase):
+    """MIGRATION-PLAN.md 8.6: the route that closes the fall-through."""
+
+    def test_v4(self):
+        seg6.replace_unreachable_default(13783)
+        self.assertEqual(
+            ['route', 'replace', 'unreachable', 'default',
+             'metric', '4278198272', 'table', '13783'],
+            self.argv)
+
+    def test_v6(self):
+        seg6.replace_unreachable_default(13783, family_v6=True)
+        self.assertEqual('-6', self.argv[0])
+        self.assertEqual('13783', self.argv[-1])
+
+    def test_reconciliation_never_sees_it(self):
+        """It carries no `encap seg6`, so reconciliation cannot delete it.
+
+        The lines are what `ip route show table 13783` printed on node 1,
+        plus the seal.
+        """
+        self.ip_route_cmd.return_value = (
+            'unreachable default metric 4278198272 \n'
+            '10.90.1.0/24 dev svp-3783-4 proto kernel scope link '
+            'src 10.90.1.1 \n'
+            '10.90.2.21  encap seg6 mode encap segs 1 [ fc00:0:2:ec7:: ] '
+            'dev enp2s0f1 scope link \n')
+        self.assertEqual(['10.90.2.21'], seg6.list_seg6_routes(13783))
+
+
+class TestFlushTable(Seg6ArgvTestCase):
+
+    def test_argv(self):
+        seg6.flush_table(10007, family_v6=True)
+        self.assertEqual(['-6', 'route', 'flush', 'table', '10007'],
+                         self.argv)
+
+    def test_an_error_is_tolerated(self):
+        self.ip_route_cmd.side_effect = \
+            seg6.processutils.ProcessExecutionError('boom')
+        self.assertIsNone(seg6.flush_table(10007))
+
+
+class TestListVrfNames(Seg6ArgvTestCase):
+
+    def test_parses_one_line_per_device(self):
+        # Verbatim shape of `ip -o link show type vrf` on node 1.
+        self.ip_route_cmd.return_value = (
+            '56: sv6vrf-3579: <NOARP,MASTER,UP,LOWER_UP> mtu 65575 qdisc '
+            'noqueue state UP mode DEFAULT group default qlen 1000\\    '
+            'link/ether 12:34:56:78:9a:bc brd ff:ff:ff:ff:ff:ff\n'
+            '57: sv6vrf-3783: <NOARP,MASTER,UP,LOWER_UP> mtu 65575 qdisc '
+            'noqueue state UP mode DEFAULT group default qlen 1000\n')
+        self.assertEqual(['sv6vrf-3579', 'sv6vrf-3783'],
+                         seg6.list_vrf_names())
+        self.assertEqual(['-o', 'link', 'show', 'type', 'vrf'], self.argv)
+
+    def test_no_vrfs(self):
+        self.ip_route_cmd.return_value = ''
+        self.assertEqual([], seg6.list_vrf_names())
+
+    def test_a_failure_is_not_an_empty_list(self):
+        # The agent garbage-collects from this list.
+        self.ip_route_cmd.side_effect = RuntimeError('boom')
+        self.assertRaises(RuntimeError, seg6.list_vrf_names)
+
+
 class TestLocatorRoute(Seg6ArgvTestCase):
 
     def test_locator_route_lands_in_table_main(self):

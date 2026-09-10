@@ -1,0 +1,22 @@
+# networking-srv6-agent devstack settings. See plugin.sh.
+
+NETWORKING_SRV6_AGENT_DIR=${NETWORKING_SRV6_AGENT_DIR:-$DEST/networking-srv6-agent}
+
+# This node's SRv6 locator. REQUIRED on every node running q-agt, and
+# unique per node: a shared locator means two nodes answer for the same
+# SIDs. The testbed uses fc00:0:1::/48 (node 1) and fc00:0:2::/48 (node 2).
+SRV6_LOCATOR=${SRV6_LOCATOR:-}
+
+# The NIC holding this node's IPv6 underlay: the nexthop device of every
+# encap route, and where seg6_enabled is asserted.
+SRV6_UNDERLAY_INTERFACE=${SRV6_UNDERLAY_INTERFACE:-}
+
+# Server side.
+SRV6_FUNCTION_ID_RANGES=${SRV6_FUNCTION_ID_RANGES:-1:4095}
+
+# EVERY node: the agent derives a domain's table from the same base as the
+# server. A compute-only node that lacked it would silently use the default
+# and disagree with the server the day the default was changed.
+SRV6_VRF_TABLE_BASE=${SRV6_VRF_TABLE_BASE:-10000}
+
+SRV6_RESYNC_INTERVAL=${SRV6_RESYNC_INTERVAL:-300}

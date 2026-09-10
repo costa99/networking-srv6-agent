@@ -1,0 +1,68 @@
+[build-system]
+requires = ["pbr>=6.1.1"]
+build-backend = "pbr.build"
+
+[project]
+name = "networking-srv6-agent"
+description = "SRv6 connectivity and traffic engineering for OpenStack Neutron"
+readme = {file = "README.rst", content-type = "text/x-rst"}
+license = {text = "Apache-2.0"}
+# pbr supplies both: the version from git, the dependencies from
+# requirements.txt. Keeping requirements.txt authoritative is the OpenStack
+# convention and is what the DevStack plugin will read.
+dynamic = ["version", "dependencies"]
+# neutron 29.x, not the >= 3.9 this project first claimed: a package that
+# depends on neutron cannot run on a Python neutron itself refuses.
+requires-python = ">=3.11"
+classifiers = [
+    "Environment :: OpenStack",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3 :: Only",
+]
+
+[tool.setuptools]
+packages = ["networking_srv6_agent"]
+
+# --- Entry points --------------------------------------------------------
+#
+# Only groups whose targets EXIST are live. The rest are commented and get
+# uncommented by the phase that creates them (MIGRATION-PLAN.md section 5).
+#
+# This is a safety measure, not tidiness: an entry point pointing at a
+# missing module does not fail quietly. `service_plugins = srv6` with no
+# plugin class stops neutron-server from starting, and the traceback names
+# an ImportError rather than saying the feature is half-built.
+#
+# They live here rather than in setup.cfg because that is where pbr reads
+# them under PEP 621 -- neutron and networking-bgpvpn both keep a two-line
+# setup.cfg and declare everything in this file.
+
+[project.entry-points."oslo.config.opts"]
+"networking-srv6-agent" = "networking_srv6_agent.common.config:list_opts"
+
+# The module:attr form here is a PATH convention, not an attribute lookup:
+# neutron string-splits it into a directory (neutron/db/migration/cli.py,
+# _get_root_versions_dir) and never imports it. What it needs on disk is
+# env.py, script.py.mako and the HEAD files beside a versions/ directory.
+[project.entry-points."neutron.db.alembic_migrations"]
+"networking-srv6-agent" = "networking_srv6_agent.db.migration:alembic_migrations"
+
+# --- P4: service plugin and API ------------------------------------------
+[project.entry-points."neutron.service_plugins"]
+"srv6" = "networking_srv6_agent.services.plugin:Srv6Plugin"
+
+[project.entry-points."neutron.policies"]
+"networking-srv6-agent" = "networking_srv6_agent.policies:list_rules"
+
+[project.entry-points."oslo.policy.policies"]
+"networking-srv6-agent" = "networking_srv6_agent.policies:list_rules"
+
+# --- P5: agent and dataplane ---------------------------------------------
+[project.entry-points."neutron.agent.l2.extensions"]
+"srv6" = "networking_srv6_agent.agent.agent_extension:Srv6AgentExtension"
