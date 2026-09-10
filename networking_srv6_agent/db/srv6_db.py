@@ -211,5 +211,18 @@ def get_host_locators(context):
             for row in context.session.query(SRv6HostLocator).all()}
 
 
+@db_api.CONTEXT_READER
+def get_host_locator_details(context):
+    """Every registered node with its last report time, sorted by host.
+
+    What the read-only srv6_locators API serves: the answer to "which
+    compute nodes run the agent, and when did each last check in?".
+    """
+    return [{'host': row.host, 'locator': row.locator,
+             'updated_at': row.updated_at}
+            for row in context.session.query(SRv6HostLocator).order_by(
+                SRv6HostLocator.host).all()]
+
+
 class NoFunctionIdAvailable(Exception):
     """The configured function id pool is exhausted."""

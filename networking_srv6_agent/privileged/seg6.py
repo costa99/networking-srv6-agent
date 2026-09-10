@@ -43,6 +43,7 @@ from oslo_log import log as logging
 import pyroute2
 
 from networking_srv6_agent._i18n import _
+from networking_srv6_agent.common import constants
 from networking_srv6_agent import privileged
 
 
@@ -191,6 +192,60 @@ def list_seg6_routes(table, family_v6=False):
         if fields:
             prefixes.append(fields[0])
     return prefixes
+
+
+def replace_unreachable_default(table, family_v6=False):
+    """Seal a VRF table: a lookup that misses ends here, not in `main`.
+
+        ip [-6] route replace unreachable default metric 4278198272 \
+            table <table>
+
+    Without it the l3mdev rule (pref 1000) lets a miss continue to `main`
+    (pref 32766), which holds every domain's End.DT46 SID: a tenant's VM
+    could address another domain's SID and be decapsulated into that VRF
+    (MIGRATION-PLAN.md 8.6). It carries no `encap seg6`, so
+    list_seg6_routes never returns it and route reconciliation never
+    deletes it.
+    """
+    args = ['-6'] if family_v6 else []
+    args += ['route', 'replace', 'unreachable', 'default',
+             'metric', str(constants.VRF_UNREACHABLE_METRIC),
+             'table', str(table)]
+    return ip_route_cmd(args)
+
+
+def flush_table(table, family_v6=False):
+    """Empty a VRF's table, tolerating one that is already empty.
+
+    Deleting the VRF device does not do this. The unreachable default has
+    no device at all, and the encap routes point at the underlay rather
+    than the VRF, so both outlive the device -- and a domain later handed
+    the same function id would inherit them.
+    """
+    args = ['-6'] if family_v6 else []
+    args += ['route', 'flush', 'table', str(table)]
+    try:
+        return ip_route_cmd(args)
+    except processutils.ProcessExecutionError as e:
+        LOG.debug("flushing table %(t)s: %(e)s", {'t': table, 'e': e})
+        return None
+
+
+def list_vrf_names():
+    """The name of every VRF device on the node.
+
+    Parses `ip -o link show type vrf`, whose lines look like
+        56: sv6vrf-3579: <NOARP,MASTER,UP,LOWER_UP> mtu 65575 ...
+    Raises on failure: the caller garbage-collects from this list, and an
+    unreadable list must never read as "no VRFs".
+    """
+    out = ip_route_cmd(['-o', 'link', 'show', 'type', 'vrf'])
+    names = []
+    for line in out.splitlines():
+        fields = line.split(':')
+        if len(fields) > 1 and fields[1].strip():
+            names.append(fields[1].strip().split('@')[0])
+    return names
 
 
 def route_exists(prefix, table, family_v6=False):

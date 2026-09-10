@@ -152,8 +152,8 @@ the delete, not by reproducing the hook framework.
 | Service plugin | 250 | CRUD + lifecycle + the ported driver logic |
 | DB models + CRUD for `srv6_domain` and its associations | 250 | model the shape on `bgpvpn_db.py`'s net-assoc methods, without RT/RD parsing or the filter hooks |
 | Alembic migration | 80 | fresh initial revision; **not** a port of the two existing ones |
-| Policies | 120 | domain = project-scoped; TE + locators = admin-only |
-| `setup.cfg`, entry points, devstack plugin, docs | 60 | |
+| Policies | 120 | domain = project-scoped, `sid_function` admin-only to read; TE + locators = admin-only |
+| `pyproject.toml`, entry points, devstack plugin, docs | 60 | |
 
 ### 3.4 Tests
 
@@ -185,19 +185,29 @@ migration retargets two foreign keys.
 srv6_domain                     project-scoped, many per project (8.2)
   id, name, project_id
   srv6_behavior      (End.DT46 - the only valid value, 8.3; create-only)
-  sid_function       (read-only, server-allocated)
+  sid_function       (read-only, server-allocated; ADMIN-only to read)
   networks           (via associations)
 
-  /v2.0/srv6/domains/{id}/network_associations      project-scoped
+  /v2.0/srv6_domains
+  /v2.0/srv6_domains/{id}/network_associations      project-scoped; the network must
+                                                    belong to the domain's project (8.1)
 
 srv6_te_path                    ADMIN ONLY, top level — a fabric fact, not a tenant fact
-  id, domain_id, destination_host, via_hosts[], segments[] (read-only)
-  /v2.0/srv6/te_paths
+  id, domain_id, via_hosts[], segments[] (read-only)
+  selector, exactly one of (8.5):
+    destination_host      all of the domain's traffic toward that compute node
+    destination_port_id   traffic toward one VM — that port's fixed IPs only
+  precedence per route: port path > host path > direct
+  /v2.0/srv6_te_paths
 
 srv6_locator                    ADMIN ONLY, read-only
   host, locator, updated_at
-  /v2.0/srv6/locators
+  /v2.0/srv6_locators
 ```
+
+URLs follow `P4-PLAN.md` §1.3: no path prefix, and every collection prefixed `srv6_`. Neutron
+derives the policy rule name from the collection name, so a bare `domains` would register a global,
+cross-service `create_domain` rule.
 
 Three decisions carried over from the TE design work:
 
@@ -224,8 +234,9 @@ Three decisions carried over from the TE design work:
 
 Each phase leaves the tree importable and testable.
 
-**P1 — Skeleton and packaging.** `setup.cfg`, `tox.ini`, `requirements.txt`, licence headers.
-Verify the package imports and that every *live* entry point resolves.
+**P1 — Skeleton and packaging.** `pyproject.toml`, `setup.cfg`, `.stestr.conf`, `tox.ini`,
+`requirements.txt`, licence headers. Verify the package imports and that every *live* entry point
+resolves.
 
 ```
 [neutron.service_plugins]        srv6 = networking_srv6.services.plugin:Srv6Plugin
@@ -235,13 +246,23 @@ Verify the package imports and that every *live* entry point resolves.
 [oslo.config.opts]               networking-srv6 = networking_srv6.common.config:list_opts
 ```
 
-> Write `setup.cfg` by hand and check the entry points land in the built dist. The
-> `networking-bgpvpn` checkout's `setup.cfg` is truncated to 36 bytes on every branch and has lost
-> its `entry_points` section — the installed dist is the only surviving copy. Do not inherit that
-> failure mode.
+> **Declare these in `pyproject.toml`, not `setup.cfg`.** An earlier draft of this section read the
+> `networking-bgpvpn` checkout's 36-byte `setup.cfg` as truncated — as if it had *lost* its
+> `entry_points` section and the installed dist were the only surviving copy. That was a
+> misdiagnosis, and it cost a rewrite. Under pbr ≥ 6.1.1 with `build-backend = "pbr.build"`,
+> metadata and entry points live in `pyproject.toml` as PEP 621 `[project.entry-points."…"]`
+> tables, and `setup.cfg` is *supposed* to be two lines: `[metadata]` and `name`. Both
+> `networking-bgpvpn` and `/opt/stack/neutron` are laid out exactly that way, and bgpvpn's
+> `pyproject.toml` tables match its installed `entry_points.txt` one for one. Nothing was lost.
+>
+> The real hazard is the opposite one: `[entry_points]` and `description_file` are pbr's *older*
+> `setup.cfg` dialect, and if nothing enables pbr, setuptools ignores both **silently** — a
+> package that installs and imports fine while every entry point is missing. So the check still
+> stands: build the dist and read `entry_points.txt` out of the wheel. Do not take
+> `pip install -e .` succeeding as evidence.
 
 **Entry points are enabled per phase, not up front.** Only groups whose targets exist are live;
-the rest sit commented in `setup.cfg` under the phase that will create them. An entry point naming
+the rest sit commented in `pyproject.toml` under the phase that will create them. An entry point naming
 a missing module does not fail quietly — `service_plugins = srv6` with no plugin class stops
 neutron-server from starting, and the traceback names an `ImportError` rather than saying the
 feature is half-built. Each phase below ends by uncommenting its own group and confirming it
@@ -269,23 +290,70 @@ Carries three items from §8: `srv6_behavior` offers **only** `End.DT46` (§8.3)
 associations are not implemented at all rather than implemented-and-rejected (§8.1); and network
 association validation rejects both `router:external` networks **and networks that already have a
 Neutron router interface** — the check the original design specified and never got (§8.1).
+It also requires the network to belong to the domain's project (shared networks allowed, §8.1),
+makes `sid_function` admin-only to read, and ports the RPC server half (`P4-PLAN.md` §1.1).
 
-**P5 — Agent and dataplane.** Port `dataplane.py` and `agent_extension.py` with their tests, and
-the RPC. This is the phase that reproduces the working system. Ends by enabling
-`neutron.agent.l2.extensions` — the last one, at which point the package becomes installable and
-functional.
+**P5 — Agent and dataplane.** Port `dataplane.py` and `agent_extension.py` with their tests. The RPC
+server half moved to P4, since P4's plugin cannot import without it (`P4-PLAN.md` §1.1). This is the
+phase that reproduces the working system. Ends by enabling `neutron.agent.l2.extensions` — the last
+one, at which point the package becomes installable and functional. Detailed in `P5-PLAN.md`,
+which adds four changes beyond the port and the seal below:
+
+- **Flush the VRF table on delete.** Deleting the VRF device cannot remove the deviceless
+  unreachable default, and probably not the encap routes either.
+- **Garbage-collect from the kernel.** The ported GC diffs in-memory state, which is empty after
+  every restart, so a domain deleted while the agent was down is never collected.
+- **Consume `segments`.** The agent-side half of TE moves here from P6, so P6 is server-only and the
+  payload version never has to change.
+- **Deploy by re-stacking.** A devstack plugin, and both nodes re-stacked on it (§6).
 
 Add the `driver_type` check in `initialize()` (§8.4): it is already a parameter and is never read,
-so a linuxbridge agent fails with an obscure `AttributeError` from `request_int_br()` instead of a
-clear refusal.
+so a non-OVS agent that loads the extension — macvtap or SR-IOV — fails obscurely instead of being
+refused with a clear message.
+
+Seal every domain VRF (§8.6): after the VRF exists, `ensure_vpn` installs
+`unreachable default metric 4278198272` in its table for **both** families, through the existing
+`privileged/seg6.py` `ip_route_cmd` entrypoint — no new privileged code. It must survive
+`_remove_unwanted_routes`: confirm `list_seg6_routes` ignores non-encap routes, and test it.
 
 **Gate:** the existing two-node lifecycle — domain create, network association, kernel state, VM
 to VM ping across nodes, delete, cleanup — passes exactly as it does today under BGPVPN. Compare
-against `implementation/srv6-plugin/evidence/` rather than judging by eye.
+against `implementation/srv6-plugin/evidence/` rather than judging by eye; the one intended
+difference is the two unreachable defaults per VRF table. Rerun the probes in
+`evidence/vrf-fallthrough.txt`: the three cross-domain lookups must now return `unreachable`, and
+the in-domain control lookup must be unchanged.
 
 **P6 — Traffic engineering.** The TE path resource, segment-list construction, per-route MTU. The
 design work is already done in the TE plan; the only change here is that the resource is top level
 from the start, which makes the descriptor and plugin methods simpler than that plan describes.
+
+Plus the per-VM selector (§8.5):
+
+- **Model.** `SRv6TePath.destination_host` becomes nullable; add `destination_port_id`, FK →
+  `ports.id` `ondelete='CASCADE'` (a path for a deleted VM is meaningless); a check constraint that
+  exactly one selector is set; a second unique constraint `(domain_id, destination_port_id)`. A **new
+  expand revision**, not an edit to the initial one. `get_te_paths_for_vpn`'s `{host: vias}` becomes
+  a structure holding both maps.
+- **Validation — a 400, never a silent `segments: []`.** Every `via_host` must be in
+  `get_host_locators`; `len(via_hosts) <= MAX_TE_VIA_HOSTS` (defined since the TE commit, never
+  enforced); the port must be on a network associated with the domain. Do **not** reject
+  `via == destination`: it is a harmless detour, and on two nodes it is the only way to put a
+  depth-2 SRH on the wire (`TE-DEPTH2-2026-09-01.md`).
+- **Payload.** `_routes_for_domain` attaches `segments` — transit End SIDs,
+  `format_sid(locator, NODE_END_FUNCTION_ID)` — per route, port path over host path over none. VM
+  migration needs no new trigger: `registry_port_updated` already re-pushes the domain when
+  `binding:host_id` changes, and resolution runs at build time.
+- **Agent.** Only the per-route MTU check, `check_mtu(mtu, segment_count=len(segs))`, once routes
+  carry `network_id`. The segment consumer — `segments + [remote_sid]`, dropping leading segments
+  equal to this node's own End SID — already landed in P5 (`P5-PLAN.md` §1.2, §4.5), so P6 is
+  otherwise server-only.
+- **Policy.** Every verb and every `enforce_policy` attribute — `destination_host`,
+  `destination_port_id`, `via_hosts`, `segments` — is `rules.ADMIN`, in the same commit as the
+  descriptor.
+
+**Gate (two nodes):** a per-VM path with `via=[node2]` toward a VM on node 2 puts a depth-2 SRH on
+the underlay for that VM's address only, while a second VM on node 2 stays depth-1; migrate the
+steered VM and the route follows. Real waypoint avoidance stays blocked on a third node.
 
 **P7 — Coexistence proof.** The point of the exercise: `networking-bgpvpn` with the **bagpipe**
 driver and `networking-srv6` enabled simultaneously, both functional. This is the acceptance test
@@ -297,11 +365,13 @@ that the original arrangement could not pass, and it belongs in the evidence tre
 
 Node 1 = `ale` / 192.168.0.160 (controller + compute), node 2 = this workstation / 192.168.0.107.
 
-- **`local.conf`**: add `networking-srv6` to `enable_plugin`; `service_plugins` gains `srv6`;
-  remove `service_provider = BGPVPN:SRv6:...`. If BGPVPN stays enabled it reverts to its own
-  driver, which is the coexistence case.
-- **Agent config**: `[agent] extensions = srv6` replaces `bgpvpn_srv6`. Note the recorded trap —
-  appending a second `[agent]` section splits an existing one and silently drops the earlier keys.
+- **Deploy by re-stacking** (decided 2026-09-10; `P5-PLAN.md` §6–7). The repo ships a devstack
+  plugin, and `node{1,2}-srv6-agent-local.conf` are the stock confs plus `enable_plugin
+  networking-srv6-agent …`, `SRV6_LOCATOR` and `SRV6_UNDERLAY_INTERFACE`. The stock confs keep
+  upstream BGPVPN with its Dummy driver, which is half of the coexistence case.
+- **Agent config** is written by devstack's `configure_l2_agent`, an `iniset`. That removes the
+  recorded trap — appending a second `[agent]` section splits the existing one and silently drops
+  its earlier keys.
 - **The neutron-lib fork can be dropped** once nothing imports `bgpvpn_srv6*`. Removing it also
   removes the layered-venv recipe for running unit tests.
 - **`devstack@q-agt` does not restart cleanly**: `systemctl restart` leaves the unit
@@ -310,8 +380,9 @@ Node 1 = `ale` / 192.168.0.160 (controller + compute), node 2 = this workstation
   ~50 s.
 - **`devstack@q-svc` is not currently running** on node 1 — never started since a reboot rather
   than crashed.
-- Keep the old BGPVPN-based deployment reachable (a second branch, or a snapshot) until P5's gate
-  passes. Do not migrate the testbed and then discover the dataplane regressed.
+- Keep the old BGPVPN-based deployment reachable until P5's gate passes. Do not migrate the testbed
+  and then discover the dataplane regressed. The way back is the documented two-pass workflow —
+  stock conf, `./stack.sh`, `inject-srv6.sh` — then recreate the VPN.
 
 ---
 
@@ -358,6 +429,17 @@ validating the outcome. Rejecting it makes the island semantics true instead of 
 works; north-south (floating IPs, SNAT) and inter-domain routing do not. Instances keep their
 ordinary Neutron connectivity on their other interfaces, so this is a restriction on what the
 domain carries, not on what a VM can do.
+
+**Ownership (decided 2026-09-10).** A network can join a domain only if the domain's project owns
+it — the comparison bgpvpn makes at `networking_bgpvpn/neutron/services/plugin.py:207`, and which
+this plan originally left out. Policy does not replace it: the association's policy authorises the
+caller against the association's own `project_id` (the parent-owner personas cannot be used —
+neutron resolves them only for four hard-coded parent types, `P4-PLAN.md` §5), and says nothing
+about who owns the network. The association takes the domain's `project_id`, so an
+admin can act on a tenant's behalf. **Shared networks are allowed** if the domain's project owns
+them. Consequence: other projects' instances on that shared network join the domain, and the gateway
+port answers for its gateway on every node — the owner chose that by sharing it. Details in
+`P4-PLAN.md` §4.3.
 
 #### Implementing router associations later — how, and what it costs
 
@@ -430,10 +512,79 @@ driver.
 
 Two things to add, because the restriction is currently invisible:
 
-- **Check `driver_type` in `initialize()`.** It is already a parameter and is never read. Under
-  linuxbridge `request_int_br()` does not exist, so the failure is an obscure `AttributeError`
-  rather than a clear message. Refuse to initialise on an unsupported agent and say why.
+- **Check `driver_type` in `initialize()`.** It is already a parameter and is never read. Refuse
+  anything other than `ovs_const.EXTENSION_DRIVER_TYPE`, the value the OVS agent passes
+  (`ovs_neutron_agent.py:338-339`), and say why. Correction (2026-09-10): the neutron on this
+  testbed has **no linuxbridge driver** at all — `plugins/ml2/drivers/` holds macvtap, mech_sriov,
+  openvswitch and ovn. So the agents that can load this extension by mistake are macvtap (which
+  passes `'macvtap'`) and SR-IOV, not linuxbridge.
 - **State the ML2/OVS-only restriction in the README and the docs.** Under **ML2/OVN — the default
   in modern OpenStack — there is no Neutron L2 agent at all**, so this plugin has no host and
   cannot run. That is the honest boundary of the claim, and it is very likely why the sibling
   project `costa99/networking-srv6` pursued an OVN-native design instead.
+
+### 8.5 No admin VRF — steering is an admin-only API over tenant VRFs
+
+Resolved 2026-09-10. The proposal: a second class of VRF, owned by the admin and present on every
+node, beside the per-domain tenant VRFs — tenants reach only their own machines, the admin has full
+control. The clarified intent: the admin, and only the admin, chooses which traffic to steer, down
+to a single destination VM; forces it through named nodes or keeps it off a node; and never reaches
+into a tenant VM.
+
+**Standards are not the obstacle.** RFC 8986 lets a node hold any number of `End.DT46` SIDs, one per
+VRF, and RFC 9252 defines a global-table service beside VPNs. RFC 8402 defines the SR domain as
+under one administrator — which it is here — and the per-node admin state the architecture calls
+for already exists: each node's `End` SID `<locator>:fff0::`.
+
+**Why it is still not built: control is not reach.** What was asked for is *control*. Steering a
+domain's traffic happens inside that domain's own VRF, by changing the segment list on its encap
+routes; `srv6_te_path` does exactly that and is admin-only. An admin VRF adds nothing to control. It
+adds only *reach* — a data-plane path for the admin's own packets — and reach into tenant VMs was
+ruled out. It would not hold together anyway: Neutron allows overlapping tenant addresses, so one
+table cannot route to two tenants' `10.0.0.5`; replies need a route back to the admin in every
+tenant VRF, which makes the admin VRF reachable from every tenant; and one-way reach then needs a
+stateful firewall. It would also end the island semantics of §8.1.
+
+What the requirement becomes:
+
+- **A per-VM selector.** `srv6_te_path` gains `destination_port_id` beside `destination_host`;
+  precedence port path > host path > direct (§4, P6).
+- **"Avoid a node" is an explicit waypoint list.** In this flat underlay the default path is direct,
+  and a compute node lies on a path only if a TE path names it — so avoiding it means not listing
+  it. Constraint-based paths ("exclude X, compute the rest") need a topology model and path
+  computation, and are not built.
+
+**Out of scope:** steering the hosts' own traffic in the main table. That is the one reading that
+genuinely needs a global-table service, and a bad path there can cut a node off from the controller
+— after which the agent can no longer receive the correction.
+
+### 8.6 Domain VRFs must be sealed — today a miss falls through to `main`
+
+Found 2026-09-10 on the running BGPVPN-based testbed; the ported dataplane inherits it. RFC 8754
+§5.1 requires packets addressed to SIDs from outside the trusted domain to be dropped, and tenant VMs
+are outside it. Evidence: `implementation/srv6-plugin/evidence/vrf-fallthrough.txt`.
+
+The mechanism: the VRF's table is consulted through the `l3mdev` rule at pref 1000, and a miss there
+does not stop the lookup — rule processing continues to `main` at 32766. `ensure_vpn` installs no
+default route in the VRF table, so every miss falls through, and `main` holds every domain's
+`End.DT46` SID. Kernel lookups on node 1, as if ingressing tenant 3783's gateway port:
+
+```
+ip -6 route get fc00:0:1:dfb:: from fe80::1 iif svp-3783-5
+  → encap seg6local action End.DT46 vrftable 13579        # into ANOTHER tenant's VRF
+ip -4 route get 192.168.0.107 from 10.90.2.21 iif svp-3783-5
+  → dev enp2s0f1                                           # out to the underlay
+ip -6 route get fc00:0:2:dfb:: from fe80::1 iif svp-3783-5
+  → via fd00:aa::2 dev enp2s0f1                            # to node 2's copy of that SID
+```
+
+So a VM in one domain can address another domain's SID, on its own node or across the underlay, and
+be decapsulated into that domain's VRF. The default security group allows all egress and port
+security checks only the source, so nothing in OVS stops it. These are FIB decisions; no packet has
+been injected to confirm the path end to end.
+
+**Fix (P5):** an `unreachable default metric 4278198272` in every VRF table, both families — the
+idiom in the kernel's `Documentation/networking/vrf.rst`. Every steering guarantee in §8.5 depends
+on it: a path that can be bypassed by addressing a SID directly is not a guarantee. Until P5 lands,
+the same two commands can be applied by hand per VRF on the testbed; `networking-bgpvpn` itself is
+not changed.
