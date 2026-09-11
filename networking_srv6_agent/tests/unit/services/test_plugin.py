@@ -390,6 +390,8 @@ class PluginUnitTestCaseBase(base.BaseTestCase):
         get_plugin.start()
         self.addCleanup(get_plugin.stop)
         self.srv6_db.get_host_locators.return_value = {}
+        self.te_db.get_te_paths_for_domain.return_value = {'by_port': {},
+                                                           'by_host': {}}
         self.plugin = plugin.Srv6Plugin()
         self.agent_rpc = self.plugin.agent_rpc
         self.ctx = mock.Mock(is_admin=False, project_id='p1')
@@ -469,11 +471,14 @@ class TestPortSelection(PluginUnitTestCaseBase):
         self.assertFalse(self.plugin._port_is_relevant(
             _port(status=n_const.PORT_STATUS_DOWN)))
 
-    def test_route_for_an_ipv4_port_keeps_its_port_id(self):
+    def test_route_for_an_ipv4_port_keeps_its_port_and_network(self):
+        # port_id for per-VM TE precedence, network_id for the agent's
+        # per-route MTU check (P6-PLAN.md 3).
         port = _port()
         routes = self._routes(port)
         self.assertEqual([{'prefix': '10.0.0.5/32', 'host': 'node1',
-                           'port_id': port['id']}], routes)
+                           'port_id': port['id'], 'network_id': 'net1'}],
+                         routes)
 
     def test_route_for_an_ipv6_port(self):
         routes = self._routes(_port(fixed_ips=[{'ip_address':
@@ -614,7 +619,8 @@ class TestPortEvents(PluginUnitTestCaseBase):
             self._payload(port, dict(port, status=n_const.PORT_STATUS_DOWN)))
         self.agent_rpc.routes_updated.assert_called_once_with(
             self.ctx, 'd1', add=[{'prefix': '10.0.0.5/32', 'host': 'node1',
-                                  'port_id': port['id']}])
+                                  'port_id': port['id'],
+                                  'network_id': 'net1'}])
 
     def test_a_moved_port_is_withdrawn_before_it_is_advertised(self):
         port = _port(**{portbindings.HOST_ID: 'node2'})

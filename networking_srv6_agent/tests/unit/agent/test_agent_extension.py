@@ -230,7 +230,8 @@ class TestApplyDomain(AgentExtensionTestCaseBase):
                                         locators={'node3': 'fc00:0:3::/48'}))
         self.ext.dataplane.sync_routes.assert_called_once_with(
             self.domain_id, routes,
-            {'node2': 'fc00:0:2::/48', 'node3': 'fc00:0:3::/48'}, HOST)
+            {'node2': 'fc00:0:2::/48', 'node3': 'fc00:0:3::/48'}, HOST,
+            mtus={})
 
     def test_multi_segment_network_uses_the_first_segment(self):
         self.ext.vlan_manager.get_segments.return_value = {
@@ -340,9 +341,9 @@ class TestRpcHandlers(AgentExtensionTestCaseBase):
         self.ext.domains[self.domain_id] = _payload(self.domain_id)
         order = []
         self.ext.dataplane.remove_routes.side_effect = \
-            lambda *a: order.append('remove')
+            lambda *a, **kw: order.append('remove')
         self.ext.dataplane.add_routes.side_effect = \
-            lambda *a: order.append('add')
+            lambda *a, **kw: order.append('add')
         self.ext.routes_updated(self.ext.context, domain_id=self.domain_id,
                                 add=[{'prefix': '10.0.0.5/32'}],
                                 remove=[{'prefix': '10.0.0.6/32'}])
@@ -517,6 +518,111 @@ class TestKernelGarbageCollection(AgentExtensionTestCaseBase):
         self.ext._sync_state()
         self.assertEqual(2, self.ext.dataplane.delete_domain.call_count)
         self.assertTrue(self.ext.dataplane.ensure_domain.called)
+
+
+class TestEdgeFilterTriggers(AgentExtensionTestCaseBase):
+    """P6-PLAN.md 4.1: when the edge filter is (re)applied."""
+
+    LOC2 = 'fc00:0:2::/48'
+    LOC3 = 'fc00:0:3::/48'
+
+    def _applied(self):
+        return [c[0][0] for c in
+                self.ext.dataplane.ensure_edge_filter.call_args_list]
+
+    def test_a_resync_applies_it_over_every_locator(self):
+        self.cctxt.call.return_value = [
+            _payload(self.domain_id, locators={'node2': self.LOC2}),
+            _payload(uuidutils.generate_uuid(), function_id=8,
+                     locators={'node3': self.LOC3})]
+        self.ext._sync_state()
+        self.assertEqual([[self.LOC2, self.LOC3]], self._applied())
+
+    def test_every_resync_reapplies_it_even_unchanged(self):
+        # It restores a table deleted by hand (the G7 control does that).
+        self.cctxt.call.return_value = [
+            _payload(self.domain_id, locators={'node2': self.LOC2})]
+        self.ext._sync_state()
+        self.ext._sync_state()
+        self.assertEqual(2, len(self._applied()))
+
+    def test_a_server_with_no_domains_still_gets_it_applied(self):
+        self.ext._sync_state()
+        self.assertEqual([[]], self._applied())
+
+    def test_it_is_applied_before_any_domain(self):
+        order = []
+        self.ext.dataplane.ensure_edge_filter.side_effect = \
+            lambda *a: order.append('filter')
+        self.ext.dataplane.ensure_domain.side_effect = \
+            lambda *a: order.append('domain')
+        self.cctxt.call.return_value = [
+            _payload(self.domain_id, locators={'node2': self.LOC2})]
+        self.ext._sync_state()
+        self.assertEqual(['filter', 'domain'], order)
+
+    def test_a_failed_sync_leaves_it_alone(self):
+        self.cctxt.call.side_effect = Exception('no route to server')
+        self.ext._sync_state()
+        self.ext.dataplane.ensure_edge_filter.assert_not_called()
+
+    def test_a_fanout_with_a_new_locator_applies_it(self):
+        self.ext.locators = {'node2': self.LOC2}
+        self.ext.domain_updated(
+            self.ext.context,
+            domain=_payload(self.domain_id, locators={'node3': self.LOC3}))
+        self.assertEqual([[self.LOC2, self.LOC3]], self._applied())
+
+    def test_a_fanout_with_a_changed_locator_applies_it(self):
+        self.ext.locators = {'node2': self.LOC2}
+        self.ext.domain_updated(
+            self.ext.context,
+            domain=_payload(self.domain_id, locators={'node2': self.LOC3}))
+        self.assertEqual([[self.LOC3]], self._applied())
+
+    def test_a_fanout_with_known_locators_does_not(self):
+        self.ext.locators = {'node2': self.LOC2}
+        self.ext.domain_updated(
+            self.ext.context,
+            domain=_payload(self.domain_id, locators={'node2': self.LOC2}))
+        self.ext.dataplane.ensure_edge_filter.assert_not_called()
+
+    def test_a_new_locator_is_filtered_before_the_routes(self):
+        order = []
+        self.ext.dataplane.ensure_edge_filter.side_effect = \
+            lambda *a: order.append('filter')
+        self.ext.dataplane.sync_routes.side_effect = \
+            lambda *a, **kw: order.append('routes')
+        self.ext.domain_updated(
+            self.ext.context,
+            domain=_payload(self.domain_id, locators={'node3': self.LOC3}))
+        self.assertEqual(['filter', 'routes'], order)
+
+
+class TestRouteMtus(AgentExtensionTestCaseBase):
+    """P6-PLAN.md 4.3: each route's network MTU reaches the dataplane."""
+
+    def setUp(self):
+        super().setUp()
+        self.ext.vlan_manager.get_segments.return_value = {1: _segment(100)}
+
+    def test_a_full_sync_passes_the_payloads_mtus(self):
+        self.ext._apply_domain(_payload(
+            self.domain_id, networks=[_network('net1', 1450),
+                                      _network('net2', 1400)]))
+        self.assertEqual(
+            {'net1': 1450, 'net2': 1400},
+            self.ext.dataplane.sync_routes.call_args[1]['mtus'])
+
+    def test_routes_updated_takes_them_from_the_cached_payload(self):
+        self.ext.domains[self.domain_id] = _payload(
+            self.domain_id, networks=[_network('net1', 1400)])
+        self.ext.routes_updated(
+            self.ext.context, domain_id=self.domain_id,
+            add=[{'prefix': '10.0.0.5/32', 'network_id': 'net1'}])
+        self.assertEqual(
+            {'net1': 1400},
+            self.ext.dataplane.add_routes.call_args[1]['mtus'])
 
 
 class TestDriverType(base.BaseTestCase):

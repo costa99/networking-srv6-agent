@@ -16,8 +16,9 @@
 
 Enabled with `service_plugins = ...,srv6`. It owns three things: allocation
 of each domain's SID function id, translation of Neutron state into the
-payload agents consume, and the decision of *when* to tell agents anything.
-It programs no kernel state itself -- that is entirely the agent's job.
+payload agents consume -- admin TE paths included, resolved to SIDs here --
+and the decision of *when* to tell agents anything. It programs no kernel
+state itself -- that is entirely the agent's job.
 
 This is the old networking-bgpvpn SRv6 driver with the driver/plugin split
 removed (MIGRATION-PLAN.md 3.2). The precommit/postcommit discipline
@@ -40,14 +41,17 @@ from neutron_lib.callbacks import resources
 from neutron_lib import constants as n_const
 from neutron_lib import context as n_context
 from neutron_lib.db import api as db_api
+from neutron_lib import exceptions as n_exc
 from neutron_lib.plugins import directory
 from neutron_lib import rpc as n_rpc
 from oslo_config import cfg
 from oslo_db import exception as db_exc
 from oslo_log import log as logging
 
+from networking_srv6_agent._i18n import _
 from networking_srv6_agent.api.definitions import srv6 as srv6_def
 from networking_srv6_agent.api.definitions import srv6_locators as loc_def
+from networking_srv6_agent.api.definitions import srv6_te as te_def
 from networking_srv6_agent.common import config
 from networking_srv6_agent.common import constants
 from networking_srv6_agent.common import sid
@@ -55,6 +59,7 @@ from networking_srv6_agent.db import domain_db
 from networking_srv6_agent.db import srv6_db
 from networking_srv6_agent.db import te_db
 from networking_srv6_agent.extensions import srv6 as srv6_ext
+from networking_srv6_agent.extensions import srv6_te as te_ext
 from networking_srv6_agent.services import rpc
 
 
@@ -65,6 +70,18 @@ def _prefix_for(address):
     return '%s/%d' % (address, 128 if ':' in address else 32)
 
 
+def _route_for(port, address, host):
+    """One payload route. The full sync and the incremental path share it.
+
+    network_id is for the agent's per-route MTU check (P6-PLAN.md 4.3);
+    port_id is what per-VM TE precedence resolves on.
+    """
+    return {'prefix': _prefix_for(address),
+            'host': host,
+            'port_id': port['id'],
+            'network_id': port.get('network_id')}
+
+
 def _normalise_filters(filters):
     """Accept the legacy tenant_id filter as project_id."""
     filters = dict(filters or {})
@@ -73,10 +90,17 @@ def _normalise_filters(filters):
     return filters
 
 
+def _only(res, fields):
+    if fields:
+        return {k: v for k, v in res.items() if k in fields}
+    return res
+
+
 @registry.has_registry_receivers
 class Srv6Plugin(srv6_ext.Srv6PluginBase):
 
-    supported_extension_aliases = [srv6_def.ALIAS, loc_def.ALIAS]
+    supported_extension_aliases = [srv6_def.ALIAS, loc_def.ALIAS,
+                                   te_def.ALIAS]
 
     def __init__(self):
         super().__init__()
@@ -165,7 +189,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         A port on a host that has never called sync_state is skipped rather
         than advertised: guessing a SID for an unknown locator would install
         a blackhole on every other node. Each route keeps its port_id --
-        P6's per-VM TE precedence resolves on it.
+        per-VM TE precedence resolves on it -- and its network_id. TE
+        segments are attached afterwards, by _attach_segments.
         """
         if not network_ids:
             return []
@@ -188,9 +213,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 address = fixed_ip.get('ip_address')
                 if not address:
                     continue
-                routes.append({'prefix': _prefix_for(address),
-                               'host': host,
-                               'port_id': port['id']})
+                routes.append(_route_for(port, address, host))
         return routes
 
     @staticmethod
@@ -227,8 +250,11 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             'vrf_table': self._vrf_table(function_id),
             'networks': [self._network_info(admin_context, net_id)
                          for net_id in network_ids],
-            'routes': self._routes_for_domain(admin_context, network_ids,
-                                              locators),
+            'routes': self._attach_segments(
+                admin_context, domain['id'],
+                self._routes_for_domain(admin_context, network_ids,
+                                        locators),
+                locators),
             'locators': locators,
         }
 
@@ -434,6 +460,227 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         raise srv6_ext.Srv6LocatorNotFound(id=id)
 
     # ------------------------------------------------------------------
+    # traffic engineering (P6, admin-only)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _transit_sids(via_hosts, locators):
+        """The End SIDs of via_hosts in order, or None if one is unknown.
+
+        None, not a shorter list: a path missing a waypoint is not the path
+        the admin asked for, and quietly dropping a hop is the silent
+        partial steering the locator API exists to prevent. The caller
+        falls back to the direct route instead, and the path reports
+        DEGRADED (P6-PLAN.md 0).
+        """
+        if any(not locators.get(host) for host in via_hosts):
+            return None
+        return [sid.format_sid(locators[host],
+                               constants.NODE_END_FUNCTION_ID)
+                for host in via_hosts]
+
+    def _attach_segments(self, admin_context, domain_id, routes, locators):
+        """Give each steered route its transit SIDs. Mutates `routes`.
+
+        Precedence per route: port path > host path > direct. A port path
+        with no vias is an explicit "direct", and still wins over a host
+        path. A DEGRADED path contributes nothing, so its routes fall back
+        to the DIRECT route -- not to the next path down, which the admin
+        did not ask for either.
+
+        Transit SIDs only: the agent appends the decap SID, from the locator
+        of the route's host, as it always has. A route with no path carries
+        no `segments` key at all, which keeps it byte-for-byte the P5 route.
+        """
+        paths = te_db.get_te_paths_for_domain(admin_context, domain_id)
+        by_port, by_host = paths['by_port'], paths['by_host']
+        if not by_port and not by_host:
+            return routes
+        for route in routes:
+            via_hosts = by_port.get(route.get('port_id'))
+            if via_hosts is None:
+                via_hosts = by_host.get(route.get('host'))
+            if not via_hosts:
+                continue
+            transit = self._transit_sids(via_hosts, locators)
+            if transit is None:
+                LOG.warning("SRv6 domain %(d)s: the TE path toward %(p)s "
+                            "names a via host with no registered locator "
+                            "(%(v)s); routing it directly",
+                            {'d': domain_id, 'p': route['prefix'],
+                             'v': ', '.join(via_hosts)})
+                continue
+            route['segments'] = transit
+        return routes
+
+    def _destination_of(self, admin_context, path):
+        """The compute host a path's traffic is headed for, or None."""
+        port_id = path.get(te_def.DESTINATION_PORT_ID)
+        if not port_id:
+            return path.get(te_def.DESTINATION_HOST)
+        try:
+            port = self._core_plugin().get_port(admin_context, port_id)
+        except n_exc.PortNotFound:
+            return None
+        return port.get(portbindings.HOST_ID) or None
+
+    def _resolve_te_path(self, context, path, locators, function_id):
+        """Attach `segments` and `status` -- what the server resolved.
+
+        ACTIVE:   [<via End SIDs>..., <destination decap SID>]
+        DEGRADED: [], because a via host or the destination has no locator,
+                  or the port is unbound; the routes go direct meanwhile.
+
+        Server resolution, not an agent acknowledgement: ACTIVE says the
+        payload carries this list, not that any kernel holds it.
+        """
+        path = dict(path)
+        destination = self._destination_of(context.elevated(), path)
+        transit = self._transit_sids(path[te_def.VIA_HOSTS], locators)
+        if (destination and locators.get(destination) and
+                transit is not None and function_id is not None):
+            path[te_def.SEGMENTS] = transit + [
+                sid.format_sid(locators[destination], function_id)]
+            path[te_def.STATUS] = te_def.STATUS_ACTIVE
+            return path
+        LOG.warning("SRv6 TE path %(id)s is DEGRADED: destination %(dst)s, "
+                    "via %(via)s; not every host on it has a registered "
+                    "locator (or the port is unbound), so its routes go "
+                    "direct", {'id': path['id'], 'dst': destination,
+                               'via': path[te_def.VIA_HOSTS]})
+        path[te_def.SEGMENTS] = []
+        path[te_def.STATUS] = te_def.STATUS_DEGRADED
+        return path
+
+    def _resolved(self, context, path, locators=None):
+        admin_context = context.elevated()
+        if locators is None:
+            locators = srv6_db.get_host_locators(admin_context)
+        return self._resolve_te_path(
+            context, path, locators,
+            srv6_db.get_function_id(admin_context, path['domain_id']))
+
+    @staticmethod
+    def _validate_via_hosts(via_hosts, locators):
+        """A 400, never a silent `segments: []` (MIGRATION-PLAN.md P6)."""
+        if len(via_hosts) > constants.MAX_TE_VIA_HOSTS:
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("at most %(max)d via_hosts are allowed, got %(n)d")
+                % {'max': constants.MAX_TE_VIA_HOSTS, 'n': len(via_hosts)})
+        unknown = [host for host in via_hosts if host not in locators]
+        if unknown:
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("via_hosts %s have no registered SRv6 locator (see "
+                         "GET /v2.0/srv6_locators)") % ', '.join(unknown))
+
+    def _validate_destination_port(self, admin_context, domain, port_id):
+        try:
+            port = self._core_plugin().get_port(admin_context, port_id)
+        except n_exc.PortNotFound:
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("destination_port_id %s does not exist") % port_id)
+        if port['network_id'] not in (domain.get(srv6_def.NETWORKS) or []):
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("port %(p)s is on network %(n)s, which is not "
+                         "attached to SRv6 domain %(d)s")
+                % {'p': port_id, 'n': port['network_id'],
+                   'd': domain['id']})
+
+    def create_srv6_te_path(self, context, srv6_te_path):
+        body = srv6_te_path[te_def.RESOURCE_NAME]
+        admin_context = context.elevated()
+        domain_id = body[te_def.DOMAIN_ID]
+        domain = domain_db.get_domain(admin_context, domain_id)
+        if domain is None:
+            raise srv6_ext.Srv6DomainNotFound(id=domain_id)
+
+        host = body.get(te_def.DESTINATION_HOST)
+        port_id = body.get(te_def.DESTINATION_PORT_ID)
+        if bool(host) == bool(port_id):
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("exactly one of destination_host and "
+                         "destination_port_id must be set"))
+        locators = srv6_db.get_host_locators(admin_context)
+        if host and host not in locators:
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("destination_host %s has no registered SRv6 "
+                         "locator (see GET /v2.0/srv6_locators)") % host)
+        if port_id:
+            self._validate_destination_port(admin_context, domain, port_id)
+        # via == destination is accepted on purpose: a harmless detour, and
+        # on two nodes the only depth-2 SRH there is (TE-DEPTH2).
+        via_hosts = body.get(te_def.VIA_HOSTS) or []
+        self._validate_via_hosts(via_hosts, locators)
+
+        # Forced, never the caller's, as for associations: the path belongs
+        # with the domain it steers.
+        body = dict(body, project_id=domain['project_id'],
+                    via_hosts=via_hosts)
+        selector = ('port %s' % port_id) if port_id else ('host %s' % host)
+        try:
+            path = te_db.create_te_path(context, domain_id, body)
+        except db_exc.DBDuplicateEntry:
+            raise te_ext.Srv6TePathExists(domain_id=domain_id,
+                                          selector=selector)
+        except db_exc.DBReferenceError:
+            # The port went between the check and the insert.
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("destination_port_id %s does not exist") % port_id)
+        LOG.info("SRv6 TE path %(id)s created in domain %(d)s: %(s)s via "
+                 "%(v)s", {'id': path['id'], 'd': domain_id, 's': selector,
+                           'v': via_hosts})
+        self._push_domain(context, domain)
+        return self._resolved(context, path, locators)
+
+    def get_srv6_te_path(self, context, id, fields=None):
+        path = te_db.get_te_path(context, id)
+        if path is None:
+            raise te_ext.Srv6TePathNotFound(id=id)
+        return _only(self._resolved(context, path), fields)
+
+    def get_srv6_te_paths(self, context, filters=None, fields=None,
+                          sorts=None, limit=None, marker=None,
+                          page_reverse=False):
+        paths = te_db.get_all_te_paths(context, _normalise_filters(filters))
+        if not paths:
+            return []
+        admin_context = context.elevated()
+        locators = srv6_db.get_host_locators(admin_context)
+        function_ids = {}
+        res = []
+        for path in paths:
+            domain_id = path['domain_id']
+            if domain_id not in function_ids:
+                function_ids[domain_id] = srv6_db.get_function_id(
+                    admin_context, domain_id)
+            res.append(_only(self._resolve_te_path(
+                context, path, locators, function_ids[domain_id]), fields))
+        return res
+
+    def update_srv6_te_path(self, context, id, srv6_te_path):
+        body = srv6_te_path[te_def.RESOURCE_NAME]
+        locators = srv6_db.get_host_locators(context.elevated())
+        if te_def.VIA_HOSTS in body:
+            # PUT replaces the list: re-steering with no delete/create
+            # window. [] un-steers.
+            body = dict(body, via_hosts=body[te_def.VIA_HOSTS] or [])
+            self._validate_via_hosts(body[te_def.VIA_HOSTS], locators)
+        path = te_db.update_te_path(context, id, None, body)
+        if path is None:
+            raise te_ext.Srv6TePathNotFound(id=id)
+        LOG.info("SRv6 TE path %(id)s now via %(v)s",
+                 {'id': id, 'v': path[te_def.VIA_HOSTS]})
+        self._push_domain_by_id(context, path['domain_id'])
+        return self._resolved(context, path, locators)
+
+    def delete_srv6_te_path(self, context, id):
+        path = te_db.delete_te_path(context, id)
+        if path is None:
+            raise te_ext.Srv6TePathNotFound(id=id)
+        LOG.info("SRv6 TE path %(id)s deleted from domain %(d)s",
+                 {'id': id, 'd': path['domain_id']})
+        self._push_domain_by_id(context, path['domain_id'])
+
+    # ------------------------------------------------------------------
     # port events -- the incremental path
     # ------------------------------------------------------------------
     def _notify_port(self, context, port, removed=False):
@@ -457,9 +704,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                       "locator; not advertising it",
                       {'p': port['id'], 'h': host})
             return
-        routes = [{'prefix': _prefix_for(fixed_ip['ip_address']),
-                   'host': host,
-                   'port_id': port['id']}
+        routes = [_route_for(port, fixed_ip['ip_address'], host)
                   for fixed_ip in port.get('fixed_ips', [])
                   if fixed_ip.get('ip_address')]
         if not routes:
@@ -471,7 +716,14 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 self.agent_rpc.routes_updated(context, domain_id,
                                               remove=routes)
             else:
-                self.agent_rpc.routes_updated(context, domain_id, add=routes)
+                # Segments per domain, on copies: TE paths belong to a
+                # domain. Without them a steered VM's route would arrive
+                # at depth 1 and stay so until the next full sync.
+                self.agent_rpc.routes_updated(
+                    context, domain_id,
+                    add=self._attach_segments(
+                        context.elevated(), domain_id,
+                        [dict(r) for r in routes], locators))
 
     @registry.receives(resources.PORT, [events.AFTER_UPDATE])
     def registry_port_updated(self, resource, event, trigger, payload=None):

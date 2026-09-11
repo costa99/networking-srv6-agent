@@ -55,6 +55,8 @@ class DataplaneTestCaseBase(base.BaseTestCase):
         # silently wrong `ip` command line -- would not fail a single test.
         # These assertions are the only check on those call sites.
         self.priv_seg6 = self._patch('priv_seg6', autospec=True)
+        # Unpatched, initialize_node would start a real privsep daemon.
+        self.priv_nft = self._patch('priv_nft', autospec=True)
         # Sysctls are exercised by their own test case; everywhere else they
         # would only reach into the test machine's /proc.
         sysctl = mock.patch.object(dataplane.Srv6LinuxDataplane,
@@ -858,7 +860,8 @@ class TestSidRules(DataplaneTestCaseBase):
 
     def test_a_transit_first_segment_gets_no_rule(self):
         # Letting a VRF reach an End SID lets a tenant craft an SRH through
-        # it toward another domain. Fail closed until P6 filters SRHs.
+        # it toward another domain. Fail closed while the edge filter is not
+        # active -- and nothing applied it here (TestEndSidRules has both).
         self.dp.add_routes(
             self.domain_id,
             [self._route('10.0.0.5/32', 'node2', ['fc00:0:3:fff0::'])],
@@ -927,8 +930,8 @@ class TestSidRules(DataplaneTestCaseBase):
 class TestSegments(DataplaneTestCaseBase):
     """4.5: the agent half of TE, moved here from P6.
 
-    Until P6 no payload carries `segments`, so every route is exactly the
-    depth-1 route TestRoutes pins.
+    A payload carries `segments` only on a route an admin TE path steers;
+    every other route is exactly the depth-1 route TestRoutes pins.
     """
 
     def setUp(self):
@@ -972,3 +975,274 @@ class TestSegments(DataplaneTestCaseBase):
 
     def test_no_segments_is_the_depth_one_route(self):
         self.assertEqual(['fc00:0:2:7::'], self._segs(None))
+
+
+# ----------------------------------------------------------------------
+# P6 additions (P6-PLAN.md 4, 5)
+# ----------------------------------------------------------------------
+LOCATOR2 = 'fc00:0:2::/48'
+LOCATOR3 = 'fc00:0:3::/48'
+
+
+class TestEdgeFilterRendering(base.BaseTestCase):
+    """4.1: the ruleset text. Checked with `nft -c` against nftables 1.0.9."""
+
+    def _render(self, *locators):
+        return dataplane.render_edge_ruleset(
+            dataplane._locator_networks(locators))
+
+    def test_verbatim(self):
+        self.assertEqual(
+            'add table inet srv6_edge\n'
+            'delete table inet srv6_edge\n'
+            'table inet srv6_edge {\n'
+            '  set sid_space {\n'
+            '    type ipv6_addr\n'
+            '    flags interval\n'
+            '    auto-merge\n'
+            '    elements = { fc00:0:1::/48, fc00:0:2::/48 }\n'
+            '  }\n'
+            '  chain prerouting {\n'
+            '    type filter hook prerouting priority raw; policy accept;\n'
+            '    iifname "svp-*" ip6 daddr @sid_space counter drop\n'
+            '    iifname "svp-*" rt type 4 counter drop\n'
+            '  }\n'
+            '}\n',
+            self._render(LOCATOR, LOCATOR2))
+
+    def test_the_table_is_replaced_in_one_transaction(self):
+        # `delete` alone fails on a table that does not exist yet.
+        self.assertTrue(self._render(LOCATOR).startswith(
+            'add table inet srv6_edge\ndelete table inet srv6_edge\n'))
+
+    def test_the_same_set_renders_the_same_text(self):
+        self.assertEqual(self._render(LOCATOR, LOCATOR2, LOCATOR3),
+                         self._render(LOCATOR3, LOCATOR, LOCATOR2, LOCATOR))
+
+    def test_locators_are_sorted_and_deduplicated(self):
+        self.assertIn('elements = { fc00:0:1::/48, fc00:0:3::/48 }',
+                      self._render(LOCATOR3, LOCATOR, LOCATOR3))
+
+    def test_the_drops_match_only_the_gateway_ports(self):
+        # Never the underlay: the agent's own encapsulated traffic and every
+        # other node's arrive there.
+        for line in self._render(LOCATOR).splitlines():
+            if line.strip().endswith('drop'):
+                self.assertTrue(line.strip().startswith('iifname "svp-*" '),
+                                line)
+
+    def test_an_empty_set_has_no_elements_line(self):
+        # nft refuses `elements = { }`.
+        self.assertNotIn('elements', dataplane.render_edge_ruleset([]))
+
+    def test_an_unparseable_locator_is_left_out(self):
+        self.assertIn('elements = { fc00:0:1::/48 }',
+                      self._render(LOCATOR, 'bogus', None))
+
+
+class TestEdgeFilter(DataplaneTestCaseBase):
+    """4.1: applied at initialize_node, active only after it succeeds."""
+
+    def _applied(self):
+        return self.priv_nft.apply_ruleset.call_args[0][0]
+
+    def test_inactive_until_applied(self):
+        self.assertFalse(self.dp.edge_filter_active)
+
+    def test_applied_at_initialize_node_with_this_nodes_locator(self):
+        self.dp.initialize_node()
+        self.priv_nft.apply_ruleset.assert_called_once_with(mock.ANY)
+        self.assertIn('elements = { fc00:0:1::/48 }', self._applied())
+        self.assertTrue(self.dp.edge_filter_active)
+
+    def test_this_nodes_locator_is_always_included(self):
+        self.dp.ensure_edge_filter([LOCATOR2])
+        self.assertIn('elements = { fc00:0:1::/48, fc00:0:2::/48 }',
+                      self._applied())
+
+    def test_every_call_replaces_it(self):
+        # Idempotent, and it restores a table somebody deleted by hand.
+        self.dp.ensure_edge_filter([LOCATOR2])
+        self.dp.ensure_edge_filter([LOCATOR2])
+        self.assertEqual(2, self.priv_nft.apply_ruleset.call_count)
+
+    def test_a_failed_apply_leaves_it_inactive(self):
+        self.priv_nft.apply_ruleset.side_effect = RuntimeError('boom')
+        self.assertFalse(self.dp.ensure_edge_filter([LOCATOR2]))
+        self.assertFalse(self.dp.edge_filter_active)
+
+    def test_a_missing_nft_is_a_failure_too(self):
+        self.priv_nft.apply_ruleset.side_effect = FileNotFoundError('nft')
+        self.assertFalse(self.dp.ensure_edge_filter([]))
+        self.assertFalse(self.dp.edge_filter_active)
+
+    def test_a_later_failure_deactivates_it(self):
+        self.assertTrue(self.dp.ensure_edge_filter([LOCATOR2]))
+        self.priv_nft.apply_ruleset.side_effect = RuntimeError('boom')
+        self.dp.ensure_edge_filter([LOCATOR2])
+        self.assertFalse(self.dp.edge_filter_active)
+
+    def test_a_failure_does_not_stop_initialize_node(self):
+        self.priv_nft.apply_ruleset.side_effect = RuntimeError('boom')
+        self.dp.initialize_node()
+        self.assertTrue(self.priv_seg6.replace_locator_route.called)
+
+
+class TestEndSidRules(DataplaneTestCaseBase):
+    """4.2: a steered route's first End SID gets a rule -- behind the filter.
+
+    A rule toward an End SID lets the VRF's outer headers reach it, and
+    without the filter a tenant could send its own SRH that way into
+    another domain (MIGRATION-PLAN.md 8.7).
+    """
+
+    RED = 'sv6vrf-7'
+
+    def setUp(self):
+        super().setUp()
+        self._with_domain()
+        self.locators = {'node2': LOCATOR2, 'node3': LOCATOR3}
+
+    def _route(self, prefix='10.0.0.5/32', segments=None):
+        route = {'prefix': prefix, 'host': 'node2', 'port_id': 'p'}
+        if segments is not None:
+            route['segments'] = segments
+        return route
+
+    def _add(self, *routes):
+        self.dp.add_routes(self.domain_id, list(routes), self.locators,
+                           'node1')
+
+    def _rules(self):
+        return [c[0] for c in self.priv_seg6.add_sid_rule.call_args_list]
+
+    def test_no_filter_no_rule(self):
+        self._add(self._route(segments=['fc00:0:2:fff0::']))
+        self.priv_seg6.add_sid_rule.assert_not_called()
+
+    def test_a_failed_filter_no_rule(self):
+        self.priv_nft.apply_ruleset.side_effect = RuntimeError('boom')
+        self.dp.ensure_edge_filter([LOCATOR2])
+        self._add(self._route(segments=['fc00:0:2:fff0::']))
+        self.priv_seg6.add_sid_rule.assert_not_called()
+
+    def test_via_the_destination_gets_its_end_sid_rule(self):
+        # The G2 shape: the only depth-2 SRH two nodes can produce.
+        self.dp.ensure_edge_filter([LOCATOR2])
+        self._add(self._route(segments=['fc00:0:2:fff0::']))
+        self.assertEqual([(self.RED, 'fc00:0:2:fff0::')], self._rules())
+        self.priv_seg6.replace_seg6_route.assert_called_once_with(
+            '10.0.0.5/32', ['fc00:0:2:fff0::', 'fc00:0:2:7::'], UNDERLAY,
+            VRF_TABLE, family_v6=False)
+
+    def test_only_the_first_transit_gets_a_rule(self):
+        # Later segments are reached from main by each waypoint's End.
+        self.dp.ensure_edge_filter([LOCATOR2, LOCATOR3])
+        self._add(self._route(segments=['fc00:0:3:fff0::',
+                                        'fc00:0:2:fff0::']))
+        self.assertEqual([(self.RED, 'fc00:0:3:fff0::')], self._rules())
+
+    def test_a_neighbour_keeps_its_decap_rule(self):
+        self.dp.ensure_edge_filter([LOCATOR2])
+        self._add(self._route('10.0.0.5/32', ['fc00:0:2:fff0::']),
+                  self._route('10.0.0.6/32'))
+        self.assertEqual([(self.RED, 'fc00:0:2:7::'),
+                          (self.RED, 'fc00:0:2:fff0::')], self._rules())
+
+    def test_a_leading_own_end_sid_is_not_the_rule(self):
+        self.dp.ensure_edge_filter([LOCATOR3])
+        self._add(self._route(segments=['fc00:0:1:fff0::',
+                                        'fc00:0:3:fff0::']))
+        self.assertEqual([(self.RED, 'fc00:0:3:fff0::')], self._rules())
+
+    def test_an_end_sid_the_filter_does_not_cover_gets_no_rule(self):
+        # A routes_updated racing the domain_updated that carries node3's
+        # locator: the filter is active, but not over node3 yet.
+        self.dp.ensure_edge_filter([LOCATOR2])
+        self._add(self._route(segments=['fc00:0:3:fff0::']))
+        self.priv_seg6.add_sid_rule.assert_not_called()
+
+    def test_removing_the_path_prunes_the_rule(self):
+        # G4: PUT via_hosts [] -> the next full sync carries no segments.
+        self.dp.ensure_edge_filter([LOCATOR2])
+        self.priv_seg6.list_sid_rules.return_value = [
+            (self.RED, 'fc00:0:2:fff0::'), (self.RED, 'fc00:0:2:7::')]
+        self.dp.sync_routes(self.domain_id, [self._route()], self.locators,
+                            'node1')
+        self.priv_seg6.delete_sid_rule.assert_called_once_with(
+            self.RED, 'fc00:0:2:fff0::')
+
+    def test_a_filter_that_goes_inactive_prunes_the_rule(self):
+        self.dp.ensure_edge_filter([LOCATOR2])
+        self.priv_nft.apply_ruleset.side_effect = RuntimeError('boom')
+        self.dp.ensure_edge_filter([LOCATOR2])
+        self.priv_seg6.list_sid_rules.return_value = [
+            (self.RED, 'fc00:0:2:fff0::')]
+        self.dp.sync_routes(self.domain_id,
+                            [self._route(segments=['fc00:0:2:fff0::'])],
+                            self.locators, 'node1')
+        self.priv_seg6.delete_sid_rule.assert_called_once_with(
+            self.RED, 'fc00:0:2:fff0::')
+        # The route itself stays, sealed: fail closed, not fail open.
+        self.assertTrue(self.priv_seg6.replace_seg6_route.called)
+
+
+class TestRouteMtu(DataplaneTestCaseBase):
+    """4.3: a steered route's MTU, from its network, warned once."""
+
+    def setUp(self):
+        super().setUp()
+        self._with_domain()
+        self.device.link.mtu = 1500
+        check = mock.patch.object(self.dp, 'check_mtu',
+                                  wraps=self.dp.check_mtu)
+        self.check_mtu = check.start()
+        self.addCleanup(check.stop)
+
+    def _route(self, segments=None):
+        route = {'prefix': '10.0.0.5/32', 'host': 'node2', 'port_id': 'p',
+                 'network_id': 'net1'}
+        if segments:
+            route['segments'] = segments
+        return route
+
+    def _sync(self, route, mtu):
+        self.dp.sync_routes(self.domain_id, [route], {'node2': LOCATOR2},
+                            'node1', mtus={'net1': mtu})
+
+    def test_a_steered_route_that_does_not_fit_warns_once(self):
+        # 1436 fits at depth 1 (+64) and not at depth 2 (+80).
+        for _ in range(3):
+            self._sync(self._route(['fc00:0:2:fff0::']), 1436)
+        self.check_mtu.assert_called_once_with(1436, segment_count=2,
+                                               prefix='10.0.0.5/32')
+
+    def test_a_steered_route_that_fits_is_checked_and_quiet(self):
+        self._sync(self._route(['fc00:0:2:fff0::']), 1400)
+        self.check_mtu.assert_called_once_with(1400, segment_count=2,
+                                               prefix='10.0.0.5/32')
+        self.assertEqual(set(), self.dp._mtu_warned)
+
+    def test_a_deeper_path_warns_again(self):
+        self._sync(self._route(['fc00:0:2:fff0::']), 1436)
+        self._sync(self._route(['fc00:0:3:fff0::', 'fc00:0:2:fff0::']),
+                   1436)
+        self.assertEqual({('10.0.0.5/32', 2), ('10.0.0.5/32', 3)},
+                         self.dp._mtu_warned)
+
+    def test_depth_one_is_left_to_the_per_network_check(self):
+        self._sync(self._route(), 1450)
+        self.check_mtu.assert_not_called()
+
+    def test_a_network_with_no_known_mtu_is_not_checked(self):
+        self.dp.sync_routes(self.domain_id,
+                            [self._route(['fc00:0:2:fff0::'])],
+                            {'node2': LOCATOR2}, 'node1')
+        self.check_mtu.assert_not_called()
+
+    def test_the_incremental_path_checks_too(self):
+        self.dp.add_routes(self.domain_id,
+                           [self._route(['fc00:0:2:fff0::'])],
+                           {'node2': LOCATOR2}, 'node1',
+                           mtus={'net1': 1436})
+        self.assertEqual({('10.0.0.5/32', 2)}, self.dp._mtu_warned)

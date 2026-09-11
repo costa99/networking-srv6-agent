@@ -26,6 +26,7 @@ import itertools
 from networking_srv6_agent.policies import network_association
 from networking_srv6_agent.policies import srv6_domain
 from networking_srv6_agent.policies import srv6_locator
+from networking_srv6_agent.policies import srv6_te_path
 
 
 def list_rules():
@@ -33,4 +34,5 @@ def list_rules():
         srv6_domain.list_rules(),
         network_association.list_rules(),
         srv6_locator.list_rules(),
+        srv6_te_path.list_rules(),
     )

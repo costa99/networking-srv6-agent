@@ -123,6 +123,13 @@ VRF_UNREACHABLE_METRIC = 4278198272
 # hop to the underlay however many hops away it is.
 SID_RULE_PRIORITY = 999
 
+# The nftables table of the SRv6 edge filter (MIGRATION-PLAN.md 8.7): on the
+# gateway ports, drop tenant packets addressed into the SID space or carrying
+# any SRH at all. Its own table in the inet family, so neutron's iptables-nft
+# tables (ip/ip6 filter|nat|mangle) are never touched, and replacing it
+# wholesale on every resync cannot disturb them.
+EDGE_FILTER_TABLE = 'srv6_edge'
+
 # seg6 encapsulation overhead: outer IPv6 (40) + SRH fixed part (8) +
 # 16 bytes per segment. With a single-segment list that is 64 bytes.
 SRH_FIXED_OVERHEAD = 48
