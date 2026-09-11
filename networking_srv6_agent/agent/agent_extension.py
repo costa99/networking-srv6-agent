@@ -166,6 +166,11 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         wanted = {}
         for payload in payloads or []:
             wanted[payload['id']] = payload
+            self.locators.update(payload.get('locators') or {})
+        # Every resync, changed or not: a full replace is idempotent and
+        # restores a table somebody deleted by hand. Before any domain is
+        # applied, so the End-SID rules see the current filter.
+        self.dataplane.ensure_edge_filter(sorted(self.locators.values()))
         # Domains this process applied that the server no longer has.
         for stale_id in set(self.domains) - set(wanted):
             LOG.info("SRv6: domain %s no longer present; removing", stale_id)
@@ -249,6 +254,19 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                         {'n': network_id, 'c': len(segments)})
         return list(segments.values())[0].vlan
 
+    def _merge_locators(self, locators):
+        """Merge a payload's locators. Returns whether anything changed."""
+        changed = any(self.locators.get(host) != locator
+                      for host, locator in (locators or {}).items())
+        self.locators.update(locators or {})
+        return changed
+
+    @staticmethod
+    def _network_mtus(payload):
+        """network_id -> MTU, for the per-route check (P6-PLAN.md 4.3)."""
+        return {n['network_id']: n.get('mtu')
+                for n in payload.get('networks') or []}
+
     def _apply_domain(self, payload):
         """Converge this node to the payload. Reconciles, does not accumulate.
 
@@ -259,7 +277,10 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         case as well.
         """
         domain_id = payload['id']
-        self.locators.update(payload.get('locators') or {})
+        if self._merge_locators(payload.get('locators')):
+            # A new node's SID space is filtered before any route of this
+            # payload can lead a rule toward its End SID.
+            self.dataplane.ensure_edge_filter(sorted(self.locators.values()))
         self.dataplane.ensure_domain(domain_id, payload['function_id'],
                                      payload['behavior'])
         networks = payload.get('networks') or []
@@ -282,7 +303,8 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                 domain_id, network_id, local_vlan,
                 network.get('subnets') or [], mtu=network.get('mtu'))
         self.dataplane.sync_routes(domain_id, payload.get('routes') or [],
-                                   self.locators, self.host)
+                                   self.locators, self.host,
+                                   mtus=self._network_mtus(payload))
         self.domains[domain_id] = payload
 
     # ------------------------------------------------------------------
@@ -331,8 +353,11 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                 if remove:
                     self.dataplane.remove_routes(domain_id, remove)
                 if add:
-                    self.dataplane.add_routes(domain_id, add, self.locators,
-                                              self.host)
+                    # The MTUs come from the cached domain payload: an
+                    # incremental message carries routes, not networks.
+                    self.dataplane.add_routes(
+                        domain_id, add, self.locators, self.host,
+                        mtus=self._network_mtus(self.domains[domain_id]))
             except Exception:
                 LOG.exception("SRv6: failed to apply routes_updated for %s",
                               domain_id)

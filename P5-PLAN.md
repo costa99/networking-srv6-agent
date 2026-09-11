@@ -250,7 +250,8 @@ is `SID_RULE_PRIORITY = 999`.
 **It fails closed for TE.** When a route's first segment is a transit End SID (P6), no rule is
 added and the agent logs why. A VRF allowed to reach an End SID lets a tenant hand-craft an SRH
 through it toward another domain's SID. P6 needs SRH filtering at the gateway port, or HMAC, before
-it lifts this.
+it lifts this. Decided 2026-09-10: edge filtering. See `MIGRATION-PLAN.md` §8.7 for the threat
+walk-through, the nftables ruleset and the P6 gate test.
 
 ## 5. RPC contract test
 

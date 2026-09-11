@@ -323,7 +323,11 @@ difference is the two unreachable defaults per VRF table. Rerun the probes in
 `evidence/vrf-fallthrough.txt`: the three cross-domain lookups must now return `unreachable`, and
 the in-domain control lookup must be unchanged.
 
-**P6 — Traffic engineering.** The TE path resource, segment-list construction, per-route MTU. The
+**P6 — Traffic engineering.** Detailed in `P6-PLAN.md` (2026-09-10): API, model, plugin, edge
+filter, End-SID rules, tests, deploy steps and a seven-step two-node gate. **Status 2026-09-11:**
+implemented in code with unit tests (506 tests, 0 skips; `P6-PLAN.md` §10). The two-node gate has not
+been run yet. The TE path resource,
+segment-list construction, per-route MTU. The
 design work is already done in the TE plan; the only change here is that the resource is top level
 from the start, which makes the descriptor and plugin methods simpler than that plan describes.
 
@@ -354,6 +358,10 @@ Plus the per-VM selector (§8.5):
 **Gate (two nodes):** a per-VM path with `via=[node2]` toward a VM on node 2 puts a depth-2 SRH on
 the underlay for that VM's address only, while a second VM on node 2 stays depth-1; migrate the
 steered VM and the route follows. Real waypoint avoidance stays blocked on a third node.
+
+**Before any End-SID rule: the edge filter (§8.7).** A VRF allowed to reach a transit End SID lets
+a tenant forge an SRH into another domain. The `inet srv6_edge` filter on the gateway ports comes
+first. The gate adds the attack test from §8.7 next to the positive one.
 
 **P7 — Coexistence proof.** The point of the exercise: `networking-bgpvpn` with the **bagpipe**
 driver and `networking-srv6` enabled simultaneously, both functional. This is the acceptance test
@@ -602,4 +610,74 @@ The complete fix is the seal plus one rule per (domain, remote node), placed ahe
 and the underlay stay sealed.
 
 For P6 it fails closed: no rule is added toward transit End SIDs. Letting a VRF reach them needs
-SRH filtering or HMAC first.
+SRH filtering or HMAC first — decided in §8.7.
+
+### 8.7 P6 guard: edge filtering at the gateway ports
+
+Decided 2026-09-10: edge filtering, not HMAC. TE may not add a SID rule toward a transit End SID
+until this filter exists.
+
+**The threat, concretely.** Take three nodes: A (`fc00:0:1::/48`), T (`fc00:0:3::/48`) and B
+(`fc00:0:2::/48`). An admin steers red's traffic A → T → B. The encap route on A is then
+`segs [fc00:0:3:fff0:: (T's End), fc00:0:2:95a:: (red's decap on B)]`. The outer destination is
+the first segment, and the outer lookup happens in red's VRF (§8.6 amendment), so red needs a rule
+toward T's End SID.
+
+A rule matches by destination. It cannot tell the agent's encapsulation from a packet a tenant
+built by hand. A red VM can send:
+
+```
+outer: dst fc00:0:3:fff0::                       ← allowed out by the rule
+SRH:   [fc00:0:3:fff0::, fc00:0:2:9e8::]         ← last segment = BLUE's decap SID on B
+inner: IPv4 → a blue VM
+```
+
+T's `End` does not know who wrote the SRH: it advances and forwards. B's blue `End.DT46`
+decapsulates, and red has injected into blue — the §8.6 leak, reopened one hop later. The last
+segment could equally be an underlay address. All it takes is a routable IPv6 source: any
+dual-stack tenant has one, and a port without port security can spoof one.
+
+P5's rules toward a domain's **own** decap SIDs do not have this problem. A packet sent there can
+only be decapsulated into the same domain, and RFC 8986 has `End.DT46` discard packets whose
+Segments Left is not zero. An End SID, in contrast, forwards to whatever the tenant listed next.
+
+**The decision.** RFC 8754 §5.1 asks an SR domain to filter at its edge, and tenant VMs are
+outside the domain. Their packets enter through the gateway ports, so the filter goes there, in
+its own nftables table. Neutron's iptables-nft tables are never touched. The syntax was checked in
+`nft -c` mode against nftables 1.0.9 on node 1:
+
+```
+table inet srv6_edge {
+  set sid_space { type ipv6_addr; flags interval; elements = { <every registered locator> } }
+  chain prerouting {
+    type filter hook prerouting priority raw;
+    iifname "svp-*" ip6 daddr @sid_space counter drop    # the essential rule
+    iifname "svp-*" rt type 4 counter drop               # any tenant-originated SRH
+  }
+}
+```
+
+**Why it spares the agent's own traffic.** A tenant packet passes PREROUTING with `iif svp-*`
+before it is routed. The agent's encapsulation happens after that routing decision (seg6
+lwtunnel, input path), so the outer header never passes PREROUTING. This is the one claim the unit
+tests cannot make. The P6 gate proves it:
+- **Positive:** a steered path works and the drop counters stay at 0.
+- **Attack:** an attacker namespace on a red network encapsulates toward
+  `segs <T End>,<blue decap SID>`. With the filter the counter rises and blue sees nothing; without
+  it, blue receives the packet.
+
+**In the agent (P6):**
+- a privsep entrypoint running `nft -f -`, replacing the table atomically;
+- the dataplane renders the ruleset from the known locators, applies it at `initialize_node` and
+  on every locator change or resync, and records whether it is active;
+- `_install_routes` adds a SID rule toward `transit[0]` **only if the filter is active**; otherwise
+  it keeps the P5 fail-closed warning;
+- missing `nft` or a failed apply is an error, and End-SID rules stay disabled;
+- there is no knob to switch the filter off.
+
+**Why not HMAC.** An SRH HMAC (`seg6 hmac`, `seg6_require_hmac` on transit) would also stop a
+forged SRH, and it would additionally protect against an untrusted underlay. The costs are a
+shared key distributed to every node, 40 bytes per packet and per-packet CPU, and every
+encapsulation on every node would have to carry it. The threat here is the tenant, and the edge
+filter answers it where it enters. HMAC stays available if the underlay ever leaves the lab
+(`DESIGN-border-speaker.md` §9 already says so for external peering).

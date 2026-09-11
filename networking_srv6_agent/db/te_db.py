@@ -14,11 +14,13 @@
 
 """Operator-defined SRv6 paths: which transit nodes to route through.
 
-A path says "in this domain, traffic towards <destination_host> goes via these
-transit nodes, in this order". The driver turns each one into the prefix of
-the segment list on every encapsulation route towards that host; without a
-path, the segment list is just the destination's domain SID and the packet
-follows the underlay shortest path.
+A path says "in this domain, traffic towards <selector> goes via these
+transit nodes, in this order". The selector is exactly one of a destination
+host -- all of the domain's traffic toward that node -- or a destination
+port -- one VM's addresses only (P6, MIGRATION-PLAN.md 8.5). The plugin turns
+each path into the prefix of the segment list on the matching encapsulation
+routes; without a path, the segment list is just the destination's domain
+SID and the packet follows the underlay shortest path.
 
 Two tables rather than one comma-joined column, because the ORDER is the
 entire semantic content of the object: a string column makes position
@@ -26,10 +28,10 @@ implicit, unconstrainable and unqueryable, and invites exactly the
 "which end is the head?" confusion that the SRH's reversed on-wire encoding
 already creates.
 
-Nothing here resolves a host to a SID. Hosts stay symbolic all the way to
-the agent, which resolves them against the locator registry -- that is what
-makes a locator change self-healing rather than something that has to
-invalidate stored addresses.
+Nothing here resolves a host to a SID. Hosts stay symbolic in the database
+and are resolved against the locator registry every time a payload is
+built -- that is what makes a locator change self-healing rather than
+something that has to invalidate stored addresses.
 """
 
 from neutron_lib.db import api as db_api
@@ -41,7 +43,7 @@ from sqlalchemy import orm
 
 
 class SRv6TePath(model_base.BASEV2, model_base.HasId):
-    """One operator-chosen path: (vpn, destination host) -> transits."""
+    """One operator-chosen path: (domain, selector) -> transits."""
 
     __tablename__ = 'srv6_te_paths'
 
@@ -57,7 +59,16 @@ class SRv6TePath(model_base.BASEV2, model_base.HasId):
                           sa.ForeignKey('srv6_domains.id',
                                         ondelete='CASCADE'),
                           nullable=False)
-    destination_host = sa.Column(sa.String(255), nullable=False)
+    # The two selectors. Exactly one is set; the plugin enforces it rather
+    # than a CHECK constraint, whose support is uneven across MySQL and
+    # MariaDB versions.
+    destination_host = sa.Column(sa.String(255), nullable=True)
+    # CASCADE for the same reason as domain_id: a path for a deleted VM is
+    # meaningless.
+    destination_port_id = sa.Column(sa.String(36),
+                                    sa.ForeignKey('ports.id',
+                                                  ondelete='CASCADE'),
+                                    nullable=True)
 
     # order_by is what makes a read return TRAVERSAL order rather than
     # whatever order the rows happen to come back in.
@@ -69,12 +80,16 @@ class SRv6TePath(model_base.BASEV2, model_base.HasId):
         backref=orm.backref('path'))
 
     __table_args__ = (
-        # One path per destination per domain. A second one would give two
-        # answers to "how do I reach this host", and nothing downstream
-        # could choose between them.
+        # One path per selector per domain. A second one would give two
+        # answers to "how do I reach this", and nothing downstream could
+        # choose between them. NULLs are distinct in a unique constraint,
+        # so host paths and port paths do not collide on the unset column.
         sa.UniqueConstraint(
             'domain_id', 'destination_host',
             name='uniq_srv6_te_paths0domain_id0destination_host'),
+        sa.UniqueConstraint(
+            'domain_id', 'destination_port_id',
+            name='uniq_srv6_te_paths0domain_id0destination_port_id'),
         model_base.BASEV2.__table_args__,
     )
 
@@ -102,17 +117,19 @@ class SRv6TePathHop(model_base.BASEV2, model_base.HasId):
 def _make_te_path_dict(path_db, fields=None):
     """Model to dict.
 
-    `segments` is deliberately left empty here. Resolving it needs the
-    locator registry, the domain's function id and vrf_table_base -- none of
-    which this layer has. The driver fills it in.
+    `segments` and `status` are deliberately left unresolved here. Both need
+    the locator registry, the domain's function id and the port's binding --
+    none of which this layer has. The plugin fills them in.
     """
     res = {
         'id': path_db.id,
         'project_id': path_db.project_id,
         'domain_id': path_db.domain_id,
         'destination_host': path_db.destination_host,
+        'destination_port_id': path_db.destination_port_id,
         'via_hosts': [hop.via_host for hop in path_db.hops],
         'segments': [],
+        'status': None,
     }
     if fields:
         return {k: v for k, v in res.items() if k in fields}
@@ -159,7 +176,8 @@ def create_te_path(context, domain_id, te_path):
         id=uuidutils.generate_uuid(),
         project_id=te_path['project_id'],
         domain_id=domain_id,
-        destination_host=te_path['destination_host'])
+        destination_host=te_path.get('destination_host'),
+        destination_port_id=te_path.get('destination_port_id'))
     context.session.add(path_db)
     context.session.flush()
     _set_hops(context, path_db, te_path.get('via_hosts'))
@@ -175,15 +193,35 @@ def get_te_path(context, path_id, domain_id=None, fields=None):
     return _make_te_path_dict(path_db, fields)
 
 
-@db_api.CONTEXT_READER
-def get_te_paths(context, domain_id, filters=None, fields=None):
-    query = context.session.query(SRv6TePath).filter_by(domain_id=domain_id)
-    for key in ('id', 'destination_host', 'project_id'):
+_FILTERS = ('id', 'domain_id', 'destination_host', 'destination_port_id',
+            'project_id')
+
+
+def _filtered(query, filters):
+    for key in _FILTERS:
         values = (filters or {}).get(key)
         if values:
             query = query.filter(getattr(SRv6TePath, key).in_(values))
+    return query
+
+
+@db_api.CONTEXT_READER
+def get_te_paths(context, domain_id, filters=None, fields=None):
+    query = _filtered(
+        context.session.query(SRv6TePath).filter_by(domain_id=domain_id),
+        filters)
     return [_make_te_path_dict(path_db, fields)
-            for path_db in query.order_by(SRv6TePath.destination_host).all()]
+            for path_db in query.order_by(SRv6TePath.destination_host,
+                                          SRv6TePath.id).all()]
+
+
+@db_api.CONTEXT_READER
+def get_all_te_paths(context, filters=None, fields=None):
+    """Every path, across domains: the top-level srv6_te_paths collection."""
+    query = _filtered(context.session.query(SRv6TePath), filters)
+    return [_make_te_path_dict(path_db, fields)
+            for path_db in query.order_by(SRv6TePath.domain_id,
+                                          SRv6TePath.id).all()]
 
 
 @db_api.CONTEXT_WRITER
@@ -206,34 +244,44 @@ def delete_te_path(context, path_id, domain_id=None):
     if path_db is None:
         return None
     # Read the dict BEFORE the delete: afterwards there is nothing to build
-    # it from, and the caller's postcommit hook needs domain_id to know
-    # which domain to re-push.
+    # it from, and the caller needs domain_id to know which domain to
+    # re-push.
     res = _make_te_path_dict(path_db)
     context.session.delete(path_db)
     return res
 
 
 @db_api.CONTEXT_READER
-def get_te_paths_for_vpn(context, domain_id):
-    """{destination_host: [via_host, ...]} for one domain.
+def get_te_paths_for_domain(context, domain_id):
+    """Both selector maps for one domain.
 
-    One query per payload build, rather than one per route: a domain with 200
-    ports would otherwise issue 200 identical lookups.
+        {'by_port': {port_id: [via_host, ...]},
+         'by_host': {destination_host: [via_host, ...]}}
+
+    One query per payload build, rather than one per route: a domain with
+    200 ports would otherwise issue 200 identical lookups. The two maps are
+    kept apart because precedence (port path > host path) is decided per
+    route by the caller, which is the only one that knows both keys.
     """
-    return {
-        path_db.destination_host: [hop.via_host for hop in path_db.hops]
-        for path_db in context.session.query(SRv6TePath).filter_by(
-            domain_id=domain_id).all()
-    }
+    res = {'by_port': {}, 'by_host': {}}
+    for path_db in context.session.query(SRv6TePath).filter_by(
+            domain_id=domain_id).all():
+        via_hosts = [hop.via_host for hop in path_db.hops]
+        if path_db.destination_port_id:
+            res['by_port'][path_db.destination_port_id] = via_hosts
+        elif path_db.destination_host:
+            res['by_host'][path_db.destination_host] = via_hosts
+    return res
 
 
 @db_api.CONTEXT_READER
 def get_via_hosts(context, domain_id, destination_host):
-    """The transits for one destination, or [] if no path is defined.
+    """The transits of one host path, or [] if no such path is defined.
 
     [] is returned both when no path exists and when a path exists with an
     empty via list -- deliberately, because the two mean the same thing to
-    the dataplane: no transit SIDs, shortest path.
+    the dataplane: no transit SIDs, shortest path. Port paths are not
+    consulted; get_te_paths_for_domain is the lookup that knows both.
     """
     path_db = context.session.query(SRv6TePath).filter_by(
         domain_id=domain_id, destination_host=destination_host).one_or_none()

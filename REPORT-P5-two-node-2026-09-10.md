@@ -17,7 +17,12 @@ its output.
 | Seal (§8.6): cross-domain and underlay lookups from a tenant gateway port | **PASS** — all `No route to host` |
 | Delete: VRF, SID, gateway ports gone and table flushed, on both nodes | **PASS** |
 | IPv6 underlay, both directions (configured on node 2 by the user, part 2) | **PASS** |
-| **VM → VM ping across nodes, SRH on the wire** | **FAIL — the VRF seal drops the encapsulated packet** (§9) |
+| VM → VM ping across nodes, SRH on the wire — part 2, before the fix | FAIL: the VRF seal dropped the encapsulated packet (§9) |
+| **VM → VM ping across nodes, SRH on the wire — part 3, with the SID-rule fix** | **PASS**: 5/5 both ways, 20 SRH packets captured, `Ip6InNoRoutes` +0 on both nodes (§10) |
+| SID rules: installed on both nodes, pruned on detach, restored on re-attach | **PASS** (§10.3, §10.7) |
+| Seal with the rules in place: no cross-domain reach in either direction | **PASS** (§10.6) |
+| Negative control (a): no underlay route to the peer locator → no traffic | **PASS** (§10.8) |
+| Negative control (b): `seg6_enabled=0` on the receiver | **Not a valid control at depth 1**: the ping keeps working, as `evidence/seg6-enabled-semantics.txt` already showed (§10.8) |
 
 Everything SRv6 built is in place on both nodes. The one missing piece is outside the plugin:
 node 2 has neither the underlay address `fd00:aa::2` nor a route to node 1's locator. Node 1
@@ -305,6 +310,12 @@ SID, not a decap SID. Letting a VRF reach End SIDs reopens a path. A tenant coul
 SRH through that End toward another domain's SID. So P6 needs either SRH filtering at the gateway
 port or an HMAC (RFC 8754 §5.1 / `seg6 hmac`). Record it in P6 before building TE on top of A.
 
+> **Decided (2026-09-10): edge filtering.** An agent-managed `inet srv6_edge` nftables table on
+> the gateway ports drops tenant-originated IPv6 aimed at the SID space, and any tenant-originated
+> SRH, before routing. The agent's own encapsulation never passes that point. TE may add End-SID
+> rules only while the filter is active. `MIGRATION-PLAN.md` §8.7 has the threat walk-through,
+> the ruleset (syntax checked with `nft -c` on node 1) and the P6 gate test.
+
 **Not yet tested.** The one-line rule on node 1 is a live policy-routing change on the testbed,
 and it was stopped at the permission prompt. It has **not** been applied. Node 2's counterpart
 needs `sudo` on node 2. Confirming A by hand needs:
@@ -372,7 +383,162 @@ ip -6 rule show | grep '^999:'
 
 Then rerun §9.2 with the capture, and the negative controls.
 
-## State left on the testbed
+## 10. Part 3 — restacked with the SID-rule fix: the gate passes
+
+### 10.1 Getting the fix onto the nodes
+
+The user pushed the fix (`4e9485b Implement SID rules ...`) and restacked. **Restacking did not
+deploy it.** Devstack reuses an existing clone, and both `/opt/stack/networking-srv6-agent`
+checkouts were still at `f908800`. The deployed module lacked `add_sid_rule`: checked by importing
+it from outside the repo, since importing from inside the repo picks up the workstation checkout
+and gives a false yes. The clone is a detached HEAD with no tracking branch, so `git pull` fails
+too. What works:
+
+```bash
+cd /opt/stack/networking-srv6-agent
+git fetch origin main && git merge --ff-only FETCH_HEAD      # → 4e9485b
+# restart q-agt; on node 1 kill -9 the MainPID first, and confirm the PID changed
+```
+
+- **node 1** (by me, as `stack`): at `4e9485b`, MainPID 2925219 → 2928280, and the running module
+  has `add_sid_rule`.
+- **node 2** (by the user): the same, q-agt restarted at 20:07:22.
+
+The restack also dropped nova's host mapping for node 2 again, so `nova-manage cell_v2
+discover_hosts` was re-run before any boot.
+
+### 10.2 Fresh fixtures (project `demo`, as in §2)
+
+- `srv6-net1` 10.90.1.0/24 and `srv6-net2` 10.90.2.0/24, MTU 1400, no router.
+- `vm-n1` 10.90.1.11 on `ale`, `vm-n2` 10.90.2.21 on `ale-XPS-15-9570`, port security off.
+- Domain `red` `411225e7-…` was created and attached **as the tenant `demo`**. Function id
+  **56 = 0x38**: table `10056`, SIDs `fc00:0:1:38::` and `fc00:0:2:38::`.
+
+### 10.3 The rules, one per node, exactly as designed
+
+```
+[n1] 999:  from all to fc00:0:2:38:: iif sv6vrf-56 lookup main
+[n2] 999:  from all to fc00:0:1:38:: iif sv6vrf-56 lookup main
+[n2 q-agt] SRv6: domain 411225e7-... may reach fc00:0:1:38:: via main
+```
+
+The seal is still in both tables (`unreachable default` for IPv4 and IPv6), next to the connected
+subnets and the encap route toward the other node's VM.
+
+### 10.4 The outer lookup now leaves the VRF, and only toward the domain's own SID
+
+```
+[n2] ip -6 route get fc00:0:1:38:: from fe80::1 iif svp-56-1    → via fd00:aa::1 dev wlp59s0
+[n1] ip -6 route get fc00:0:2:38:: from fe80::1 iif sv6vrf-56   → via fd00:aa::2 dev enp2s0f1
+     everything else from red: fc00:0:{1,2}:fff0::, the other node's LAN address → No route to host
+```
+
+**A tool caveat on node 1's kernel (6.8).** There, `ip route get ... iif svp-56-4` (the enslaved
+gateway port) still answered `No route to host` with the rule present. With `iif sv6vrf-56` (the
+VRF master) it resolves. So `route get` on 6.8 does not apply the port → VRF-master mapping when
+it matches `iif` rules. Node 2 (kernel 7.0) resolves in both forms. Real packets on node 1 do match
+the rule (§10.5). When checking these rules on 6.8, use `iif <vrf>`.
+
+### 10.5 The gate: VM → VM across nodes, SRH on the wire
+
+```
+[vm-n1 on n1] ping -c5 10.90.2.21   → 5 transmitted, 5 received, 0% packet loss
+[vm-n2 on n2] ping -c5 10.90.1.11   → 5 transmitted, 5 received, 0% packet loss
+[n1] tcpdump -ni enp2s0f1 'ip6 proto 43'  → 20 packets (/opt/stack/srv6-evidence/p5-gate/srh-part3.pcap)
+
+IP6 (hlim 63, next-header Routing (43) payload length: 108) fdbd:…:6916 > fc00:0:2:38::: RT6 (len=2, type=4,
+    segleft=0, last-entry=0, [0]fc00:0:2:38::) IP 10.90.1.11 > 10.90.2.21: ICMP echo request, seq 1
+IP6 (hlim 63, next-header Routing (43) payload length: 108) fd00:aa::2 > fc00:0:1:38::: RT6 (len=2, type=4,
+    segleft=0, last-entry=0, [0]fc00:0:1:38::) IP 10.90.2.21 > 10.90.1.11: ICMP echo reply, seq 1
+
+Ip6InNoRoutes delta: n1 +0 (11 → 11), n2 +0 (5 → 5)      ← part 2: +1 per echo request
+sv6vrf-56 RX:        n1 3 → 23, n2 3 → 23
+```
+
+All four properties the old HOWTO §8.1 asks of the capture hold:
+- the `Routing (43)` header is present;
+- the segment list has one entry, the peer's SID for this domain;
+- the outer destination is inside the peer's locator, not its LAN address;
+- the inner packet goes between two subnets with no router between them.
+
+Each node is seen both encapsulating and decapsulating.
+
+One detail: node 1's outer source is `fdbd:…:6916`, a SLAAC address from the home LAN router,
+not `fd00:aa::1`. seg6 encapsulation picks the source by ordinary address selection. It works
+because the source only needs to be routable back, and node 2 reaches it on-link. For a
+predictable source, set `ip sr tunsrc set fd00:aa::1` on each node; that belongs to the underlay
+setup, not the plugin.
+
+### 10.6 The rules open nothing across domains
+
+A second domain `blue` (project `alt_demo`, function id 1831 = 0x727) was given one network, which
+installed its SIDs. With both domains present on node 1:
+
+| Lookup | Result |
+|---|---|
+| red (`iif sv6vrf-56`) → red's remote SID `fc00:0:2:38::` | `via fd00:aa::2` |
+| red → blue SID on node 1 `fc00:0:1:727::` (also with `iif svp-56-4`) | **No route to host** |
+| red → blue SID on node 2 `fc00:0:2:727::` | **No route to host** |
+| blue (`iif sv6vrf-1831`) → red's remote SID `fc00:0:2:38::` | **No route to host** — red's rule is scoped to red's VRF |
+| blue → red's SID on node 1 `fc00:0:1:38::` | **No route to host** |
+
+Blue has no instances on another node, so it correctly got **no** rule. Deleting blue (HTTP 204,
+as `alt_demo`) removed its VRF and SID and flushed table `11831` in both families, on **both**
+nodes. Red's rules were untouched. `blue-net1` was deleted afterwards.
+
+### 10.7 The rules follow the routes (reconciliation, live)
+
+```
+as demo: DELETE the srv6-net2 association       → HTTP 204
+  [n1] rules: []   route to 10.90.2.21: []   gateway ports: svp-56-4 only
+  [n1 q-agt] SRv6: domain 411225e7-... no longer encapsulates to fc00:0:2:38::; removing its rule
+as demo: re-attach srv6-net2
+  [n1] rules: 999: from all to fc00:0:2:38:: iif sv6vrf-56 lookup main
+       route: 10.90.2.21 encap seg6 ... segs 1 [ fc00:0:2:38:: ]   gateway ports: svp-56-4 svp-56-5
+  [n1 q-agt] SRv6: domain 411225e7-... may reach fc00:0:2:38:: via main
+  [vm-n1] ping 10.90.2.21 → 3/3
+```
+
+### 10.8 Negative controls
+
+**(a) Remove node 1's underlay route to node 2's locator — PASS.** The encap route stays in the
+VRF and the ping fails 0/3. After restoring the route it succeeds 3/3.
+
+A side finding: with the specific route gone, the outer lookup did **not** fail locally. It fell to
+`main`'s default route learned from the LAN router's advertisements (`via fe80::ce2d:… proto ra`),
+so SRv6 packets for `fc00:0:2::/48` were sent to the home router. The underlay should carry a
+catch-all for the SID space, e.g. `unreachable fc00::/16` in `main` on every node. With it, a
+missing peer route blackholes locally instead of leaking to the default router. This is for
+`systemd/srv6-underlay`, not the agent.
+
+**(b) `seg6_enabled=0` on the receiving interface — not a valid control at depth 1.** With
+`net.ipv6.conf.enp2s0f1.seg6_enabled=0` on node 1, `vm-n2 → vm-n1` still got 3/3 replies, with
+the SRH seen arriving. `evidence/seg6-enabled-semantics.txt` (2026-09-02, isolated two-namespace
+reproduction on the same kernel) already explains why: `seg6_enabled` gates only native SRH
+processing of a routing header with Segments Left > 0 (`ipv6_srh_rcv`). It does not gate the
+`seg6local` path. `End.DT46` is a route handled at lookup time, and at depth 1 every packet is
+decapsulated there. So the old HOWTO §8.3(b) expectation was wrong for this datapath. The sysctl
+becomes load-bearing only for transit through a node without an explicit `seg6local` route for the
+traversed SID — the P6 case. The value was restored to 1.
+
+### 10.9 Verdict and state
+
+**The P5 gate passes.** Two VMs on different compute nodes, in two different networks with no
+router, communicate through an SRv6 domain created by a plain tenant. The SRH is on the wire in
+both directions. The VRFs stay sealed against every other domain and the underlay, and the SID
+rules are installed, pruned and restored with the routes.
+
+**State left on the testbed:**
+- domain `red` (`411225e7-…`) with `srv6-net1` and `srv6-net2`;
+- `vm-n1` and `vm-n2`;
+- security group `srv6-sg` and keypair `srv6-p5-key`;
+- the captures in `/opt/stack/srv6-evidence/p5-gate/` on node 1.
+
+Removed: domain `blue` and `blue-net1`. Changed outside Neutron:
+- the nova host mapping for node 2 (`discover_hosts`);
+- node 1's `/opt/stack/networking-srv6-agent`, fast-forwarded to `4e9485b`.
+
+## State left on the testbed (after part 2; superseded by §10.9)
 
 Kept for step 8:
 - domain `red` (`f2211361-...`) with `srv6-net1` and `srv6-net2`;

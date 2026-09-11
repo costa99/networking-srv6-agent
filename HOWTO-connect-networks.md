@@ -124,6 +124,68 @@ api -X DELETE $NEUTRON/v2.0/srv6_domains/$DOMAIN
 Deleting a domain also deletes any admin TE paths defined on it. The server logs a warning with
 their count.
 
+## 7. Steer a domain's traffic (admin only)
+
+A **TE path** sends a domain's traffic through an explicit list of waypoints (`P6-PLAN.md`). It is
+admin-only, every verb and every attribute, because it names compute hosts and resolves to underlay
+SIDs. A tenant listing TE paths gets `[]`.
+
+A path selects its traffic with **exactly one** of:
+- **`destination_host`**: all of the domain's traffic toward that compute node;
+- **`destination_port_id`**: traffic toward a single VM, meaning that port's fixed IPs only.
+
+It then lists `via_hosts`, in traversal order, with at most 6 entries. If both kinds of path apply to
+a route, **port path > host path > direct**.
+
+> **Status.** Written 2026-09-11 against the P6 code. Like §1–§6, it has not yet been run against
+> the live testbed.
+
+```bash
+source ~/devstack/openrc admin admin
+ADMIN_TOKEN=$(openstack token issue -f value -c id)
+aapi() { curl -s -H "X-Auth-Token: $ADMIN_TOKEN" -H 'Content-Type: application/json' "$@"; }
+
+# valid host names: exactly what via_hosts and destination_host accept
+aapi $NEUTRON/v2.0/srv6_locators | jq -r '.srv6_locators[].host'
+
+# steer one VM's traffic via node 2 (on two nodes: via == destination, a depth-2 SRH)
+PORT=$(openstack port list --server vm-n2 -f value -c ID)
+TE_PATH=$(aapi -X POST $NEUTRON/v2.0/srv6_te_paths -d "{\"srv6_te_path\": {
+            \"domain_id\": \"$DOMAIN\", \"destination_port_id\": \"$PORT\",
+            \"via_hosts\": [\"ale-XPS-15-9570\"]}}" | jq -r .srv6_te_path.id)
+aapi $NEUTRON/v2.0/srv6_te_paths/$TE_PATH | jq '.srv6_te_path | {segments, status}'
+# {"segments": ["fc00:0:2:fff0::", "fc00:0:2:<hex fid>::"], "status": "ACTIVE"}
+```
+
+- **`segments`** lists the via End SIDs, then the destination's decap SID.
+- **`status`** is what the *server* resolved; no agent confirms it.
+  - `DEGRADED` means a host on the path has no registered locator, or the port is unbound. The
+    routes then fall back to the direct path until the host registers again.
+
+**Re-steer or un-steer** without a delete/create window. A PUT **replaces** `via_hosts`, and `[]`
+means explicitly direct:
+
+```bash
+aapi -X PUT $NEUTRON/v2.0/srv6_te_paths/$TE_PATH -d '{"srv6_te_path": {"via_hosts": []}}'
+aapi -X DELETE $NEUTRON/v2.0/srv6_te_paths/$TE_PATH
+```
+
+The selectors cannot be changed: to steer something else, delete the path and create a new one.
+Deleting the port also deletes its path.
+
+**On the ingress node** (node 1 in the example above):
+
+```bash
+ip route show table $((10000 + FID))    # the steered VM: segs 2 [ fc00:0:2:fff0:: fc00:0:2:<hex fid>:: ]
+ip -6 rule show | grep '^999:'          # plus a rule toward fc00:0:2:fff0::
+sudo nft list table inet srv6_edge      # the edge filter; its drop counters should stay 0
+```
+
+The rule toward an End SID exists only while the **edge filter** (`inet srv6_edge`) is active and
+covers that SID. Without it, a tenant could forge an SRH through the End SID into another domain
+(`MIGRATION-PLAN.md` §8.7). If `nft` is missing or the filter fails to apply, the agent logs an
+error, the route is still installed but sealed, and steered traffic is dropped. It fails closed.
+
 ---
 
 ## What answers what
@@ -139,6 +201,12 @@ their count.
 | The same network twice | **409** |
 | `srv6_behavior` other than `End.DT46`, or changing it later | **400** |
 | Function id pool exhausted | **409** |
+| TE paths as a tenant: list / show / create | **`[]`** / **404** / **403** |
+| TE path with both selectors, or neither | **400** |
+| TE path with an unregistered host, or more than 6 `via_hosts` | **400** |
+| TE path toward a port not on one of the domain's networks | **400** |
+| A second TE path for the same host or port in one domain | **409** |
+| Changing a TE path's selector | **400** |
 
 ## Compared with the BGPVPN build
 

@@ -37,8 +37,14 @@ Per remote port:
     ip route replace <ip>/32 encap seg6 mode encap \
         segs [<transit End SID>,...]<remote sid> dev <underlay> table <table>
 
-Per remote node the domain encapsulates to:
-    ip -6 rule add pref 999 iif sv6vrf-<fid> to <remote sid>/128 lookup main
+Per first segment the domain encapsulates to -- a remote decap SID, or for a
+steered route (P6) a transit End SID, the latter only while the edge filter
+covers it:
+    ip -6 rule add pref 999 iif sv6vrf-<fid> to <first seg>/128 lookup main
+
+Per node, over every registered locator (P6, MIGRATION-PLAN.md 8.7):
+    table inet srv6_edge -- on iifname "svp-*", drop `ip6 daddr @sid_space`
+                            and drop `rt type 4` (any tenant-built SRH)
 
 Four things differ from the old build, each a defect it had or one found at
 the gate (P5-PLAN.md 4): the table is sealed (4.1), the seal lets the
@@ -58,6 +64,7 @@ from oslo_log import log as logging
 from networking_srv6_agent._i18n import _
 from networking_srv6_agent.common import constants
 from networking_srv6_agent.common import sid
+from networking_srv6_agent.privileged import nft as priv_nft
 from networking_srv6_agent.privileged import seg6 as priv_seg6
 
 
@@ -124,6 +131,64 @@ def _normalise_prefix(prefix):
         return prefix
 
 
+def _locator_networks(locators):
+    """Sorted, de-duplicated locator networks; an unparseable one is skipped.
+
+    Sorted so the same set always renders the same ruleset text.
+    """
+    networks = set()
+    for locator in locators:
+        if not locator:
+            continue
+        try:
+            networks.add(ipaddress.IPv6Network(locator, strict=False))
+        except ValueError:
+            LOG.warning("SRv6: leaving unparseable locator %s out of the "
+                        "edge filter", locator)
+    return sorted(networks)
+
+
+def render_edge_ruleset(networks):
+    """The whole edge-filter table as one nft script (MIGRATION-PLAN.md 8.7).
+
+    `add` then `delete` then the full table: `delete` alone fails on a table
+    that does not exist yet, and nft runs the script as one transaction, so
+    the replacement is atomic. The SID space is every registered locator --
+    no new configuration (decided 2026-09-10). `auto-merge` because interval
+    sets refuse overlapping elements; locators are disjoint anyway.
+
+    The drop rules match only the gateway ports: a tenant packet passes
+    PREROUTING with iif svp-* before it is routed, while the agent's own
+    encapsulation happens after that routing decision and the outer header
+    never enters PREROUTING. VRF traffic crosses PREROUTING a second time
+    with the VRF device as iif; matching svp-* catches the first pass.
+    """
+    table = 'inet %s' % constants.EDGE_FILTER_TABLE
+    iifname = '%s*' % constants.GW_PORT_PREFIX
+    lines = [
+        'add table %s' % table,
+        'delete table %s' % table,
+        'table %s {' % table,
+        '  set sid_space {',
+        '    type ipv6_addr',
+        '    flags interval',
+        '    auto-merge',
+    ]
+    if networks:
+        lines.append('    elements = { %s }'
+                     % ', '.join(str(n) for n in networks))
+    lines += [
+        '  }',
+        '  chain prerouting {',
+        '    type filter hook prerouting priority raw; policy accept;',
+        '    iifname "%s" ip6 daddr @sid_space counter drop' % iifname,
+        '    iifname "%s" rt type 4 counter drop' % iifname,
+        '  }',
+        '}',
+    ]
+    return '\n'.join(lines) + '\n'
+
+
 class Srv6LinuxDataplane:
 
     def __init__(self, locator, underlay_interface, vrf_table_base,
@@ -136,6 +201,12 @@ class Srv6LinuxDataplane:
         # domain_id -> DomainState, and domain_id -> {network_id: port name}
         self.domains = {}
         self.gateway_ports = collections.defaultdict(dict)
+        # True only after a successful apply; the networks it covers then.
+        self.edge_filter_active = False
+        self._edge_filtered = ()
+        # (prefix, depth) already warned about, so a steered route that does
+        # not fit says so once rather than on every resync.
+        self._mtu_warned = set()
 
     @property
     def own_end_sid(self):
@@ -155,6 +226,9 @@ class Srv6LinuxDataplane:
                 'net.ipv4.conf.%s.rp_filter' % self.underlay_interface, '0')
         priv_seg6.replace_locator_route(self.locator)
         self._ensure_node_end_sid()
+        # Own locator only for now; the first sync_state widens it to every
+        # registered node before any route is programmed.
+        self.ensure_edge_filter([self.locator])
         LOG.info("SRv6 dataplane initialised: locator=%(loc)s "
                  "underlay=%(ul)s", {'loc': self.locator,
                                      'ul': self.underlay_interface})
@@ -234,6 +308,53 @@ class Srv6LinuxDataplane:
     def _apply_global_sysctls(self):
         for key, value in GLOBAL_SYSCTLS:
             self._set_sysctl(key, value)
+
+    # ------------------------------------------------------------------
+    # edge filter (P6, MIGRATION-PLAN.md 8.7)
+    # ------------------------------------------------------------------
+    def ensure_edge_filter(self, locators):
+        """Filter the gateway ports over every known locator, this one too.
+
+        A full replace every time: idempotent, and it restores a table
+        somebody deleted by hand. Returns whether the filter is active.
+        Any failure, a missing nft included, leaves it INACTIVE -- and
+        _install_routes then lets no VRF reach an End SID. There is no knob
+        to switch it off.
+        """
+        networks = _locator_networks(list(locators) + [self.locator])
+        try:
+            priv_nft.apply_ruleset(render_edge_ruleset(networks))
+        except Exception as e:
+            self.edge_filter_active = False
+            self._edge_filtered = ()
+            LOG.error("SRv6: could not apply the edge filter (table inet "
+                      "%(t)s): %(e)s. Steered routes stay sealed on this "
+                      "node until it applies.",
+                      {'t': constants.EDGE_FILTER_TABLE, 'e': e})
+            return False
+        if not self.edge_filter_active or \
+                tuple(networks) != self._edge_filtered:
+            LOG.info("SRv6: edge filter active on %(p)s* over %(n)s",
+                     {'p': constants.GW_PORT_PREFIX,
+                      'n': ', '.join(str(n) for n in networks)})
+        self.edge_filter_active = True
+        self._edge_filtered = tuple(networks)
+        return True
+
+    def _edge_filter_covers(self, sid_address):
+        """Whether a tenant is kept from addressing this SID directly.
+
+        Active is not enough: a rule toward a node whose locator the filter
+        has not learned yet -- a routes_updated racing the domain_updated
+        that carries the new locator -- would reopen 8.7 for that node.
+        """
+        if not self.edge_filter_active:
+            return False
+        try:
+            address = ipaddress.IPv6Address(sid_address)
+        except ValueError:
+            return False
+        return any(address in network for network in self._edge_filtered)
 
     # ------------------------------------------------------------------
     # per-domain
@@ -594,7 +715,7 @@ class Srv6LinuxDataplane:
             transit.pop(0)
         return transit
 
-    def add_routes(self, domain_id, routes, locators, local_host):
+    def add_routes(self, domain_id, routes, locators, local_host, mtus=None):
         """Install one encap route per remote workload address.
 
         A route whose host is this node is skipped: the address is already
@@ -605,11 +726,12 @@ class Srv6LinuxDataplane:
         A route may carry `segments` -- transit End SIDs the server resolved
         from an operator's TE path (P6) -- which go before the remote decap
         SID. A route without them is exactly the depth-1 route of the old
-        build.
+        build. `mtus` maps network_id -> MTU, for the per-route check of a
+        steered route (P6-PLAN.md 4.3).
 
-        Also makes sure the domain's VRF may reach every remote decap SID
-        it now encapsulates to (_ensure_sid_rules); only adds, like the
-        routes. Pruning is sync_routes' job.
+        Also makes sure the domain's VRF may reach the first segment of
+        every route (_ensure_sid_rules); only adds, like the routes.
+        Pruning is sync_routes' job.
 
         Returns the normalised prefixes this node should hold an encap
         route for, which is what sync_routes reconciles the table against.
@@ -622,20 +744,27 @@ class Srv6LinuxDataplane:
         if state is None:
             return set()
         wanted, rule_sids = self._install_routes(state, routes, locators,
-                                                 local_host)
+                                                 local_host, mtus)
         self._ensure_sid_rules(state, rule_sids)
         return wanted
 
-    def _install_routes(self, state, routes, locators, local_host):
+    def _install_routes(self, state, routes, locators, local_host,
+                        mtus=None):
         """The route loop. Returns (wanted prefixes, SIDs needing a rule).
 
         A route's outer destination is its FIRST segment. When that is the
         remote decap SID -- no transit -- the domain's VRF needs a rule to
-        reach it. When it is a transit End SID (P6), no rule is added: a VRF
-        allowed to reach an End SID lets a tenant hand-craft an SRH through
-        it toward another domain's SID. The route is installed but its outer
-        header stays behind the seal until P6 adds SRH filtering or HMAC --
-        it fails closed, and says so.
+        reach it (P5). When it is a transit End SID (P6), the VRF needs a
+        rule toward that End SID, and such a rule lets a tenant hand-craft
+        an SRH through it toward another domain's SID -- unless the edge
+        filter stops tenant packets into the SID space and tenant SRHs at
+        the gateway ports (MIGRATION-PLAN.md 8.7). So the rule is added only
+        while the filter is active and covers that SID. Otherwise the route
+        is installed but its outer header stays behind the seal: it fails
+        closed, and says so.
+
+        Only transit[0] ever gets a rule. The later segments are reached
+        from main by the End behaviour on each waypoint, not from this VRF.
         """
         domain_id = state.domain_id
         wanted = set()
@@ -654,14 +783,20 @@ class Srv6LinuxDataplane:
             remote_sid = sid.format_sid(locator, state.function_id)
             transit = self._transit_segments(route.get('segments'))
             segments = transit + [remote_sid]
-            if transit:
-                LOG.warning("SRv6: domain %(d)s route %(p)s starts at "
-                            "transit SID %(s)s; the VRF is not allowed to "
-                            "reach End SIDs until SRH filtering exists (P6), "
-                            "so this path is sealed",
-                            {'d': domain_id, 'p': prefix, 's': transit[0]})
-            else:
+            if not transit:
                 rule_sids.add(_normalise_sid(remote_sid))
+            elif self._edge_filter_covers(transit[0]):
+                rule_sids.add(_normalise_sid(transit[0]))
+            else:
+                LOG.warning("SRv6: domain %(d)s route %(p)s starts at "
+                            "transit SID %(s)s, but the edge filter is not "
+                            "active for it; the VRF may not reach an End SID "
+                            "without it (MIGRATION-PLAN.md 8.7), so this "
+                            "path is sealed",
+                            {'d': domain_id, 'p': prefix, 's': transit[0]})
+            self._check_route_mtu(prefix,
+                                  (mtus or {}).get(route.get('network_id')),
+                                  len(segments))
             try:
                 priv_seg6.replace_seg6_route(
                     prefix, segments, self.underlay_interface,
@@ -725,7 +860,8 @@ class Srv6LinuxDataplane:
                 LOG.debug("SRv6: removing rule %(v)s -> %(s)s: %(e)s",
                           {'v': state.vrf_name, 's': sid_address, 'e': e})
 
-    def sync_routes(self, domain_id, routes, locators, local_host):
+    def sync_routes(self, domain_id, routes, locators, local_host,
+                    mtus=None):
         """Make the domain's table hold exactly the routes the payload names.
 
         add_routes only ever added, exactly as the gateway ports only ever
@@ -742,13 +878,14 @@ class Srv6LinuxDataplane:
         reconciling against it would delete every route it did not mention.
         The SID rules follow the same split: a rule left behind by an
         incremental remove only lets the VRF reach its own domain's SID, and
-        the next full sync prunes it.
+        the next full sync prunes it. An End-SID rule whose path was removed
+        or emptied is pruned the same way.
         """
         state = self.domains.get(domain_id)
         if state is None:
             return
         wanted, rule_sids = self._install_routes(state, routes, locators,
-                                                 local_host)
+                                                 local_host, mtus)
         self._ensure_sid_rules(state, rule_sids)
         self._remove_unwanted_routes(domain_id, wanted)
         self._remove_unwanted_sid_rules(state, rule_sids)
@@ -792,7 +929,23 @@ class Srv6LinuxDataplane:
                 LOG.debug("SRv6: removing %(p)s: %(e)s",
                           {'p': prefix, 'e': e})
 
-    def check_mtu(self, network_mtu, segment_count=1):
+    def _check_route_mtu(self, prefix, network_mtu, depth):
+        """The MTU of one steered route, warned once per (prefix, depth).
+
+        Depth 1 is the per-network check _apply_domain already makes. Each
+        extra segment costs 16 bytes, so a network that fits at depth 1 may
+        not fit steered; saying so on every resync would bury the log.
+        """
+        if depth < 2 or not network_mtu:
+            return
+        key = (_normalise_prefix(prefix), depth)
+        if key in self._mtu_warned:
+            return
+        if not self.check_mtu(network_mtu, segment_count=depth,
+                              prefix=prefix):
+            self._mtu_warned.add(key)
+
+    def check_mtu(self, network_mtu, segment_count=1, prefix=None):
         """Warn when the tenant MTU plus encapsulation exceeds the underlay.
 
         Not fatal: small packets still pass, so refusing to program the
@@ -809,12 +962,14 @@ class Srv6LinuxDataplane:
             return True
         if network_mtu + overhead > underlay_mtu:
             LOG.warning(
-                "SRv6: tenant MTU %(n)s plus %(o)s bytes of encapsulation "
-                "exceeds underlay MTU %(u)s on %(i)s. Full-size tenant "
+                "SRv6: tenant MTU %(n)s plus %(o)s bytes of encapsulation"
+                "%(r)s exceeds underlay MTU %(u)s on %(i)s. Full-size tenant "
                 "frames will be dropped. Lower the network MTU to %(max)s "
                 "or raise the underlay MTU.",
                 {'n': network_mtu, 'o': overhead, 'u': underlay_mtu,
                  'i': self.underlay_interface,
-                 'max': underlay_mtu - overhead})
+                 'max': underlay_mtu - overhead,
+                 'r': (' (route %s, %d segments)' % (prefix, segment_count)
+                       if prefix else '')})
             return False
         return True
