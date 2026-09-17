@@ -32,7 +32,7 @@ packages = ["networking_srv6_agent"]
 # --- Entry points --------------------------------------------------------
 #
 # Only groups whose targets EXIST are live. The rest are commented and get
-# uncommented by the phase that creates them (MIGRATION-PLAN.md section 5).
+# uncommented by the phase that creates them.
 #
 # This is a safety measure, not tidiness: an entry point pointing at a
 # missing module does not fail quietly. `service_plugins = srv6` with no
@@ -66,3 +66,26 @@ packages = ["networking_srv6_agent"]
 # --- P5: agent and dataplane ---------------------------------------------
 [project.entry-points."neutron.agent.l2.extensions"]
 "srv6" = "networking_srv6_agent.agent.agent_extension:Srv6AgentExtension"
+
+# --- CLI: `openstack srv6 ...` -------------------------------------------
+# OSC turns the underscores in each name into the spaces of the command.
+[project.entry-points."openstack.cli.extension"]
+"srv6" = "networking_srv6_agent.cli.plugin"
+
+[project.entry-points."openstack.srv6.v2"]
+"srv6_domain_create" = "networking_srv6_agent.cli.v2.domain:CreateDomain"
+"srv6_domain_list" = "networking_srv6_agent.cli.v2.domain:ListDomain"
+"srv6_domain_show" = "networking_srv6_agent.cli.v2.domain:ShowDomain"
+"srv6_domain_set" = "networking_srv6_agent.cli.v2.domain:SetDomain"
+"srv6_domain_delete" = "networking_srv6_agent.cli.v2.domain:DeleteDomain"
+"srv6_network_association_create" = "networking_srv6_agent.cli.v2.network_association:CreateNetworkAssociation"
+"srv6_network_association_list" = "networking_srv6_agent.cli.v2.network_association:ListNetworkAssociation"
+"srv6_network_association_show" = "networking_srv6_agent.cli.v2.network_association:ShowNetworkAssociation"
+"srv6_network_association_delete" = "networking_srv6_agent.cli.v2.network_association:DeleteNetworkAssociation"
+"srv6_locator_list" = "networking_srv6_agent.cli.v2.locator:ListLocator"
+"srv6_locator_show" = "networking_srv6_agent.cli.v2.locator:ShowLocator"
+"srv6_te_path_create" = "networking_srv6_agent.cli.v2.te_path:CreateTePath"
+"srv6_te_path_list" = "networking_srv6_agent.cli.v2.te_path:ListTePath"
+"srv6_te_path_show" = "networking_srv6_agent.cli.v2.te_path:ShowTePath"
+"srv6_te_path_set" = "networking_srv6_agent.cli.v2.te_path:SetTePath"
+"srv6_te_path_delete" = "networking_srv6_agent.cli.v2.te_path:DeleteTePath"

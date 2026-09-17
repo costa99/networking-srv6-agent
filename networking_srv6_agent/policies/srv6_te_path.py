@@ -14,7 +14,7 @@
 
 """Policies for TE paths: admin only, every verb and every attribute.
 
-Steering is the admin's control over tenant VRFs (MIGRATION-PLAN.md 8.5), and
+Steering is the admin's control over tenant VRFs, and
 the read side is as much the exposure as the write side: a path names compute
 hosts and resolves to underlay SIDs (TE-VS-SFC 4.3.1). A tenant listing gets
 [] and a show gets 404, the same answers as for the locator registry.

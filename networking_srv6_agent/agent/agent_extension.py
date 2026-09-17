@@ -17,7 +17,7 @@
 Delivered as an L2 agent extension (entry point group
 `neutron.agent.l2.extensions`, enabled with `[agent] extensions = srv6`),
 the mechanism networking-bagpipe uses. Three things come for free that way
-and are the reason for the choice (MIGRATION-PLAN.md 8.4): per-port
+and are the reason for the choice: per-port
 handle_port/delete_port callbacks, a handle on br-int, and the network ->
 local-VLAN mapping the gateway port needs, which is not available outside
 the agent. The price is that this runs under ML2/OVS only -- under ML2/OVN
@@ -263,7 +263,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
 
     @staticmethod
     def _network_mtus(payload):
-        """network_id -> MTU, for the per-route check (P6-PLAN.md 4.3)."""
+        """network_id -> MTU, for the per-route check."""
         return {n['network_id']: n.get('mtu')
                 for n in payload.get('networks') or []}
 
@@ -310,7 +310,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
     # ------------------------------------------------------------------
     # RPC handlers (server -> agent fanout)
     #
-    # The parameter names ARE the wire contract (P4-PLAN.md 4.4): a kwarg
+    # The parameter names ARE the wire contract: a kwarg
     # the server sends that is not named here lands in **kwargs and the
     # handler returns without a word. TestRpcContract binds every cast of
     # services/rpc.py to these signatures.

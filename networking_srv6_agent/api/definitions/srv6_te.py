@@ -14,19 +14,19 @@
 
 """API definition: operator-defined SRv6 traffic-engineering paths.
 
-Admin-only and top level, not a child of srv6_domain (MIGRATION-PLAN.md 4):
+Admin-only and top level, not a child of srv6_domain:
 every attribute here is infrastructure vocabulary -- compute host names and
 underlay SIDs -- and a child of a tenant-readable object would leak the host
 inventory to the tenant. domain_id is therefore a body field.
 
-A path picks its traffic with exactly one selector (MIGRATION-PLAN.md 8.5):
+A path picks its traffic with exactly one selector:
 
     destination_host      all of the domain's traffic toward that node
     destination_port_id   traffic toward one VM, that port's fixed IPs only
 
 and steers it through via_hosts, in traversal order. Precedence per route is
 port path > host path > direct. "Exactly one" is enforced by the plugin, not
-here and not by a CHECK constraint (P6-PLAN.md 2).
+here and not by a CHECK constraint.
 
 `segments` and `status` are what the SERVER resolved when the path was read,
 not an acknowledgement from any agent.

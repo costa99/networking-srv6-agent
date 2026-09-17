@@ -466,10 +466,10 @@ class TestConfigValidation(AgentExtensionTestCaseBase):
 
 
 # ----------------------------------------------------------------------
-# P5 additions (P5-PLAN.md 4, 5)
+# P5 additions
 # ----------------------------------------------------------------------
 class TestKernelGarbageCollection(AgentExtensionTestCaseBase):
-    """4.3: the old GC diffed in-memory state, empty after every restart.
+    """The old GC diffed in-memory state, empty after every restart.
 
     A domain deleted while the agent was down -- or kernel state left by an
     earlier build -- was therefore never collected. The old test passed
@@ -521,7 +521,7 @@ class TestKernelGarbageCollection(AgentExtensionTestCaseBase):
 
 
 class TestEdgeFilterTriggers(AgentExtensionTestCaseBase):
-    """P6-PLAN.md 4.1: when the edge filter is (re)applied."""
+    """When the edge filter is (re)applied."""
 
     LOC2 = 'fc00:0:2::/48'
     LOC3 = 'fc00:0:3::/48'
@@ -600,7 +600,7 @@ class TestEdgeFilterTriggers(AgentExtensionTestCaseBase):
 
 
 class TestRouteMtus(AgentExtensionTestCaseBase):
-    """P6-PLAN.md 4.3: each route's network MTU reaches the dataplane."""
+    """Each route's network MTU reaches the dataplane."""
 
     def setUp(self):
         super().setUp()
@@ -626,7 +626,7 @@ class TestRouteMtus(AgentExtensionTestCaseBase):
 
 
 class TestDriverType(base.BaseTestCase):
-    """4.4 / MIGRATION-PLAN.md 8.4."""
+    """Only the OVS agent drives the dataplane."""
 
     def test_the_ovs_agent_is_accepted(self):
         agent_extension.Srv6AgentExtension._check_driver_type(
@@ -661,7 +661,7 @@ class TestRpcSetup(base.BaseTestCase):
 
 
 class TestRpcContract(base.BaseTestCase):
-    """P5-PLAN.md 5: every cast the server sends binds to named parameters.
+    """Every cast the server sends binds to named parameters.
 
     A kwarg the handler does not name lands in **kwargs, the named one
     defaults to None, and the handler returns without a word. This is the

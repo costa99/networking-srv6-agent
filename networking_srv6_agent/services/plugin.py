@@ -21,7 +21,7 @@ and the decision of *when* to tell agents anything. It programs no kernel
 state itself -- that is entirely the agent's job.
 
 This is the old networking-bgpvpn SRv6 driver with the driver/plugin split
-removed (MIGRATION-PLAN.md 3.2). The precommit/postcommit discipline
+removed. The precommit/postcommit discipline
 survives without the hook framework: write inside the transaction, fan out
 RPC after it commits, and read anything the commit destroys BEFORE it (delta
 D5 -- a postcommit hook that looked up the function id found it already
@@ -73,7 +73,7 @@ def _prefix_for(address):
 def _route_for(port, address, host):
     """One payload route. The full sync and the incremental path share it.
 
-    network_id is for the agent's per-route MTU check (P6-PLAN.md 4.3);
+    network_id is for the agent's per-route MTU check;
     port_id is what per-VM TE precedence resolves on.
     """
     return {'prefix': _prefix_for(address),
@@ -229,7 +229,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         """Full desired state of one domain, as agents consume it.
 
         Built with an ELEVATED context whoever triggered it. A shared network
-        is allowed in a domain (P4-PLAN.md 4.3), and the instances on it may
+        is allowed in a domain, and the instances on it may
         belong to other projects: under the owner's own context their ports
         are invisible, so their routes would silently be missing.
         """
@@ -470,7 +470,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         the admin asked for, and quietly dropping a hop is the silent
         partial steering the locator API exists to prevent. The caller
         falls back to the direct route instead, and the path reports
-        DEGRADED (P6-PLAN.md 0).
+        DEGRADED.
         """
         if any(not locators.get(host) for host in via_hosts):
             return None
@@ -561,7 +561,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
 
     @staticmethod
     def _validate_via_hosts(via_hosts, locators):
-        """A 400, never a silent `segments: []` (MIGRATION-PLAN.md P6)."""
+        """A 400, never a silent `segments: []`."""
         if len(via_hosts) > constants.MAX_TE_VIA_HOSTS:
             raise te_ext.Srv6TePathInvalid(
                 reason=_("at most %(max)d via_hosts are allowed, got %(n)d")

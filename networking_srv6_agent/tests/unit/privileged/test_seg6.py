@@ -129,7 +129,7 @@ class TestSeg6EncapRoute(Seg6ArgvTestCase):
 
 
 class TestVrfSeal(Seg6ArgvTestCase):
-    """MIGRATION-PLAN.md 8.6: the route that closes the fall-through."""
+    """The route that closes the fall-through."""
 
     def test_v4(self):
         seg6.replace_unreachable_default(13783)
@@ -196,7 +196,7 @@ class TestListVrfNames(Seg6ArgvTestCase):
 
 
 class TestSidRules(Seg6ArgvTestCase):
-    """P5-PLAN.md 4.6: the rules that let a domain's outer headers out."""
+    """The rules that let a domain's outer headers out."""
 
     def test_add(self):
         seg6.add_sid_rule('sv6vrf-2394', 'fc00:0:2:95a::')

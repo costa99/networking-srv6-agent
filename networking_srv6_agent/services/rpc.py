@@ -24,8 +24,8 @@ Directions:
                      domain_deleted
   agent  -> server   call:         sync_state(host, locator) -> [domain, ...]
 
-The kwargs are part of the contract, not only the method names (P4-PLAN.md
-4.4). The agent's handlers end in **kwargs, so a server sending `vpn=` to a
+The kwargs are part of the contract, not only the method names. The
+agent's handlers end in **kwargs, so a server sending `vpn=` to a
 handler expecting `domain=` would see the payload land in **kwargs and the
 handler return without a word. P5's contract test binds every cast below to
 the agent's named parameters.

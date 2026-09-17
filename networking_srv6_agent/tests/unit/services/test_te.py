@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""P6: traffic-engineering paths (P6-PLAN.md 5).
+"""P6: traffic-engineering paths.
 
 The REST cases drive /v2.0/srv6_te_paths through neutron's own harness on
 the P4 base class: the policy from the entry point, a real database, and
@@ -197,7 +197,7 @@ class TestTePathApi(TeRestTestCase):
 
     def test_a_domain_delete_cascades_its_paths(self):
         # By the domain's owner: the admin's paths go with it, and the
-        # server logs that (P4-PLAN.md 4.2).
+        # server logs that.
         self._host_path()
         req = self.new_delete_request('srv6_domains', self.domain['id'])
         self._check(req.get_response(self.ext_api), 204)
@@ -211,7 +211,7 @@ class TestTePathApi(TeRestTestCase):
 
 
 class TestTePathValidation(TeRestTestCase):
-    """A 400, never a silent `segments: []` (MIGRATION-PLAN.md P6)."""
+    """A 400, never a silent `segments: []`."""
 
     def test_an_unknown_domain_is_not_found(self):
         self._host_path(expected=404, domain_id=uuidutils.generate_uuid())
@@ -332,7 +332,7 @@ class TePluginTestCaseBase(test_plugin.PluginUnitTestCaseBase):
 
 
 class TestPrecedence(TePluginTestCaseBase):
-    """Port path > host path > direct (MIGRATION-PLAN.md 4)."""
+    """Port path > host path > direct."""
 
     def _attach(self, *routes):
         return self.plugin._attach_segments(self.ctx, 'd1', list(routes),
@@ -408,7 +408,7 @@ class TestPayloadCarriesTe(TePluginTestCaseBase):
 
 
 class TestIncrementalPathCarriesTe(TePluginTestCaseBase):
-    """_notify_port attaches segments too (P6-PLAN.md 8).
+    """_notify_port attaches segments too.
 
     Without them a steered VM's route arrives at depth 1 and stays so until
     the next full sync.

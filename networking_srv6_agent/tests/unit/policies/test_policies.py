@@ -94,8 +94,8 @@ class TestPolicyCoverage(base.BaseTestCase):
             self.assertIn(name, self.rules)
 
     def test_te_paths_are_admin_only_for_every_verb_and_attribute(self):
-        # MIGRATION-PLAN.md 8.5: steering is the admin's, and the read side
-        # names hosts and underlay SIDs (P6-PLAN.md 1).
+        # Steering is the admin's, and the read side
+        # names hosts and underlay SIDs.
         te_rules = [r for r in self.rules.values()
                     if r.name.split(':')[0].endswith('_srv6_te_path')]
         self.assertEqual(12, len(te_rules))

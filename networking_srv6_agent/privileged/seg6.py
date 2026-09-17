@@ -202,8 +202,8 @@ def replace_unreachable_default(table, family_v6=False):
 
     Without it the l3mdev rule (pref 1000) lets a miss continue to `main`
     (pref 32766), which holds every domain's End.DT46 SID: a tenant's VM
-    could address another domain's SID and be decapsulated into that VRF
-    (MIGRATION-PLAN.md 8.6). It carries no `encap seg6`, so
+    could address another domain's SID and be decapsulated into that VRF.
+    It carries no `encap seg6`, so
     list_seg6_routes never returns it and route reconciliation never
     deletes it.
     """

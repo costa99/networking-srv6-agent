@@ -20,9 +20,8 @@ build needed `neutron_lib.api.definitions.bgpvpn_srv6`, which exists only in
 the fork, while APIExtensionDescriptor accepts any module-like object that
 carries these names.
 
-URLs have no path prefix and every collection is prefixed `srv6_`
-(P4-PLAN.md 1.3): neutron derives the policy rule names from the collection
-name, so a bare `domains` would register a global `create_domain` rule.
+URLs have no path prefix and every collection is prefixed `srv6_`: neutron derives the policy rule names from the
+collection name, so a bare `domains` would register a global `create_domain` rule.
 """
 
 from neutron_lib.db import constants as db_const
@@ -77,7 +76,7 @@ RESOURCE_ATTRIBUTE_MAP = {
                  'is_visible': True,
                  'is_filter': True,
                  'is_sort_key': True},
-        # Exactly one valid value (MIGRATION-PLAN.md 8.3): the API offers no
+        # Exactly one valid value: the API offers no
         # choice the dataplane cannot honour. Create-only, because changing
         # it would re-program every node's decap SID under live traffic.
         SRV6_BEHAVIOR: {'allow_post': True, 'allow_put': False,

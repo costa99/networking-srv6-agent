@@ -14,9 +14,8 @@
 
 """Invariants of the API definitions and their descriptors.
 
-Each of these is a decision recorded in MIGRATION-PLAN.md section 8 or
-P4-PLAN.md section 3, stated as something a later edit would have to break
-a test to undo.
+Each of these is a design decision, stated as something a later edit would
+have to break a test to undo.
 """
 
 import importlib
@@ -38,7 +37,7 @@ ASSOC = srv6_def.SUB_RESOURCE_ATTRIBUTE_MAP[srv6_def.NET_ASSOC_COLLECTION_NAME]
 class TestDomainDefinition(base.BaseTestCase):
 
     def test_behavior_offers_exactly_end_dt46(self):
-        # 8.3: the API advertises only the choice the dataplane has.
+        # The API advertises only the choice the dataplane has.
         attr = DOMAIN_ATTRS[srv6_def.SRV6_BEHAVIOR]
         self.assertEqual(['End.DT46'], attr['validate']['type:values'])
         self.assertEqual('End.DT46', attr['default'])
@@ -77,7 +76,7 @@ class TestAssociationDefinition(base.BaseTestCase):
             self.assertFalse(attr['allow_put'], name)
 
     def test_network_associations_only(self):
-        # 8.1: router associations are not implemented at all -- no
+        # Router associations are not implemented at all -- no
         # endpoint rather than an endpoint that only raises.
         self.assertEqual([srv6_def.NET_ASSOC_COLLECTION_NAME],
                          list(srv6_def.SUB_RESOURCE_ATTRIBUTE_MAP))

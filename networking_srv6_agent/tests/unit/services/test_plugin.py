@@ -473,7 +473,7 @@ class TestPortSelection(PluginUnitTestCaseBase):
 
     def test_route_for_an_ipv4_port_keeps_its_port_and_network(self):
         # port_id for per-VM TE precedence, network_id for the agent's
-        # per-route MTU check (P6-PLAN.md 3).
+        # per-route MTU check.
         port = _port()
         routes = self._routes(port)
         self.assertEqual([{'prefix': '10.0.0.5/32', 'host': 'node1',

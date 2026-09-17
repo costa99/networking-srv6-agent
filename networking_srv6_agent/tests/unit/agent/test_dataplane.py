@@ -20,7 +20,7 @@ order. That is precisely where this layer went wrong during bring-up -- the
 kernel calls themselves were fine, the arguments and the ordering were not.
 
 Ported near-verbatim from networking-bgpvpn (srv6-te); the classes after
-TestMtu cover what P5 added (P5-PLAN.md 4).
+TestMtu cover what P5 added.
 """
 
 from unittest import mock
@@ -672,10 +672,10 @@ class TestMtu(DataplaneTestCaseBase):
 
 
 # ----------------------------------------------------------------------
-# P5 additions (P5-PLAN.md 4)
+# P5 additions
 # ----------------------------------------------------------------------
 class TestSeal(DataplaneTestCaseBase):
-    """4.1 / MIGRATION-PLAN.md 8.6: no lookup may fall through to main.
+    """No lookup may fall through to main.
 
     Measured on node 1 before this existed (evidence/vrf-fallthrough.txt):
     from a tenant's gateway port, another tenant's SID resolved to its
@@ -720,7 +720,7 @@ class TestSeal(DataplaneTestCaseBase):
 
 
 class TestDeleteFlushesTheTable(DataplaneTestCaseBase):
-    """4.2: deleting the VRF device does not empty its table."""
+    """Deleting the VRF device does not empty its table."""
 
     def test_both_families_are_flushed(self):
         self._with_domain()
@@ -748,7 +748,7 @@ class TestDeleteFlushesTheTable(DataplaneTestCaseBase):
 
 
 class TestDeleteAfterRestart(DataplaneTestCaseBase):
-    """4.3: delete used to find gateway ports in memory only."""
+    """Delete used to find gateway ports in memory only."""
 
     def setUp(self):
         super().setUp()
@@ -797,9 +797,9 @@ class TestPresentFunctionIds(DataplaneTestCaseBase):
 
 
 class TestSidRules(DataplaneTestCaseBase):
-    """4.6: the seal must not stop the domain's OWN encapsulated traffic.
+    """The seal must not stop the domain's OWN encapsulated traffic.
 
-    Found at the two-node gate (REPORT-P5-two-node §9): after seg6
+    Found at the two-node gate: after seg6
     encapsulates a packet that arrived on a gateway port, the kernel routes
     the outer IPv6 header in the same VRF, hit the unreachable default, and
     dropped every packet -- Ip6InNoRoutes one per echo request, on both
@@ -928,7 +928,7 @@ class TestSidRules(DataplaneTestCaseBase):
 
 
 class TestSegments(DataplaneTestCaseBase):
-    """4.5: the agent half of TE, moved here from P6.
+    """The agent half of TE, moved here from P6.
 
     A payload carries `segments` only on a route an admin TE path steers;
     every other route is exactly the depth-1 route TestRoutes pins.
@@ -978,14 +978,14 @@ class TestSegments(DataplaneTestCaseBase):
 
 
 # ----------------------------------------------------------------------
-# P6 additions (P6-PLAN.md 4, 5)
+# P6 additions
 # ----------------------------------------------------------------------
 LOCATOR2 = 'fc00:0:2::/48'
 LOCATOR3 = 'fc00:0:3::/48'
 
 
 class TestEdgeFilterRendering(base.BaseTestCase):
-    """4.1: the ruleset text. Checked with `nft -c` against nftables 1.0.9."""
+    """The ruleset text. Checked with `nft -c` against nftables 1.0.9."""
 
     def _render(self, *locators):
         return dataplane.render_edge_ruleset(
@@ -1041,7 +1041,7 @@ class TestEdgeFilterRendering(base.BaseTestCase):
 
 
 class TestEdgeFilter(DataplaneTestCaseBase):
-    """4.1: applied at initialize_node, active only after it succeeds."""
+    """Applied at initialize_node, active only after it succeeds."""
 
     def _applied(self):
         return self.priv_nft.apply_ruleset.call_args[0][0]
@@ -1089,11 +1089,11 @@ class TestEdgeFilter(DataplaneTestCaseBase):
 
 
 class TestEndSidRules(DataplaneTestCaseBase):
-    """4.2: a steered route's first End SID gets a rule -- behind the filter.
+    """A steered route's first End SID gets a rule -- behind the filter.
 
     A rule toward an End SID lets the VRF's outer headers reach it, and
     without the filter a tenant could send its own SRH that way into
-    another domain (MIGRATION-PLAN.md 8.7).
+    another domain.
     """
 
     RED = 'sv6vrf-7'
@@ -1188,7 +1188,7 @@ class TestEndSidRules(DataplaneTestCaseBase):
 
 
 class TestRouteMtu(DataplaneTestCaseBase):
-    """4.3: a steered route's MTU, from its network, warned once."""
+    """A steered route's MTU, from its network, warned once."""
 
     def setUp(self):
         super().setUp()

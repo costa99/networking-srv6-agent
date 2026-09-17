@@ -14,7 +14,7 @@
 
 """expand te port selector
 
-P6 (P6-PLAN.md 2, MIGRATION-PLAN.md 8.5): a TE path selects its traffic by
+P6: a TE path selects its traffic by
 exactly one of destination_host or destination_port_id.
 
     srv6_te_paths.destination_host      becomes nullable

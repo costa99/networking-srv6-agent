@@ -17,7 +17,7 @@
 The file is srv6_te.py, so the class has to be `Srv6_te`: neutron derives
 it with str.capitalize(), which lowercases everything after the first
 character. `Srv6Te` would be skipped and GET /v2.0/srv6_te_paths would
-simply 404 (P6-PLAN.md 8).
+simply 404.
 """
 
 from neutron.api.v2 import resource_helper

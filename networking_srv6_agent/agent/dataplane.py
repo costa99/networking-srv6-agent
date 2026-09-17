@@ -42,15 +42,14 @@ steered route (P6) a transit End SID, the latter only while the edge filter
 covers it:
     ip -6 rule add pref 999 iif sv6vrf-<fid> to <first seg>/128 lookup main
 
-Per node, over every registered locator (P6, MIGRATION-PLAN.md 8.7):
+Per node, over every registered locator (P6):
     table inet srv6_edge -- on iifname "svp-*", drop `ip6 daddr @sid_space`
                             and drop `rt type 4` (any tenant-built SRH)
 
 Four things differ from the old build, each a defect it had or one found at
-the gate (P5-PLAN.md 4): the table is sealed (4.1), the seal lets the
-domain's own outer headers out through the SID rules (4.6), the table is
-flushed on delete (4.2), and a delete finds its gateway ports on the bridge
-rather than in memory (4.3).
+the gate: the table is sealed, the seal lets the domain's own outer headers
+out through the SID rules, the table is flushed on delete, and a delete finds
+its gateway ports on the bridge rather than in memory.
 """
 
 import collections
@@ -149,7 +148,7 @@ def _locator_networks(locators):
 
 
 def render_edge_ruleset(networks):
-    """The whole edge-filter table as one nft script (MIGRATION-PLAN.md 8.7).
+    """The whole edge-filter table as one nft script.
 
     `add` then `delete` then the full table: `delete` alone fails on a table
     that does not exist yet, and nft runs the script as one transaction, so
@@ -310,7 +309,7 @@ class Srv6LinuxDataplane:
             self._set_sysctl(key, value)
 
     # ------------------------------------------------------------------
-    # edge filter (P6, MIGRATION-PLAN.md 8.7)
+    # edge filter (P6)
     # ------------------------------------------------------------------
     def ensure_edge_filter(self, locators):
         """Filter the gateway ports over every known locator, this one too.
@@ -403,7 +402,7 @@ class Srv6LinuxDataplane:
 
     @staticmethod
     def _seal_table(domain_id, vrf_table):
-        """MIGRATION-PLAN.md 8.6. Fails CLOSED.
+        """Fails CLOSED.
 
         A VRF that cannot be sealed is a VRF a tenant can escape from, so
         the domain is not programmed at all; the next resync retries.
@@ -727,7 +726,7 @@ class Srv6LinuxDataplane:
         from an operator's TE path (P6) -- which go before the remote decap
         SID. A route without them is exactly the depth-1 route of the old
         build. `mtus` maps network_id -> MTU, for the per-route check of a
-        steered route (P6-PLAN.md 4.3).
+        steered route.
 
         Also makes sure the domain's VRF may reach the first segment of
         every route (_ensure_sid_rules); only adds, like the routes.
@@ -758,7 +757,7 @@ class Srv6LinuxDataplane:
         rule toward that End SID, and such a rule lets a tenant hand-craft
         an SRH through it toward another domain's SID -- unless the edge
         filter stops tenant packets into the SID space and tenant SRHs at
-        the gateway ports (MIGRATION-PLAN.md 8.7). So the rule is added only
+        the gateway ports. So the rule is added only
         while the filter is active and covers that SID. Otherwise the route
         is installed but its outer header stays behind the seal: it fails
         closed, and says so.
@@ -791,7 +790,7 @@ class Srv6LinuxDataplane:
                 LOG.warning("SRv6: domain %(d)s route %(p)s starts at "
                             "transit SID %(s)s, but the edge filter is not "
                             "active for it; the VRF may not reach an End SID "
-                            "without it (MIGRATION-PLAN.md 8.7), so this "
+                            "without it, so this "
                             "path is sealed",
                             {'d': domain_id, 'p': prefix, 's': transit[0]})
             self._check_route_mtu(prefix,
@@ -811,7 +810,7 @@ class Srv6LinuxDataplane:
         return wanted, rule_sids
 
     # ------------------------------------------------------------------
-    # SID rules (P5-PLAN.md 4.6)
+    # SID rules
     # ------------------------------------------------------------------
     @staticmethod
     def _sid_rules_for(vrf_name):

@@ -17,7 +17,7 @@
 A path says "in this domain, traffic towards <selector> goes via these
 transit nodes, in this order". The selector is exactly one of a destination
 host -- all of the domain's traffic toward that node -- or a destination
-port -- one VM's addresses only (P6, MIGRATION-PLAN.md 8.5). The plugin turns
+port -- one VM's addresses only (P6). The plugin turns
 each path into the prefix of the segment list on the matching encapsulation
 routes; without a path, the segment list is just the destination's domain
 SID and the packet follows the underlay shortest path.

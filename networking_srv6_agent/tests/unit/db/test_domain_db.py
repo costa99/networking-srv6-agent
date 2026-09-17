@@ -109,7 +109,7 @@ class TestDomainCrud(DomainDbTestCase):
         self.assertEqual(['a'], [d['name'] for d in found])
 
     def test_a_project_may_own_several_domains(self):
-        # MIGRATION-PLAN 8.2: many per project, not one implicit domain.
+        # Many per project, not one implicit domain.
         self._create_domain(name='prod')
         self._create_domain(name='dev')
         self.assertEqual(2, len(domain_db.get_domains(self.ctx)))

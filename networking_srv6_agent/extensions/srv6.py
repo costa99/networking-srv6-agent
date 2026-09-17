@@ -129,7 +129,7 @@ class Srv6(api_extensions.APIExtensionDescriptor):
 class Srv6PluginBase(libbase.ServicePluginBase, metaclass=abc.ABCMeta):
     """The methods neutron's controllers call, by their derived names.
 
-    No router-association methods at all (MIGRATION-PLAN.md 8.1): an
+    No router-association methods at all: an
     endpoint that does not exist answers 404, which is honest; a method that
     only ever raises answers 500. No update for associations either: there
     is nothing on one to update.

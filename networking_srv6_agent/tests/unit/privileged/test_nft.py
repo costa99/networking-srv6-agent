@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""argv and stdin of the edge filter's privileged entrypoint (P6-PLAN.md 5).
+"""argv and stdin of the edge filter's privileged entrypoint.
 """
 
 from unittest import mock

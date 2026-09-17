@@ -19,7 +19,7 @@ then the parent member name, then the collection --
 create_srv6_domain_network_association, and so on.
 
 ADMIN_OR_PROJECT_*, checked against the association's own project_id, and
-NOT ADMIN_OR_PARENT_OWNER_* as P4-PLAN.md first proposed: neutron resolves
+NOT ADMIN_OR_PARENT_OWNER_* as first proposed: neutron resolves
 ext_parent_owner only for the parents in neutron-lib's
 EXT_PARENT_RESOURCE_MAPPING (floatingip, router, local_ip, qos policy), so
 for srv6_domain that rule could never pass for a tenant. What policy cannot

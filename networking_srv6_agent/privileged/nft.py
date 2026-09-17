@@ -15,7 +15,7 @@
 """The one privileged operation the SRv6 edge filter needs: load a ruleset.
 
 A module of its own because seg6.ip_route_cmd runs only `ip`. The dataplane
-renders the ruleset (MIGRATION-PLAN.md 8.7); this only hands it to nft.
+renders the ruleset; this only hands it to nft.
 
 On stdin, never on the command line: `nft -f -` parses the whole script as
 one transaction, so the `add table` / `delete table` / `table {...}` idiom

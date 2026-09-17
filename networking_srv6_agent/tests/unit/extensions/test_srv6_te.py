@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Invariants of the srv6-te definition and descriptor (P6-PLAN.md 1, 5)."""
+"""Invariants of the srv6-te definition and descriptor."""
 
 from neutron.tests import base
 from neutron_lib import exceptions as n_exc
