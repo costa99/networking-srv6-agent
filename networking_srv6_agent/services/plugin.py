@@ -108,10 +108,47 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         self.conf = cfg.CONF[config.SRV6_SERVER_GROUP]
         self.agent_rpc = rpc.Srv6AgentNotifyAPI()
         self._pool_synced = False
+        self.encoding = self.conf.dataplane_encoding
+        self._validate_encoding_config()
         LOG.info("SRv6 service plugin initialised (vrf_table_base=%(base)s, "
-                 "function_id_ranges=%(ranges)s)",
+                 "function_id_ranges=%(ranges)s, dataplane_encoding=%(enc)s)",
                  {'base': self.conf.vrf_table_base,
-                  'ranges': self.conf.function_id_ranges})
+                  'ranges': self.conf.function_id_ranges,
+                  'enc': self.encoding})
+
+    @property
+    def usid(self):
+        return self.encoding == constants.ENCODING_USID
+
+    def _validate_encoding_config(self):
+        """Refuse to start in usid mode with function ids outside the LIB.
+
+        Under a uN a function id is read as the next node when it has no
+        decap route of its own, so ids that are also node ids would turn a
+        deleted domain's traffic into traffic for another node
+        (USID-PLAN.md D2). Ids already allocated outside the range are
+        kept and warned about by sync_allocation_pool, as for any range
+        change.
+        """
+        if not self.usid:
+            return
+        try:
+            ranges = srv6_db.parse_function_id_ranges(
+                self.conf.function_id_ranges)
+        except ValueError as e:
+            raise n_exc.InvalidConfigurationOption(
+                opt_name='[srv6] function_id_ranges', opt_value=str(e))
+        for start, end in ranges:
+            if not (sid.is_lib_function_id(start) and
+                    sid.is_lib_function_id(end)):
+                raise n_exc.InvalidConfigurationOption(
+                    opt_name='[srv6] function_id_ranges',
+                    opt_value=_("%(s)#x:%(e)#x -- with dataplane_encoding = "
+                                "usid every range must lie inside the "
+                                "microSID Local ID Block %(lo)#x:%(hi)#x")
+                    % {'s': start, 'e': end,
+                       'lo': constants.USID_LIB_MIN,
+                       'hi': constants.USID_LIB_MAX})
 
     # ------------------------------------------------------------------
     # helpers
@@ -256,6 +293,9 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                                         locators),
                 locators),
             'locators': locators,
+            # Additive, so PAYLOAD_VERSION stays 1: an older agent ignores
+            # it, and a missing key means full SIDs to a newer one.
+            'encoding': self.encoding,
         }
 
     def _push_domain(self, context, domain):
@@ -459,12 +499,63 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 return self._make_locator_dict(row, fields)
         raise srv6_ext.Srv6LocatorNotFound(id=id)
 
+    def _check_capabilities(self, host, capabilities):
+        """Name a node that cannot honour dataplane_encoding. Logs only.
+
+        Deployment-wide by design (USID-PLAN.md D3): the server does not
+        route around such a node, but it does not let it fail in silence.
+        """
+        required = constants.ENCODING_REQUIRES[self.encoding]
+        if not required:
+            return
+        if capabilities is None:
+            LOG.warning("SRv6 agent on %(host)s did not report its "
+                        "capabilities (an older agent?); it may not support "
+                        "dataplane_encoding = %(enc)s",
+                        {'host': host, 'enc': self.encoding})
+            return
+        missing = [c for c in required if c not in capabilities]
+        if missing:
+            LOG.error("SRv6 agent on %(host)s lacks %(missing)s, which "
+                      "dataplane_encoding = %(enc)s needs (kernel >= 6.1 and "
+                      "iproute2 >= 6.1). Traffic through and to that node "
+                      "will fail.",
+                      {'host': host, 'missing': ', '.join(missing),
+                       'enc': self.encoding})
+
+    @staticmethod
+    def _check_usid_locator(admin_context, host, locator):
+        """F3216, a node C-SID in the GIB, and the block everyone else uses.
+
+        Every container begins with ONE block, so a path through a node
+        in another block cannot be packed; refusing the locator is clearer
+        than routes that silently fall back to full SIDs.
+        """
+        sid.check_usid_locator(locator)
+        block = sid.usid_block(locator)
+        for other_host, other in srv6_db.get_host_locators(
+                admin_context).items():
+            if other_host == host or not other:
+                continue
+            try:
+                other_block = sid.usid_block(other)
+            except sid.InvalidLocator:
+                continue
+            if other_block != block:
+                raise sid.InvalidLocator(
+                    _("it is in block %(b)s but %(h)s's locator %(o)s is in "
+                      "%(ob)s; microSID needs one block for every node")
+                    % {'b': block, 'h': other_host, 'o': other,
+                       'ob': other_block})
+
     # ------------------------------------------------------------------
     # traffic engineering (P6, admin-only)
     # ------------------------------------------------------------------
-    @staticmethod
-    def _transit_sids(via_hosts, locators):
-        """The End SIDs of via_hosts in order, or None if one is unknown.
+    def _transit_sids(self, via_hosts, locators):
+        """The transit SIDs of via_hosts in order, or None if one is unknown.
+
+        Each host's End SID, <locator>:fff0::, or in usid mode its uN, the
+        locator's own address -- the agent packs those into containers.
 
         None, not a shorter list: a path missing a waypoint is not the path
         the admin asked for, and quietly dropping a hop is the silent
@@ -474,6 +565,13 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         """
         if any(not locators.get(host) for host in via_hosts):
             return None
+        if self.usid:
+            try:
+                return [sid.node_sid(locators[host]) for host in via_hosts]
+            except sid.InvalidLocator as e:
+                LOG.error("SRv6: a via host's locator is not usable for "
+                          "microSID: %s", e)
+                return None
         return [sid.format_sid(locators[host],
                                constants.NODE_END_FUNCTION_ID)
                 for host in via_hosts]
@@ -530,6 +628,11 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         DEGRADED: [], because a via host or the destination has no locator,
                   or the port is unbound; the routes go direct meanwhile.
 
+        `encoded_segments` is what the ingress will actually push: the
+        same list with full SIDs, the C-SID containers in usid mode --
+        computed by the same sid.pack_next_csid the agent calls, so the
+        two cannot disagree.
+
         Server resolution, not an agent acknowledgement: ACTIVE says the
         payload carries this list, not that any kernel holds it.
         """
@@ -538,8 +641,10 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         transit = self._transit_sids(path[te_def.VIA_HOSTS], locators)
         if (destination and locators.get(destination) and
                 transit is not None and function_id is not None):
-            path[te_def.SEGMENTS] = transit + [
+            segments = transit + [
                 sid.format_sid(locators[destination], function_id)]
+            path[te_def.SEGMENTS] = segments
+            path[te_def.ENCODED_SEGMENTS] = self._encoded(segments)
             path[te_def.STATUS] = te_def.STATUS_ACTIVE
             return path
         LOG.warning("SRv6 TE path %(id)s is DEGRADED: destination %(dst)s, "
@@ -548,8 +653,18 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                     "direct", {'id': path['id'], 'dst': destination,
                                'via': path[te_def.VIA_HOSTS]})
         path[te_def.SEGMENTS] = []
+        path[te_def.ENCODED_SEGMENTS] = []
         path[te_def.STATUS] = te_def.STATUS_DEGRADED
         return path
+
+    def _encoded(self, segments):
+        """The pushed form of a segment list; the agent's _encode twin."""
+        if not self.usid:
+            return list(segments)
+        try:
+            return sid.pack_next_csid(segments)
+        except sid.InvalidLocator:
+            return list(segments)
 
     def _resolved(self, context, path, locators=None):
         admin_context = context.elevated()
@@ -777,7 +892,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                  constants.TOPIC_SRV6_PLUGIN)
         return self.conn.consume_in_threads()
 
-    def handle_sync_state(self, context, host, locator):
+    def handle_sync_state(self, context, host, locator, capabilities=None):
         """Register a locator and return every domain's full state.
 
         Also re-broadcasts each domain, because a node whose locator is new
@@ -787,9 +902,12 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         """
         admin_context = n_context.get_admin_context()
         self._ensure_pool(admin_context)
+        self._check_capabilities(host, capabilities)
         if locator:
             try:
                 sid.parse_locator(locator)
+                if self.usid:
+                    self._check_usid_locator(admin_context, host, locator)
             except sid.InvalidLocator as e:
                 LOG.error("SRv6 agent on %(host)s reported an unusable "
                           "locator %(loc)s: %(err)s",

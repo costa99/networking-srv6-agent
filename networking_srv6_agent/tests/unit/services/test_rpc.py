@@ -75,7 +75,15 @@ class TestServerRpcCallback(base.BaseTestCase):
         self.callback.sync_state(mock.sentinel.ctx, host='node1',
                                  locator='fc00:0:1::/48', payload_version=1)
         self.plugin.handle_sync_state.assert_called_once_with(
-            mock.sentinel.ctx, 'node1', 'fc00:0:1::/48')
+            mock.sentinel.ctx, 'node1', 'fc00:0:1::/48', capabilities=None)
+
+    def test_passes_the_agents_capabilities_on(self):
+        self.callback.sync_state(mock.sentinel.ctx, host='node1',
+                                 locator='fc00:0:1::/48', payload_version=1,
+                                 capabilities=['encap-red', 'next-csid'])
+        self.plugin.handle_sync_state.assert_called_once_with(
+            mock.sentinel.ctx, 'node1', 'fc00:0:1::/48',
+            capabilities=['encap-red', 'next-csid'])
 
     def test_refuses_an_unknown_payload_version(self):
         # Half-applying a message whose shape cannot be relied on is worse

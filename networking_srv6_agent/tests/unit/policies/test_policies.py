@@ -98,7 +98,7 @@ class TestPolicyCoverage(base.BaseTestCase):
         # names hosts and underlay SIDs.
         te_rules = [r for r in self.rules.values()
                     if r.name.split(':')[0].endswith('_srv6_te_path')]
-        self.assertEqual(12, len(te_rules))
+        self.assertEqual(13, len(te_rules))
         for rule in te_rules:
             self.assertEqual(lib_rules.ADMIN, rule.check_str, rule.name)
 

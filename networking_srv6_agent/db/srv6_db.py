@@ -74,12 +74,24 @@ class SRv6HostLocator(model_base.BASEV2):
     updated_at = sa.Column(sa.DateTime, nullable=True)
 
 
+def _parse_function_id(text):
+    """Decimal, or hex with a 0x prefix: the microSID LIB reads as hex.
+
+    Not int(text, 0), which would reject a decimal with a leading zero that
+    has always been accepted here.
+    """
+    text = text.strip()
+    if text.lower().startswith('0x'):
+        return int(text, 16)
+    return int(text)
+
+
 def parse_function_id_ranges(range_strings):
     """['1:4095'] -> [(1, 4095)], validated against the reserved range."""
     ranges = []
     for entry in range_strings:
         try:
-            start, end = (int(x.strip()) for x in entry.split(':'))
+            start, end = (_parse_function_id(x) for x in entry.split(':'))
         except ValueError:
             raise ValueError(_("invalid function_id_ranges entry %r, "
                                "expected <start>:<end>") % entry)

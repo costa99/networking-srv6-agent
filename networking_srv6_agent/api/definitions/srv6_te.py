@@ -55,6 +55,7 @@ DESTINATION_HOST = 'destination_host'
 DESTINATION_PORT_ID = 'destination_port_id'
 VIA_HOSTS = 'via_hosts'
 SEGMENTS = 'segments'
+ENCODED_SEGMENTS = 'encoded_segments'
 STATUS = 'status'
 
 # ACTIVE: every host on the path has a registered locator, so `segments` is
@@ -115,6 +116,13 @@ RESOURCE_ATTRIBUTE_MAP = {
         SEGMENTS: {'allow_post': False, 'allow_put': False,
                    'is_visible': True,
                    'enforce_policy': True},
+        # What the ingress actually pushes: `segments` again with full
+        # SIDs; with dataplane_encoding = usid, the C-SID containers the
+        # list packs into -- [fc00:0:1::, fc00:0:3:e005::] becomes
+        # [fc00:0:1:3:e005::]. [] when the path is not in effect.
+        ENCODED_SEGMENTS: {'allow_post': False, 'allow_put': False,
+                           'is_visible': True,
+                           'enforce_policy': True},
         STATUS: {'allow_post': False, 'allow_put': False,
                  'is_visible': True},
     },

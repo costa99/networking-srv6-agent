@@ -98,6 +98,9 @@ DEFAULT_BEHAVIOR = BEHAVIOR_END_DT46
 # which leaves 1340 tenant bytes on a 1500-byte underlay -- the point where
 # this project's own "--mtu 1400" guidance stops being satisfiable.
 MAX_TE_VIA_HOSTS = 6
+# (In usid mode the cap no longer binds on overhead -- six vias plus the
+# decap pair is two containers, 64 bytes -- but `encap` still exists and the
+# API stays the same in both.)
 
 # The metric of the `unreachable default` route that seals every domain VRF.
 # Without it a lookup that misses in the VRF table
@@ -133,3 +136,67 @@ EDGE_FILTER_TABLE = 'srv6_edge'
 # 16 bytes per segment. With a single-segment list that is 64 bytes.
 SRH_FIXED_OVERHEAD = 48
 SRH_PER_SEGMENT = 16
+# The two parts separately, for reduced encapsulation (RFC 8986 s5.2): the
+# first SID travels only in the outer destination address, and a list of
+# one pushes no SRH at all -- 40 bytes.
+IPV6_HEADER = 40
+SRH_HEADER = 8
+
+# How the dataplane encodes a segment list ([srv6] dataplane_encoding).
+# One deployment-wide value, carried to every agent in the domain payload
+# (USID-PLAN.md D3).
+#
+#   encap  full 128-bit SIDs, H.Encaps: outer IPv6 + SRH. What every build
+#          before this one did, so it stays the default.
+#   usid   RFC 9800 NEXT-C-SID ("microSID") in the F3216 format, pushed
+#          with H.Encaps.Red: the whole path is packed into C-SID
+#          containers, and a path that fits in one carries no SRH.
+ENCODING_ENCAP = 'encap'
+ENCODING_USID = 'usid'
+VALID_ENCODINGS = [ENCODING_ENCAP, ENCODING_USID]
+DEFAULT_ENCODING = ENCODING_ENCAP
+
+# The `ip route ... encap seg6 mode <x>` each encoding pushes with.
+SEG6_MODE_ENCAP = 'encap'
+SEG6_MODE_ENCAP_RED = 'encap.red'
+
+# F3216 (RFC 9800 s4.1, the one format an implementation MUST support): a
+# 32-bit Locator-Block followed by 16-bit C-SIDs, six to a container. The
+# testbed's /48 locators already have this shape -- block fc00:0::/32 plus
+# a 16-bit node C-SID -- and a domain SID <locator><function> is already
+# block:node:function, which is what a uDT46 is.
+USID_BLOCK_BITS = 32
+USID_CSID_BITS = 16
+USID_LOCATOR_PREFIXLEN = USID_BLOCK_BITS + USID_CSID_BITS   # /48
+# RFC 9800 s5.3: a function SID is installed at block+node+function, /64.
+USID_FUNCTION_PREFIXLEN = USID_LOCATOR_PREFIXLEN + USID_CSID_BITS
+
+# The C-SID space under the block is split (RFC 9800 s5, s9.2) into a
+# Global ID Block of node ids and a Local ID Block of node-local functions.
+# The split is Cisco's for F3216, the widely deployed reference. It has to be
+# disjoint: under a uN, a function id that is also a node id is read as "the
+# next node", so a packet for a deleted domain's SID would be shifted and
+# forwarded to that node instead of dropped (USID-PLAN.md D2). 0 is reserved
+# (end of container).
+USID_GIB_MIN = 0x0001
+USID_GIB_MAX = 0xdfff
+# The domain function ids in usid mode. 4096 of them, the size of the
+# default range, and a single /52 under each node -- so one unreachable
+# route drops every LIB function that has no decap route.
+USID_LIB_MIN = 0xe000
+USID_LIB_MAX = 0xefff
+USID_LIB_PREFIXLEN = USID_LOCATOR_PREFIXLEN + 4                 # /52
+
+# What an agent reports in sync_state that its kernel and iproute2 can do,
+# so the server can name a node that cannot honour dataplane_encoding.
+CAPABILITY_ENCAP_RED = 'encap-red'
+CAPABILITY_NEXT_CSID = 'next-csid'
+ENCODING_REQUIRES = {
+    ENCODING_ENCAP: (),
+    ENCODING_USID: (CAPABILITY_ENCAP_RED, CAPABILITY_NEXT_CSID),
+}
+
+# The routing table the capability probe writes its throwaway routes into.
+# No rule ever points at it, so nothing there can carry traffic, and it is
+# far above every VRF table (vrf_table_base + a 16-bit function id).
+PROBE_TABLE = 4000000000

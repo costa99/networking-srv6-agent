@@ -51,18 +51,33 @@ LOG = logging.getLogger(__name__)
 class Srv6AgentNotifyAPI:
     """Server-side sender. One fanout topic, three methods."""
 
+    # Used by the server plugin to push changes out to every SRv6 agent.
+    # The plugin calls one of the three public methods below whenever the
+    # database changes; each one turns into a broadcast message.
+
     def __init__(self, topic=topics.AGENT):
         self.topic = topic
+        # Build the mailbox name the agents subscribe to. With the defaults
+        # this is something like "q-agent-notifier-srv6-update".
         self.topic_srv6_update = topics.get_topic_name(
             topic, constants.TOPIC_SRV6, topics.UPDATE)
+        # The RPC client is the object that actually puts messages on
+        # RabbitMQ. version='1.0' is the API version both sides agree on.
         target = oslo_messaging.Target(topic=topic, version='1.0')
         self.client = n_rpc.get_client(target)
 
     def _fanout(self, context, method, **kwargs):
+        # Shared helper: send "method(**kwargs)" to every agent at once.
+        # `method` is the name of the function that will run on the agent.
         LOG.debug("SRv6 fanout %(method)s on %(topic)s: %(kwargs)s",
                   {'method': method, 'topic': self.topic_srv6_update,
                    'kwargs': kwargs})
+        # prepare() picks the mailbox; fanout=True means "all agents",
+        # not just one of them.
         cctxt = self.client.prepare(topic=self.topic_srv6_update, fanout=True)
+        # cast() = send without waiting for a reply. Every message also
+        # carries the payload version, so an agent built for a different
+        # message format can recognise it and ignore the message.
         cctxt.cast(context, method,
                    payload_version=constants.PAYLOAD_VERSION, **kwargs)
 
@@ -74,6 +89,9 @@ class Srv6AgentNotifyAPI:
         lost message costs at most one resync interval rather than leaving
         permanently divergent state.
         """
+        # "Here is the complete picture of this domain; make your node
+        # match it." Because it is the whole picture, not a diff, sending
+        # it twice is harmless.
         self._fanout(context, constants.DOMAIN_UPDATED, domain=domain)
 
     def routes_updated(self, context, domain_id, add=None, remove=None):
@@ -83,6 +101,9 @@ class Srv6AgentNotifyAPI:
         and rebuilding a whole domain's payload for one instance would put
         the entire route set on the wire every time a VM boots.
         """
+        # "Only these routes changed": a small message sent when a VM port
+        # appears or disappears. Missing lists become empty lists so the
+        # agent can always loop over `add` and `remove` safely.
         self._fanout(context, constants.ROUTES_UPDATED, domain_id=domain_id,
                      add=add or [], remove=remove or [])
 
@@ -93,6 +114,8 @@ class Srv6AgentNotifyAPI:
         cannot look them up -- the row is gone -- and it needs both to name
         the kernel objects it must remove.
         """
+        # "This domain no longer exists; clean it up on your node." The
+        # extra fields tell the agent exactly which kernel objects to delete.
         self._fanout(context, constants.DOMAIN_DELETED, domain_id=domain_id,
                      function_id=function_id, vrf_table=vrf_table)
 
@@ -100,9 +123,14 @@ class Srv6AgentNotifyAPI:
 class Srv6ServerRpcCallback:
     """Server-side receiver of the agent's sync_state call."""
 
+    # The other direction: the server listens here for questions coming
+    # from agents. oslo.messaging runs the method whose name matches the
+    # incoming message.
     target = oslo_messaging.Target(version='1.0')
 
     def __init__(self, plugin):
+        # Keep a reference to the service plugin, which owns the database
+        # and does the real work.
         self.plugin = plugin
 
     def sync_state(self, rpc_context, **kwargs):
@@ -113,9 +141,15 @@ class Srv6ServerRpcCallback:
         it needs to converge, and -- because a new locator changes what
         *other* nodes must encapsulate to -- it triggers a re-broadcast.
         """
+        # Who is asking: the compute node's hostname and its SRv6 locator
+        # (the IPv6 prefix that identifies this node on the SRv6 fabric).
         host = kwargs.get('host')
         locator = kwargs.get('locator')
+        # Which message format the agent speaks. Older agents may not send
+        # it, so assume version 1.
         version = kwargs.get('payload_version', 1)
+        # If the agent and server disagree on the format, return nothing
+        # rather than send data the agent could misread.
         if version != constants.PAYLOAD_VERSION:
             LOG.warning("SRv6 agent on %(host)s speaks payload version "
                         "%(got)s, server speaks %(want)s; refusing sync",
@@ -124,4 +158,10 @@ class Srv6ServerRpcCallback:
             return []
         LOG.info("SRv6 sync_state from %(host)s (locator %(loc)s)",
                  {'host': host, 'loc': locator})
-        return self.plugin.handle_sync_state(rpc_context, host, locator)
+        # Hand off to the plugin: it saves the locator, builds the list of
+        # domains, and returns it. That list is the reply the agent gets.
+        # What the agent's kernel and iproute2 can do (encap-red,
+        # next-csid). Older agents do not send it: None, "unknown".
+        capabilities = kwargs.get('capabilities')
+        return self.plugin.handle_sync_state(rpc_context, host, locator,
+                                             capabilities=capabilities)

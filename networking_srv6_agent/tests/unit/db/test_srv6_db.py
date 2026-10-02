@@ -284,3 +284,18 @@ class TestHostLocators(Srv6DbTestCase):
         row = self.ctx.session.query(srv6_db.SRv6HostLocator).filter_by(
             host='node1').one()
         self.assertIsNotNone(row.updated_at)
+
+
+class TestParseHexRanges(base.BaseTestCase):
+
+    def test_the_microsid_lib_in_hex(self):
+        self.assertEqual([(0xe000, 0xefff)],
+                         srv6_db.parse_function_id_ranges(['0xe000:0xEFFF']))
+
+    def test_a_leading_zero_decimal_still_parses(self):
+        self.assertEqual([(10, 20)],
+                         srv6_db.parse_function_id_ranges(['010:020']))
+
+    def test_hex_into_the_topology_range_is_still_refused(self):
+        self.assertRaises(ValueError, srv6_db.parse_function_id_ranges,
+                          ['0xe000:0xf000'])

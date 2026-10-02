@@ -66,6 +66,11 @@ class DataplaneTestCaseBase(base.BaseTestCase):
 
         self.priv_seg6.list_sid_rules.return_value = []
         self.priv_seg6.list_vrf_names.return_value = []
+        # A node fresh from a full-SID build: the `local` locator route.
+        self.priv_seg6.show_main_route.return_value = [
+            'local %s dev lo metric 1024 pref medium' % LOCATOR]
+        self.priv_seg6.probe_capabilities.return_value = [
+            'encap-red', 'next-csid']
         self.bridge = mock.Mock()
         self.bridge.get_port_name_list.return_value = []
         self.device = self.ip_lib.IPDevice.return_value
@@ -244,8 +249,12 @@ class TestDomainLifecycle(DataplaneTestCaseBase):
         self.ip_lib.device_exists.return_value = True
         self.dp.delete_domain(self.domain_id)
         self.bridge.delete_port.assert_called_once_with(PORT_NAME)
-        self.priv_seg6.delete_route.assert_called_once_with(
-            'fc00:0:1:7::/128', 'main', family_v6=True)
+        # Both decap lengths, whatever the encoding: a /64 left from usid
+        # mode must not outlive the domain either.
+        self.assertEqual(
+            [mock.call('fc00:0:1:7::/128', 'main', family_v6=True),
+             mock.call('fc00:0:1:7::/64', 'main', family_v6=True)],
+            self.priv_seg6.delete_route.call_args_list)
         self.priv_ip_lib.delete_interface.assert_called_once_with(
             VRF_NAME, None)
         self.assertNotIn(self.domain_id, self.dp.domains)
@@ -768,7 +777,7 @@ class TestDeleteAfterRestart(DataplaneTestCaseBase):
         self.bridge.delete_port.assert_called_once_with('svp-9-100')
         self.priv_ip_lib.delete_interface.assert_called_once_with(
             'sv6vrf-9', None)
-        self.priv_seg6.delete_route.assert_called_once_with(
+        self.priv_seg6.delete_route.assert_any_call(
             'fc00:0:1:9::/128', 'main', family_v6=True)
         self.priv_seg6.flush_table.assert_any_call(10009, family_v6=True)
 
@@ -1246,3 +1255,150 @@ class TestRouteMtu(DataplaneTestCaseBase):
                            {'node2': LOCATOR2}, 'node1',
                            mtus={'net1': 1436})
         self.assertEqual({('10.0.0.5/32', 2)}, self.dp._mtu_warned)
+
+
+# ----------------------------------------------------------------------
+# microSID (USID-PLAN.md)
+# ----------------------------------------------------------------------
+UN_LINE = ('fc00:0:1::/48  encap seg6local action End flavors next-csid '
+           'lblen 32 nflen 16 dev eth0 metric 1024 pref medium')
+LIB = 'fc00:0:1:e000::/52'
+
+
+class TestUsidNode(DataplaneTestCaseBase):
+    """Node state per encoding: the /48, the LIB seal (D6)."""
+
+    def _un_installed(self):
+        self.priv_seg6.replace_seg6local_route.assert_any_call(
+            'fc00:0:1::', 'End', UNDERLAY, prefixlen=48, next_csid=(32, 16))
+
+    def test_a_fresh_node_starts_on_full_sids(self):
+        self.dp.initialize_node()
+        self.assertEqual('encap', self.dp.encoding)
+        self.priv_seg6.delete_main_route.assert_called_once_with(
+            LIB, route_type='unreachable')
+        self.priv_seg6.replace_locator_route.assert_called_once_with(LOCATOR)
+
+    def test_a_restart_in_a_usid_deployment_keeps_the_un(self):
+        # No `local` route put back for the seconds until the first payload.
+        self.priv_seg6.show_main_route.return_value = [UN_LINE]
+        self.dp.initialize_node()
+        self.assertEqual('usid', self.dp.encoding)
+        self.priv_seg6.replace_locator_route.assert_not_called()
+        self._un_installed()
+
+    def test_capabilities_are_probed(self):
+        self.dp.initialize_node()
+        self.assertEqual(['encap-red', 'next-csid'], self.dp.capabilities)
+
+    def test_a_failed_probe_reports_none(self):
+        self.priv_seg6.probe_capabilities.side_effect = RuntimeError('x')
+        self.dp.initialize_node()
+        self.assertEqual([], self.dp.capabilities)
+
+    def test_switch_to_usid_replaces_the_local_route(self):
+        self.assertTrue(self.dp.ensure_encoding('usid'))
+        self.priv_seg6.delete_main_route.assert_called_once_with(
+            LOCATOR, route_type='local')
+        self._un_installed()
+        self.priv_seg6.replace_unreachable_route.assert_called_once_with(LIB)
+        self.priv_seg6.replace_locator_route.assert_not_called()
+
+    def test_switch_back_restores_the_local_route(self):
+        self.dp.ensure_encoding('usid')
+        self.priv_seg6.reset_mock()
+        self.priv_seg6.show_main_route.return_value = [UN_LINE]
+        self.assertTrue(self.dp.ensure_encoding('encap'))
+        self.assertEqual(
+            [mock.call(LOCATOR), mock.call(LIB, route_type='unreachable')],
+            self.priv_seg6.delete_main_route.call_args_list)
+        self.priv_seg6.replace_locator_route.assert_called_once_with(LOCATOR)
+
+    def test_the_same_encoding_is_a_no_op(self):
+        self.assertFalse(self.dp.ensure_encoding('encap'))
+        self.priv_seg6.show_main_route.assert_not_called()
+
+    def test_an_unknown_encoding_is_refused(self):
+        self.assertFalse(self.dp.ensure_encoding('replace-csid'))
+        self.assertEqual('encap', self.dp.encoding)
+
+    def test_a_locator_that_is_not_f3216_stays_on_full_sids(self):
+        self.dp.locator = 'fc00:0:1:2::/64'
+        self.assertFalse(self.dp.ensure_encoding('usid'))
+        self.assertEqual('encap', self.dp.encoding)
+        self.priv_seg6.replace_seg6local_route.assert_not_called()
+
+    def test_a_switch_moves_known_decap_sids_to_the_new_length(self):
+        self._with_domain()
+        self.dp.ensure_encoding('usid')
+        self.priv_seg6.delete_route.assert_called_once_with(
+            'fc00:0:1:7::/128', 'main', family_v6=True)
+
+    def test_transit_sid_is_the_un(self):
+        self.assertEqual('fc00:0:1:fff0::', self.dp.own_transit_sid)
+        self.dp.ensure_encoding('usid')
+        self.assertEqual('fc00:0:1::', self.dp.own_transit_sid)
+
+
+class TestUsidDomain(DataplaneTestCaseBase):
+
+    def setUp(self):
+        super().setUp()
+        self.dp.ensure_encoding('usid')
+        self.priv_seg6.reset_mock()
+        self.ip_lib.device_exists.return_value = True
+
+    def test_the_decap_sid_is_a_64(self):
+        self.dp.ensure_domain(self.domain_id, 0xe005, 'End.DT46')
+        self.priv_seg6.replace_seg6local_route.assert_called_once_with(
+            'fc00:0:1:e005::', 'End.DT46', 'sv6vrf-57349',
+            vrf_table=10000 + 0xe005, prefixlen=64)
+
+
+class TestUsidRoutes(DataplaneTestCaseBase):
+    """Packing at the ingress, the rule on the first container (D9, D13)."""
+
+    LOCATORS = {'node2': LOCATOR2, 'node3': LOCATOR3}
+
+    def setUp(self):
+        super().setUp()
+        self.dp.ensure_encoding('usid')
+        self.dp.domains[self.domain_id] = dataplane.DomainState(
+            self.domain_id, 0xe005, 10000 + 0xe005, 'sv6vrf-57349')
+        self.dp.ensure_edge_filter(sorted(self.LOCATORS.values()))
+        self.priv_seg6.reset_mock()
+        self.priv_seg6.list_sid_rules.return_value = []
+
+    def _route(self, segments=None):
+        self.dp.add_routes(
+            self.domain_id,
+            [{'prefix': '10.0.0.5/32', 'host': 'node3', 'port_id': 'p1',
+              'segments': segments}],
+            self.LOCATORS, 'node1')
+        args, kwargs = self.priv_seg6.replace_seg6_route.call_args
+        return args[1], kwargs.get('mode')
+
+    def test_direct_pushes_the_decap_sid_reduced(self):
+        self.assertEqual((['fc00:0:3:e005::'], 'encap.red'), self._route())
+
+    def test_a_te_path_is_one_container(self):
+        self.assertEqual((['fc00:0:2:3:e005::'], 'encap.red'),
+                         self._route(['fc00:0:2::']))
+
+    def test_the_rule_is_on_the_container(self):
+        self._route(['fc00:0:2::'])
+        self.priv_seg6.add_sid_rule.assert_called_once_with(
+            'sv6vrf-57349', 'fc00:0:2:3:e005::')
+
+    def test_a_leading_own_un_is_dropped(self):
+        self.assertEqual((['fc00:0:2:3:e005::'], 'encap.red'),
+                         self._route(['fc00:0:1::', 'fc00:0:2::']))
+
+    def test_an_unpackable_list_goes_out_as_full_sids(self):
+        self.assertEqual((['fc01:0:9::', 'fc00:0:3:e005::'], 'encap.red'),
+                         self._route(['fc01:0:9::']))
+
+    def test_a_one_container_te_path_costs_a_direct_route(self):
+        self.ip_lib.IPDevice.return_value.link.mtu = 1500
+        self.assertTrue(self.dp.check_mtu(1460))
+        self.assertFalse(self.dp.check_mtu(1461))

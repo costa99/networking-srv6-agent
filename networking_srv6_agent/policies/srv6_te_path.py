@@ -65,6 +65,8 @@ rules = [
            'Get ``via_hosts`` of SRv6 TE paths', _GET),
     _admin('get_srv6_te_path:segments',
            'Get the resolved ``segments`` of SRv6 TE paths', _GET),
+    _admin('get_srv6_te_path:encoded_segments',
+           'Get the ``encoded_segments`` an SRv6 TE path pushes', _GET),
     _admin('update_srv6_te_path', 'Update an SRv6 TE path', _PUT),
     _admin('update_srv6_te_path:via_hosts',
            'Re-steer an SRv6 TE path by replacing ``via_hosts``', _PUT),

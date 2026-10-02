@@ -22,6 +22,8 @@ addresses. Hence the emphasis on exact expected strings rather than
 round-trip properties.
 """
 
+import ipaddress
+
 from neutron.tests import base
 
 from networking_srv6_agent.common import constants
@@ -164,3 +166,124 @@ class TestTopologyFunctionIds(base.BaseTestCase):
     def test_ranges_do_not_overlap(self):
         self.assertLess(constants.MAX_DOMAIN_FUNCTION_ID,
                         constants.MIN_TOPOLOGY_FUNCTION_ID)
+
+
+# ----------------------------------------------------------------------
+# microSID (USID-PLAN.md)
+# ----------------------------------------------------------------------
+def _loc(node):
+    return 'fc00:0:%x::/48' % node
+
+
+class TestReducedOverhead(base.BaseTestCase):
+    """H.Encaps.Red: the first pushed element travels only in the DA."""
+
+    def test_one_element_pushes_no_srh(self):
+        self.assertEqual(40, sid.encap_overhead(1, reduced=True))
+
+    def test_more_carry_all_but_the_first(self):
+        self.assertEqual(64, sid.encap_overhead(2, reduced=True))
+        self.assertEqual(80, sid.encap_overhead(3, reduced=True))
+
+    def test_full_encap_is_unchanged(self):
+        self.assertEqual(64, sid.encap_overhead(1, reduced=False))
+
+
+class TestUsidLocator(base.BaseTestCase):
+
+    def test_node_sid_is_the_locator_address(self):
+        self.assertEqual('fc00:0:3::', sid.node_sid(_loc(3)))
+
+    def test_node_id_and_block(self):
+        self.assertEqual(3, sid.usid_node_id(_loc(3)))
+        self.assertEqual('fc00::/32', sid.usid_block(_loc(3)))
+
+    def test_lib_prefix_covers_exactly_the_lib(self):
+        self.assertEqual('fc00:0:3:e000::/52', sid.lib_prefix(_loc(3)))
+        net = ipaddress.IPv6Network(sid.lib_prefix(_loc(3)))
+        self.assertIn(ipaddress.IPv6Address(
+            sid.format_sid(_loc(3), constants.USID_LIB_MIN)), net)
+        self.assertIn(ipaddress.IPv6Address(
+            sid.format_sid(_loc(3), constants.USID_LIB_MAX)), net)
+        self.assertNotIn(ipaddress.IPv6Address(
+            sid.format_sid(_loc(3), constants.USID_LIB_MIN - 1)), net)
+        # The End SID stays outside it.
+        self.assertNotIn(ipaddress.IPv6Address(
+            sid.format_sid(_loc(3), constants.NODE_END_FUNCTION_ID)), net)
+
+    def test_only_a_48_is_f3216(self):
+        self.assertRaises(sid.InvalidLocator, sid.node_sid,
+                          'fc00:0:1:2::/64')
+
+    def test_node_must_be_in_the_gib(self):
+        sid.check_usid_locator(_loc(constants.USID_GIB_MAX))
+        self.assertRaises(sid.InvalidLocator, sid.check_usid_locator,
+                          'fc00::/48')
+        self.assertRaises(sid.InvalidLocator, sid.check_usid_locator,
+                          _loc(constants.USID_LIB_MIN))
+
+    def test_lib_and_topology_ranges_are_disjoint(self):
+        self.assertLess(constants.USID_GIB_MAX, constants.USID_LIB_MIN)
+        self.assertLess(constants.USID_LIB_MAX,
+                        constants.MIN_TOPOLOGY_FUNCTION_ID)
+
+    def test_lib_names_fit_in_ifnamsiz(self):
+        self.assertLessEqual(len(sid.vrf_name(constants.USID_LIB_MAX)), 15)
+        self.assertLessEqual(
+            len(sid.gateway_port_name(constants.USID_LIB_MAX, 4094)), 15)
+
+
+class TestPackNextCsid(base.BaseTestCase):
+    """The containers the ingress pushes (RFC 9800 s6.2, USID-PLAN.md D9)."""
+
+    DECAP = 'fc00:0:8:e001::'
+
+    def _path(self, k):
+        return [sid.node_sid(_loc(i)) for i in range(1, k + 1)] + [self.DECAP]
+
+    def test_direct_is_the_decap_sid_itself(self):
+        self.assertEqual([self.DECAP], sid.pack_next_csid([self.DECAP]))
+
+    def test_one_waypoint(self):
+        self.assertEqual(['fc00:0:1:8:e001::'],
+                         sid.pack_next_csid(self._path(1)))
+
+    def test_four_waypoints_fill_the_container_exactly(self):
+        self.assertEqual(['fc00:0:1:2:3:4:8:e001'],
+                         sid.pack_next_csid(self._path(4)))
+
+    def test_the_decap_pair_never_straddles_two_containers(self):
+        # Five vias + the pair is 7 C-SIDs: the pair moves whole into the
+        # second container, which is then a plain block:node:function SID.
+        self.assertEqual(['fc00:0:1:2:3:4:5:0', self.DECAP],
+                         sid.pack_next_csid(self._path(5)))
+
+    def test_six_waypoints(self):
+        self.assertEqual(['fc00:0:1:2:3:4:5:6', self.DECAP],
+                         sid.pack_next_csid(self._path(6)))
+
+    def test_overhead_matches_the_plan_table(self):
+        # USID-PLAN.md s3: k -> (encap today, usid).
+        expected = {0: (64, 40), 1: (80, 40), 2: (96, 40), 4: (128, 40),
+                    5: (144, 64), 6: (160, 64)}
+        for k, (full, usid) in expected.items():
+            packed = sid.pack_next_csid(self._path(k))
+            self.assertEqual(full, sid.encap_overhead(k + 1), k)
+            self.assertEqual(usid, sid.encap_overhead(len(packed),
+                                                      reduced=True), k)
+
+    def test_different_blocks_cannot_share_a_container(self):
+        self.assertRaises(sid.InvalidLocator, sid.pack_next_csid,
+                          ['fc00:0:1::', 'fc01:0:3:e005::'])
+
+    def test_a_sid_with_a_gap_is_refused(self):
+        # A zero C-SID ends the container: fc00:0:3:0:5:: cannot be carried.
+        self.assertRaises(sid.InvalidLocator, sid.pack_next_csid,
+                          ['fc00:0:3:0:5::'])
+
+    def test_the_bare_block_is_refused(self):
+        self.assertRaises(sid.InvalidLocator, sid.pack_next_csid,
+                          ['fc00::'])
+
+    def test_garbage_is_refused(self):
+        self.assertRaises(sid.InvalidLocator, sid.pack_next_csid, ['nope'])

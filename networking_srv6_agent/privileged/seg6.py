@@ -95,16 +95,28 @@ def modprobe_vrf():
     processutils.execute('modprobe', 'vrf', check_exit_code=False)
 
 
-def replace_seg6_route(prefix, segments, dev, table, family_v6=False):
+SEG6_MODES = (constants.SEG6_MODE_ENCAP, constants.SEG6_MODE_ENCAP_RED)
+
+
+def replace_seg6_route(prefix, segments, dev, table, family_v6=False,
+                       mode=constants.SEG6_MODE_ENCAP):
     """Install an encapsulation route for a remote prefix.
 
     Produces, for a one-element segment list:
         ip route replace <prefix> encap seg6 mode encap segs <sid> \
             dev <dev> table <table>
+
+    `mode encap.red` (H.Encaps.Red, kernel >= 6.0) takes the SAME full list:
+    the kernel itself leaves the first element out of the SRH, and pushes
+    no SRH at all for a list of one. In usid mode the elements are C-SID
+    containers, which the caller has already packed -- the kernel's
+    headend does not compress.
     """
+    if mode not in SEG6_MODES:
+        raise ValueError(_("unknown seg6 encap mode %r") % mode)
     args = ['-6'] if family_v6 else []
     args += ['route', 'replace', prefix,
-             'encap', 'seg6', 'mode', 'encap',
+             'encap', 'seg6', 'mode', mode,
              'segs', ','.join(segments),
              'dev', dev, 'table', str(table)]
     return ip_route_cmd(args)
@@ -122,13 +134,24 @@ def delete_route(prefix, table, family_v6=False):
         raise
 
 
-def replace_seg6local_route(sid_address, action, dev, vrf_table=None):
+def replace_seg6local_route(sid_address, action, dev, vrf_table=None,
+                            prefixlen=128, next_csid=None):
     """Install a local SRv6 behaviour on one of this node's SIDs.
 
         End.DT46:  ip -6 route replace <sid>/128 encap seg6local \
                        action End.DT46 vrftable <table> dev <vrf>
         End:       ip -6 route replace <sid>/128 encap seg6local \
                        action End dev <dev>
+        uN:        ip -6 route replace <locator>/48 encap seg6local \
+                       action End flavors next-csid lblen 32 nflen 16 \
+                       dev <dev>
+
+    `next_csid` is (block bits, C-SID bits) and adds the RFC 9800 NEXT-C-SID
+    flavor (kernel >= 6.1 for End). A uN is a PREFIX route, `prefixlen`
+    48: the DA it has to match carries the rest of the path in its low
+    bits. In usid mode the decap SID is a /64 (RFC 9800 s5.3) and carries
+    no flavor -- the last C-SID may be bound to any behaviour (s4.1), and
+    the kernel would silently ignore one on End.DT46 anyway.
 
     vrf_table is omitted rather than defaulted for behaviours that take
     none: iproute2 rejects `action End vrftable <n>` outright, so a caller
@@ -142,12 +165,118 @@ def replace_seg6local_route(sid_address, action, dev, vrf_table=None):
     local table, which is consulted at rule priority 0, ahead of main, and
     would shadow this very route so the behaviour never runs.
     """
-    args = ['-6', 'route', 'replace', '%s/128' % sid_address,
+    args = ['-6', 'route', 'replace', '%s/%d' % (sid_address, prefixlen),
             'encap', 'seg6local', 'action', action]
     if vrf_table is not None:
         args += ['vrftable', str(vrf_table)]
+    if next_csid is not None:
+        block_bits, csid_bits = next_csid
+        args += ['flavors', 'next-csid', 'lblen', str(block_bits),
+                 'nflen', str(csid_bits)]
     args += ['dev', dev]
     return ip_route_cmd(args)
+
+
+def show_main_route(prefix):
+    """The routes main holds for exactly this prefix, as `ip` prints them.
+
+    What actually holds a prefix -- the `local` locator route or the uN --
+    so switching between them deletes only what is there. [] when nothing
+    is, or the table cannot be read.
+
+    `table all`, not `table main`: iproute2 leaves a `local`-type route out
+    of a `show table main` dump even with `type local` (measured on the
+    testbed, iproute2 6.1). With `table all` a main entry is the one line
+    that names no table, so every other table's line is dropped.
+    """
+    try:
+        out = ip_route_cmd(['-6', 'route', 'show', 'table', 'all',
+                            'exact', prefix])
+    except processutils.ProcessExecutionError as e:
+        LOG.debug("reading route %(p)s: %(e)s", {'p': prefix, 'e': e})
+        return []
+    lines = []
+    for line in out.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        if 'table' in fields and \
+                fields[fields.index('table') + 1:][:1] != ['main']:
+            continue
+        lines.append(line.strip())
+    return lines
+
+
+def delete_main_route(prefix, route_type=None):
+    """Remove one route from main, tolerating its absence.
+
+        ip -6 route del [local] <prefix> table main
+    """
+    args = ['-6', 'route', 'del']
+    if route_type:
+        args.append(route_type)
+    args += [prefix, 'table', 'main']
+    try:
+        return ip_route_cmd(args)
+    except processutils.ProcessExecutionError as e:
+        if 'No such process' in str(e) or 'Cannot find' in str(e):
+            return None
+        raise
+
+
+def replace_unreachable_route(prefix):
+    """Drop a prefix in main: the microSID Local ID Block of this node.
+
+        ip -6 route replace unreachable <prefix> table main
+
+    Every allocated function under it has a longer /64 decap route; this
+    answers the rest, so a packet for a deleted domain is dropped instead
+    of being shifted onward by the /48 uN as if its function were a node.
+    """
+    return ip_route_cmd(['-6', 'route', 'replace', 'unreachable', prefix,
+                         'table', 'main'])
+
+
+def probe_capabilities():
+    """What this node's kernel and iproute2 can do, as capability names.
+
+    Each feature is installed for real, in a table no rule points at, and
+    read back: an older iproute2 rejects the keyword outright, but an older
+    KERNEL may accept the netlink attribute and drop it silently, which
+    only the read-back catches. Documentation prefixes (RFC 3849), and the
+    table is flushed whatever happens.
+    """
+    table = str(constants.PROBE_TABLE)
+    probes = [
+        (constants.CAPABILITY_NEXT_CSID, 'next-csid',
+         ['-6', 'route', 'replace', '2001:db8:0:1::/64',
+          'encap', 'seg6local', 'action', 'End',
+          'flavors', 'next-csid', 'lblen', str(constants.USID_BLOCK_BITS),
+          'nflen', str(constants.USID_CSID_BITS),
+          'dev', 'lo', 'table', table]),
+        (constants.CAPABILITY_ENCAP_RED, 'encap.red',
+         ['-6', 'route', 'replace', '2001:db8:0:2::/64',
+          'encap', 'seg6', 'mode', constants.SEG6_MODE_ENCAP_RED,
+          'segs', '2001:db8::1', 'dev', 'lo', 'table', table]),
+    ]
+    found = []
+    try:
+        for name, marker, args in probes:
+            try:
+                ip_route_cmd(args)
+            except processutils.ProcessExecutionError as e:
+                LOG.debug("SRv6 capability probe %(n)s: %(e)s",
+                          {'n': name, 'e': e})
+                continue
+            try:
+                shown = ip_route_cmd(['-6', 'route', 'show', 'table', table])
+            except processutils.ProcessExecutionError:
+                continue
+            if marker in shown:
+                found.append(name)
+    finally:
+        flush_table(constants.PROBE_TABLE, family_v6=True)
+    return found
 
 
 def replace_locator_route(locator):

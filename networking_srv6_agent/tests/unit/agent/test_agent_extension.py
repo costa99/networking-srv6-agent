@@ -79,6 +79,9 @@ class AgentExtensionTestCaseBase(base.BaseTestCase):
         self.ext.vlan_manager = mock.Mock()
         self.ext.dataplane = mock.Mock()
         self.ext.dataplane.present_function_ids.return_value = set()
+        # A real dataplane answers False when the encoding did not change;
+        # a bare Mock would read as a switch on every payload.
+        self.ext.dataplane.ensure_encoding.return_value = False
         self.ext.server_rpc = mock.Mock()
         self.cctxt = self.ext.server_rpc.prepare.return_value
         self.cctxt.call.return_value = []
@@ -699,3 +702,38 @@ class TestRpcContract(base.BaseTestCase):
                          self._unnamed('domain_updated', mock.sentinel.ctx,
                                        {'vpn': {'id': 'd1'},
                                         'payload_version': 1}))
+
+
+class TestEncoding(AgentExtensionTestCaseBase):
+    """The payload's `encoding` reaches the node before its domain (D3)."""
+
+    def test_the_payload_encoding_is_applied_before_the_domain(self):
+        order = []
+        self.ext.dataplane.ensure_encoding.side_effect = \
+            lambda enc: order.append(('encoding', enc)) and False
+        self.ext.dataplane.ensure_domain.side_effect = \
+            lambda *a: order.append(('domain',))
+        payload = dict(_payload(self.domain_id), encoding='usid')
+        self.ext._apply_domain(payload)
+        self.assertEqual([('encoding', 'usid'), ('domain',)], order)
+
+    def test_an_older_server_means_full_sids(self):
+        self.ext._apply_domain(_payload(self.domain_id))
+        self.ext.dataplane.ensure_encoding.assert_called_once_with('encap')
+
+    def test_a_switch_in_a_fanout_re_encodes_every_domain(self):
+        self.ext.dataplane.ensure_encoding.return_value = True
+        self.ext.domain_updated(mock.Mock(),
+                                domain=dict(_payload(self.domain_id),
+                                            encoding='usid'))
+        self.cctxt.call.assert_called_once()
+
+    def test_no_switch_no_resync(self):
+        self.ext.domain_updated(mock.Mock(), domain=_payload(self.domain_id))
+        self.cctxt.call.assert_not_called()
+
+    def test_capabilities_are_reported(self):
+        self.ext.dataplane.capabilities = ['encap-red', 'next-csid']
+        self.ext._sync_state()
+        self.assertEqual(['encap-red', 'next-csid'],
+                         self.cctxt.call.call_args[1]['capabilities'])

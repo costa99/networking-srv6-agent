@@ -117,9 +117,10 @@ class SRv6TePathHop(model_base.BASEV2, model_base.HasId):
 def _make_te_path_dict(path_db, fields=None):
     """Model to dict.
 
-    `segments` and `status` are deliberately left unresolved here. Both need
-    the locator registry, the domain's function id and the port's binding --
-    none of which this layer has. The plugin fills them in.
+    `segments`, `encoded_segments` and `status` are deliberately left
+    unresolved here. All three need the locator registry, the domain's
+    function id and the port's binding -- none of which this layer has. The
+    plugin fills them in.
     """
     res = {
         'id': path_db.id,
@@ -129,6 +130,7 @@ def _make_te_path_dict(path_db, fields=None):
         'destination_port_id': path_db.destination_port_id,
         'via_hosts': [hop.via_host for hop in path_db.hops],
         'segments': [],
+        'encoded_segments': [],
         'status': None,
     }
     if fields:

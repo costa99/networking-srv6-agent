@@ -15,6 +15,7 @@
 from oslo_config import cfg
 
 from networking_srv6_agent._i18n import _
+from networking_srv6_agent.common import constants
 
 
 SRV6_SERVER_GROUP = 'srv6'
@@ -30,7 +31,29 @@ srv6_server_opts = [
                "are pre-populated "
                "into a pool table at startup and handed out round-robin. "
                "Must not overlap 0xf000-0xffff, which is reserved for "
-               "per-node topology SIDs.")),
+               "per-node topology SIDs. Values may be written in hex "
+               "(0xe000:0xefff). With dataplane_encoding = usid every range "
+               "must lie inside the microSID Local ID Block 0xe000-0xefff.")),
+    cfg.StrOpt(
+        'dataplane_encoding',
+        default=constants.DEFAULT_ENCODING,
+        choices=[
+            (constants.ENCODING_ENCAP,
+             _("Full 128-bit SIDs, H.Encaps: outer IPv6 header plus an SRH "
+               "holding every SID. 64 bytes for a direct path, 16 more per "
+               "TE waypoint.")),
+            (constants.ENCODING_USID,
+             _("RFC 9800 NEXT-C-SID (microSID), F3216, pushed with "
+               "H.Encaps.Red: the path is packed into C-SID containers, "
+               "and one that fits in a single container (up to four TE "
+               "waypoints) costs 40 bytes with no SRH. Needs kernel >= 6.1 "
+               "and iproute2 >= 6.1 on every node, /48 locators in one /32 "
+               "block, and function_id_ranges inside 0xe000-0xefff.")),
+        ],
+        help=_("How every node encodes a domain's segment lists. One value "
+               "for the whole deployment, sent to the agents in each domain "
+               "payload. Change it on a deployment with no domains: restart "
+               "the server, then the agents.")),
     cfg.IntOpt(
         'vrf_table_base',
         default=10000,

@@ -25,6 +25,7 @@ from networking_srv6_agent._i18n import _
 from networking_srv6_agent.cli import common
 from networking_srv6_agent.cli import resources
 
+# Columns of the output: (field name, header, shown in list/long list).
 _attr_map = (
     ('id', 'ID', column_util.LIST_BOTH),
     ('domain_id', 'Domain ID', column_util.LIST_BOTH),
@@ -33,20 +34,27 @@ _attr_map = (
     ('via_hosts', 'Via Hosts', column_util.LIST_BOTH),
     ('status', 'Status', column_util.LIST_BOTH),
     ('segments', 'Segments', column_util.LIST_LONG_ONLY),
+    ('encoded_segments', 'Encoded Segments', column_util.LIST_LONG_ONLY),
     ('project_id', 'Project', column_util.LIST_LONG_ONLY),
 )
+# Field name -> column header.
 _column_map = {attr: header for attr, header, _unused in _attr_map}
+# Show these lists as plain comma-separated text, keeping their order.
 _formatters = {
     'via_hosts': common.PathColumn,
     'segments': common.PathColumn,
+    'encoded_segments': common.PathColumn,
 }
+# A path has no name, so do not show that column.
 _hidden = ('name',)
 
 
+# Build the (headers, values) pair printed by show/create.
 def _show(obj):
     return common.show_columns(obj, _column_map, _formatters, _hidden)
 
 
+# --via-host can be repeated; each value is added to a list.
 def _add_via_host_argument(parser, help_text):
     parser.add_argument(
         '--via-host',
@@ -66,6 +74,7 @@ class CreateTePath(command.ShowOne):
             metavar='<domain>',
             required=True,
             help=_("SRv6 domain whose traffic is steered (name or ID)"))
+        # Give exactly one: a destination host or a destination port.
         selector = parser.add_mutually_exclusive_group(required=True)
         selector.add_argument(
             '--destination-host',
@@ -83,16 +92,20 @@ class CreateTePath(command.ShowOne):
 
     def take_action(self, parsed_args):
         client = self.app.client_manager.network
+        # Turn the domain name into its ID.
         attrs = {
             'domain_id': common.find_domain(client, parsed_args.domain).id,
         }
+        # Use the host as given, or turn the port name into its ID.
         if parsed_args.destination_host is not None:
             attrs['destination_host'] = parsed_args.destination_host
         else:
             attrs['destination_port_id'] = client.find_port(
                 parsed_args.destination_port, ignore_missing=False).id
+        # Only send waypoints if the user gave some.
         if parsed_args.via_hosts is not None:
             attrs['via_hosts'] = parsed_args.via_hosts
+        # Create the path and print it.
         return _show(client._create(resources.Srv6TePath, **attrs))
 
 
@@ -121,6 +134,7 @@ class ListTePath(command.Lister):
 
     def take_action(self, parsed_args):
         client = self.app.client_manager.network
+        # Add a filter for each option the user gave.
         filters = {}
         if parsed_args.domain is not None:
             filters['domain_id'] = common.find_domain(
@@ -130,6 +144,7 @@ class ListTePath(command.Lister):
         if parsed_args.destination_port is not None:
             filters['destination_port_id'] = client.find_port(
                 parsed_args.destination_port, ignore_missing=False).id
+        # Get the matching paths and print them as a table.
         return common.list_columns(
             client._list(resources.Srv6TePath, **filters),
             _attr_map, parsed_args.long, _formatters)
@@ -148,6 +163,7 @@ class ShowTePath(command.ShowOne):
 
     def take_action(self, parsed_args):
         client = self.app.client_manager.network
+        # Get the path by ID and print it.
         return _show(client._get(resources.Srv6TePath, parsed_args.te_path))
 
 
@@ -160,7 +176,8 @@ class SetTePath(command.Command):
             'te_path',
             metavar='<te-path>',
             help=_("TE path to modify (ID)"))
-        # The selectors are create-only; the waypoints are all there is.
+        # Only the waypoints can change. Give either --via-host or
+        # --no-via-host.
         waypoints = parser.add_mutually_exclusive_group(required=True)
         _add_via_host_argument(
             waypoints, _("Waypoint host, in traversal order (repeat option "
@@ -174,6 +191,7 @@ class SetTePath(command.Command):
 
     def take_action(self, parsed_args):
         client = self.app.client_manager.network
+        # An empty list means: no waypoints, go direct.
         via_hosts = [] if parsed_args.no_via_host else parsed_args.via_hosts
         client._update(resources.Srv6TePath, parsed_args.te_path,
                        via_hosts=via_hosts)
@@ -194,7 +212,9 @@ class DeleteTePath(command.Command):
     def take_action(self, parsed_args):
         client = self.app.client_manager.network
 
+        # Delete one path; fail if it does not exist.
         def delete(value):
             client._delete(resources.Srv6TePath, value, ignore_missing=False)
 
+        # Try every path, then report all failures at the end.
         common.delete_all(parsed_args.te_paths, delete, _("TE path"))

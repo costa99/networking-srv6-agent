@@ -36,6 +36,7 @@ elif [[ "$1" == "stack" && "$2" == "post-config" ]]; then
     if is_service_enabled neutron-api || is_service_enabled q-svc; then
         neutron_service_plugin_class_add srv6
         iniset $NEUTRON_CONF srv6 function_id_ranges $SRV6_FUNCTION_ID_RANGES
+        iniset $NEUTRON_CONF srv6 dataplane_encoding $SRV6_DATAPLANE_ENCODING
     fi
 
     if is_service_enabled neutron-agent || is_service_enabled q-agt; then

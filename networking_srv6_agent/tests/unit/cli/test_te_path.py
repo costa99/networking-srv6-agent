@@ -29,7 +29,8 @@ def _path(**attrs):
     body = {'id': base.TE_PATH_ID, 'project_id': base.PROJECT_ID,
             'domain_id': base.DOMAIN_ID, 'destination_host': None,
             'destination_port_id': base.PORT_ID, 'via_hosts': ['node2'],
-            'segments': SEGMENTS, 'status': 'ACTIVE'}
+            'segments': SEGMENTS, 'encoded_segments': SEGMENTS,
+            'status': 'ACTIVE'}
     body.update(attrs)
     return TE.existing(**body)
 
@@ -78,6 +79,7 @@ class TestCreateTePath(_Base):
             'Via Hosts': common.PathColumn(['node2']),
             'Status': 'ACTIVE',
             'Segments': common.PathColumn(SEGMENTS),
+            'Encoded Segments': common.PathColumn(SEGMENTS),
             'Project': base.PROJECT_ID,
         })
 
@@ -125,7 +127,8 @@ class TestListTePath(_Base):
         self.network._list.assert_called_once_with(
             TE, domain_id=base.DOMAIN_ID, destination_host='node2',
             destination_port_id=base.PORT_ID)
-        self.assertEqual(('Segments', 'Project'), headers[-2:])
+        self.assertEqual(('Segments', 'Encoded Segments', 'Project'),
+                         headers[-3:])
 
 
 class TestShowTePath(_Base):

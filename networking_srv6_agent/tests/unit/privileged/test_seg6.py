@@ -40,6 +40,7 @@ correctness evidence available for the encapsulation path.
 from unittest import mock
 
 from neutron.tests import base
+from oslo_concurrency import processutils
 
 from networking_srv6_agent.privileged import seg6
 
@@ -262,3 +263,128 @@ class TestLocatorRoute(Seg6ArgvTestCase):
             ['-6', 'route', 'replace', 'local', 'fc00:0:1::/48',
              'dev', 'lo', 'table', 'main'],
             self.argv)
+
+
+class TestMicroSidArgv(Seg6ArgvTestCase):
+    """The microSID vectors.
+
+    As checked against kernel 7.0 / iproute2 6.1 on node 2 on 2026-10-02
+    (USID-PLAN.md s2.3).
+    """
+
+    def test_encap_red(self):
+        seg6.replace_seg6_route('10.0.0.5/32', ['fc00:0:1:3:e005::'],
+                                'eth0', 10007, mode='encap.red')
+        self.assertEqual(
+            'ip route replace 10.0.0.5/32 encap seg6 mode encap.red '
+            'segs fc00:0:1:3:e005:: dev eth0 table 10007',
+            'ip ' + ' '.join(self.argv))
+
+    def test_an_unknown_mode_is_refused_before_ip_runs(self):
+        self.assertRaises(ValueError, seg6.replace_seg6_route,
+                          '10.0.0.5/32', ['fc00:0:2:7::'], 'eth0', 10007,
+                          mode='inline')
+        self.ip_route_cmd.assert_not_called()
+
+    def test_un_is_a_48_with_the_next_csid_flavor(self):
+        seg6.replace_seg6local_route('fc00:0:1::', 'End', 'eth0',
+                                     prefixlen=48, next_csid=(32, 16))
+        self.assertEqual(
+            'ip -6 route replace fc00:0:1::/48 encap seg6local action End '
+            'flavors next-csid lblen 32 nflen 16 dev eth0',
+            'ip ' + ' '.join(self.argv))
+
+    def test_decap_at_64(self):
+        seg6.replace_seg6local_route('fc00:0:1:e005::', 'End.DT46',
+                                     'sv6vrf-57349', vrf_table=67349,
+                                     prefixlen=64)
+        self.assertEqual(
+            ['-6', 'route', 'replace', 'fc00:0:1:e005::/64',
+             'encap', 'seg6local', 'action', 'End.DT46',
+             'vrftable', '67349', 'dev', 'sv6vrf-57349'],
+            self.argv)
+
+    def test_lib_seal(self):
+        seg6.replace_unreachable_route('fc00:0:1:e000::/52')
+        self.assertEqual(['-6', 'route', 'replace', 'unreachable',
+                          'fc00:0:1:e000::/52', 'table', 'main'], self.argv)
+
+    def test_delete_names_the_route_type(self):
+        seg6.delete_main_route('fc00:0:1::/48', route_type='local')
+        self.assertEqual(['-6', 'route', 'del', 'local', 'fc00:0:1::/48',
+                          'table', 'main'], self.argv)
+
+    def test_delete_tolerates_absence(self):
+        self.ip_route_cmd.side_effect = processutils.ProcessExecutionError(
+            stderr='RTNETLINK answers: No such process')
+        self.assertIsNone(seg6.delete_main_route('fc00:0:1::/48'))
+
+
+class TestShowMainRoute(Seg6ArgvTestCase):
+
+    def test_keeps_only_main(self):
+        # `table all` output: a main entry names no table (iproute2 6.1
+        # hides a local-type route from `show table main` altogether).
+        self.ip_route_cmd.return_value = (
+            'local fc00:0:1::/48 dev lo metric 1024 pref medium\n'
+            'fc00:0:1::/48 via fd00::1 dev eth0 table 10007 metric 1024\n'
+            'fc00:0:1::/48 dev lo table main proto boot metric 1024\n')
+        self.assertEqual(
+            ['local fc00:0:1::/48 dev lo metric 1024 pref medium',
+             'fc00:0:1::/48 dev lo table main proto boot metric 1024'],
+            seg6.show_main_route('fc00:0:1::/48'))
+        self.assertEqual(['-6', 'route', 'show', 'table', 'all', 'exact',
+                          'fc00:0:1::/48'], self.argv)
+
+    def test_unreadable_is_empty(self):
+        self.ip_route_cmd.side_effect = processutils.ProcessExecutionError()
+        self.assertEqual([], seg6.show_main_route('fc00:0:1::/48'))
+
+
+class TestProbeCapabilities(Seg6ArgvTestCase):
+
+    UN = ('2001:db8:0:1::/64  encap seg6local action End flavors next-csid '
+          'lblen 32 nflen 16 dev lo metric 1024 pref medium\n')
+    RED = ('2001:db8:0:2::/64  encap seg6 mode encap.red segs 1 '
+           '[ 2001:db8::1 ] dev lo metric 1024 pref medium\n')
+
+    def setUp(self):
+        super().setUp()
+        flush = mock.patch.object(seg6, 'flush_table')
+        self.flush = flush.start()
+        self.addCleanup(flush.stop)
+
+    def _answer(self, shown):
+        def run(args):
+            if args[2] == 'show':
+                return shown.pop(0)
+            return ''
+        self.ip_route_cmd.side_effect = run
+
+    def test_both_found(self):
+        self._answer([self.UN, self.UN + self.RED])
+        self.assertEqual(['next-csid', 'encap-red'],
+                         seg6.probe_capabilities())
+        self.flush.assert_called_once_with(4000000000, family_v6=True)
+
+    def test_a_kernel_that_drops_the_flavor_is_caught_on_read_back(self):
+        # Accepted, but shown without it: an older kernel ignoring the
+        # nested attribute.
+        self._answer(['2001:db8:0:1::/64 encap seg6local action End dev lo\n',
+                      self.RED])
+        self.assertEqual(['encap-red'], seg6.probe_capabilities())
+
+    def test_an_iproute2_that_rejects_the_keyword(self):
+        def run(args):
+            if 'flavors' in args or 'encap.red' in args:
+                raise processutils.ProcessExecutionError(
+                    stderr='Error: argument "flavors" is wrong')
+            return ''
+        self.ip_route_cmd.side_effect = run
+        self.assertEqual([], seg6.probe_capabilities())
+        self.flush.assert_called_once()
+
+    def test_the_probe_table_is_flushed_even_on_a_crash(self):
+        self.ip_route_cmd.side_effect = RuntimeError('privsep died')
+        self.assertRaises(RuntimeError, seg6.probe_capabilities)
+        self.flush.assert_called_once()

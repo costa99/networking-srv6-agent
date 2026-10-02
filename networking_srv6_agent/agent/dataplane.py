@@ -46,6 +46,16 @@ Per node, over every registered locator (P6):
     table inet srv6_edge -- on iifname "svp-*", drop `ip6 daddr @sid_space`
                             and drop `rt type 4` (any tenant-built SRH)
 
+With dataplane_encoding = usid (RFC 9800 NEXT-C-SID, USID-PLAN.md) the node
+state changes and the routes are packed:
+    ip -6 route replace <locator>/48 encap seg6local action End \
+        flavors next-csid lblen 32 nflen 16 dev <underlay>   # the uN, in
+                                         # place of `local <locator> dev lo`
+    ip -6 route replace unreachable <block>:<node>:e000::/52 table main
+    ip -6 route replace <sid>/64 encap seg6local action End.DT46 ...
+    ip route replace <ip>/32 encap seg6 mode encap.red \
+        segs <C-SID container>[,...] dev <underlay> table <table>
+
 Four things differ from the old build, each a defect it had or one found at
 the gate: the table is sealed, the seal lets the domain's own outer headers
 out through the SID rules, the table is flushed on delete, and a delete finds
@@ -206,10 +216,38 @@ class Srv6LinuxDataplane:
         # (prefix, depth) already warned about, so a steered route that does
         # not fit says so once rather than on every resync.
         self._mtu_warned = set()
+        # How segment lists are encoded, as the server last said
+        # (ensure_encoding). initialize_node reads what the kernel already
+        # holds, so a restart in a usid deployment does not flap the uN.
+        self.encoding = constants.ENCODING_ENCAP
+        # What the probe found this node can do; None until it has run.
+        self.capabilities = None
 
     @property
     def own_end_sid(self):
         return sid.format_sid(self.locator, constants.NODE_END_FUNCTION_ID)
+
+    @property
+    def usid(self):
+        return self.encoding == constants.ENCODING_USID
+
+    @property
+    def own_transit_sid(self):
+        """The SID other nodes name this one by as a TE waypoint.
+
+        The End SID <locator>:fff0:: with full SIDs; the uN, the locator's
+        own address, in usid mode.
+        """
+        if self.usid:
+            return sid.node_sid(self.locator)
+        return self.own_end_sid
+
+    @property
+    def decap_prefixlen(self):
+        """/128 with full SIDs; RFC 9800 s5.3's block+node+function /64."""
+        if self.usid:
+            return constants.USID_FUNCTION_PREFIXLEN
+        return 128
 
     # ------------------------------------------------------------------
     # node-level setup
@@ -223,14 +261,174 @@ class Srv6LinuxDataplane:
                 'net.ipv6.conf.%s.seg6_enabled' % self.underlay_interface, '1')
             self._set_sysctl(
                 'net.ipv4.conf.%s.rp_filter' % self.underlay_interface, '0')
-        priv_seg6.replace_locator_route(self.locator)
+        self._probe_capabilities()
+        # Whatever encoding the kernel shows from before a restart is kept
+        # until the server says otherwise: in a usid deployment, putting
+        # the `local` route back here would cut every TE path through this
+        # node for the seconds until the first payload restored the uN.
+        self.encoding = self._kernel_encoding()
+        self._ensure_locator_route()
         self._ensure_node_end_sid()
         # Own locator only for now; the first sync_state widens it to every
         # registered node before any route is programmed.
         self.ensure_edge_filter([self.locator])
         LOG.info("SRv6 dataplane initialised: locator=%(loc)s "
-                 "underlay=%(ul)s", {'loc': self.locator,
-                                     'ul': self.underlay_interface})
+                 "underlay=%(ul)s encoding=%(enc)s capabilities=%(cap)s",
+                 {'loc': self.locator, 'ul': self.underlay_interface,
+                  'enc': self.encoding,
+                  'cap': ', '.join(self.capabilities or []) or 'none'})
+
+    def _probe_capabilities(self):
+        try:
+            self.capabilities = sorted(priv_seg6.probe_capabilities())
+        except Exception as e:
+            LOG.warning("SRv6: could not probe for encap.red / next-csid "
+                        "support: %s", e)
+            self.capabilities = []
+
+    def _locator_routes(self):
+        """(has the `local` route, has a uN) on this node's locator."""
+        lines = priv_seg6.show_main_route(self.locator)
+        has_local = any(line.split()[0] == 'local' for line in lines)
+        has_un = any('seg6local' in line.split() for line in lines)
+        return has_local, has_un
+
+    def _kernel_encoding(self):
+        try:
+            _has_local, has_un = self._locator_routes()
+        except Exception as e:
+            LOG.debug("SRv6: could not read the locator route: %s", e)
+            return constants.ENCODING_ENCAP
+        return constants.ENCODING_USID if has_un else constants.ENCODING_ENCAP
+
+    def ensure_encoding(self, encoding):
+        """Switch node state to an encoding. Returns whether it changed.
+
+        Node state, like the End SID: what the locator /48 is, and whether
+        the Local ID Block is sealed. Per-domain state follows on the next
+        ensure_domain / sync_routes, which is why a change makes the agent
+        resync every domain.
+
+        A usid request this node cannot honour -- a locator that is not
+        F3216, or a kernel without the flavor -- is refused here, loudly,
+        and the node stays on full SIDs. That is the black hole of
+        USID-PLAN.md D3 made visible; the probe told the server too.
+        """
+        if encoding not in constants.VALID_ENCODINGS:
+            LOG.error("SRv6: the server asked for unknown dataplane "
+                      "encoding %r; keeping %s", encoding, self.encoding)
+            return False
+        if encoding == self.encoding:
+            return False
+        if encoding == constants.ENCODING_USID:
+            try:
+                sid.check_usid_locator(self.locator)
+            except sid.InvalidLocator as e:
+                LOG.error("SRv6: dataplane_encoding is usid but this node "
+                          "cannot take part: %s. TE paths through it and "
+                          "traffic to it will fail.", e)
+                return False
+            missing = [c for c in constants.ENCODING_REQUIRES[encoding]
+                       if c not in (self.capabilities or [])]
+            if self.capabilities is not None and missing:
+                LOG.error("SRv6: dataplane_encoding is usid but this "
+                          "node's kernel or iproute2 lacks %s; trying "
+                          "anyway, expect the routes to fail",
+                          ', '.join(missing))
+        previous = self.encoding
+        self.encoding = encoding
+        self._ensure_locator_route()
+        # A domain's decap SID moves between /128 and /64; the old length
+        # would otherwise linger in main until the domain is deleted.
+        old_len = 128 if self.decap_prefixlen != 128 else \
+            constants.USID_FUNCTION_PREFIXLEN
+        for state in self.domains.values():
+            self._delete_decap_route(state.function_id, old_len)
+        self._mtu_warned.clear()
+        LOG.info("SRv6: dataplane encoding %(old)s -> %(new)s",
+                 {'old': previous, 'new': encoding})
+        return True
+
+    def _ensure_locator_route(self):
+        """The /48 is the `local` route with full SIDs, the uN with usid.
+
+        Both sit on the same prefix in the same table, so one replaces the
+        other (USID-PLAN.md D6). The old one is deleted first, by what the
+        kernel shows rather than what this process remembers, so the switch
+        works in both directions and after a restart.
+
+        In usid mode the Local ID Block is sealed with an unreachable /52:
+        a LIB function that has no /64 decap route is dropped there instead
+        of the uN reading it as the next node. With full SIDs the seal is
+        removed, since there is no uN for it to protect against.
+        """
+        try:
+            has_local, has_un = self._locator_routes()
+        except Exception as e:
+            LOG.debug("SRv6: could not read the locator route: %s", e)
+            has_local = has_un = False
+        if self.usid:
+            if has_local:
+                priv_seg6.delete_main_route(self.locator, route_type='local')
+            self._ensure_node_usid()
+            try:
+                priv_seg6.replace_unreachable_route(
+                    sid.lib_prefix(self.locator))
+            except Exception as e:
+                LOG.error("SRv6: could not seal the Local ID Block %(p)s: "
+                          "%(e)s. A packet for an unallocated function is "
+                          "forwarded as if the function were a node.",
+                          {'p': sid.lib_prefix(self.locator), 'e': e})
+            return
+        if has_un:
+            priv_seg6.delete_main_route(self.locator)
+        priv_seg6.replace_locator_route(self.locator)
+        try:
+            lib = sid.lib_prefix(self.locator)
+        except sid.InvalidLocator:
+            return
+        try:
+            priv_seg6.delete_main_route(lib, route_type='unreachable')
+        except Exception as e:
+            LOG.debug("SRv6: removing the LIB seal %(p)s: %(e)s",
+                      {'p': lib, 'e': e})
+
+    def _ensure_node_usid(self):
+        """This node's uN: End with the NEXT-C-SID flavor on the whole /48.
+
+        A packet whose DA is <block>:<this node>:<more C-SIDs> is shifted
+        left one C-SID and forwarded by an ordinary lookup, with no SRH; a
+        DA whose remaining C-SIDs are zero falls back to classic End on the
+        SRH, which is how a path longer than one container continues
+        (RFC 9800 s4.1.1). Same placement rules as the End SID: main, and
+        `dev` is syntax, not the forwarding decision.
+        """
+        dev = self.underlay_interface or 'lo'
+        try:
+            priv_seg6.replace_seg6local_route(
+                sid.node_sid(self.locator), constants.BEHAVIOR_END, dev,
+                prefixlen=constants.USID_LOCATOR_PREFIXLEN,
+                next_csid=(constants.USID_BLOCK_BITS,
+                           constants.USID_CSID_BITS))
+        except Exception as e:
+            LOG.error("SRv6: could not install this node's uN %(s)s: %(e)s. "
+                      "Nothing addressed to this node's locator is "
+                      "delivered, and TE paths through it fail.",
+                      {'s': self.locator, 'e': e})
+            return
+        LOG.info("SRv6: node uN %(s)s (End, next-csid lblen %(b)d nflen "
+                 "%(c)d) via %(d)s",
+                 {'s': self.locator, 'b': constants.USID_BLOCK_BITS,
+                  'c': constants.USID_CSID_BITS, 'd': dev})
+
+    def _delete_decap_route(self, function_id, prefixlen):
+        local_sid = sid.format_sid(self.locator, function_id)
+        try:
+            priv_seg6.delete_route('%s/%d' % (local_sid, prefixlen), 'main',
+                                   family_v6=True)
+        except Exception as e:
+            LOG.debug("SRv6: removing SID %(s)s/%(l)d: %(e)s",
+                      {'s': local_sid, 'l': prefixlen, 'e': e})
 
     def _ensure_node_end_sid(self):
         """This node's plain transit SID, so others can route *through* us.
@@ -390,11 +588,18 @@ class Srv6LinuxDataplane:
         self._seal_table(domain_id, vrf_table)
 
         local_sid = sid.format_sid(self.locator, function_id)
+        # A plain End.DT46 also serves as the last C-SID of a compressed
+        # path (RFC 9800 s4.1): after the final shift the DA is exactly
+        # <block>:<node>:<function>::, which this route matches.
+        # Extra arguments only in usid mode: with full SIDs the call stays
+        # exactly what every earlier build made.
+        extra = {'prefixlen': self.decap_prefixlen} if self.usid else {}
         priv_seg6.replace_seg6local_route(local_sid, behavior, vrf_name,
-                                          vrf_table=vrf_table)
-        LOG.info("SRv6: domain %(d)s local SID %(sid)s %(b)s -> table %(t)s",
+                                          vrf_table=vrf_table, **extra)
+        LOG.info("SRv6: domain %(d)s local SID %(sid)s/%(l)d %(b)s -> "
+                 "table %(t)s",
                  {'d': domain_id, 'sid': local_sid, 'b': behavior,
-                  't': vrf_table})
+                  'l': self.decap_prefixlen, 't': vrf_table})
 
         self.domains[domain_id] = DomainState(domain_id, function_id,
                                               vrf_table, vrf_name)
@@ -456,13 +661,10 @@ class Srv6LinuxDataplane:
                 LOG.debug("SRv6: removing rule %(v)s -> %(s)s: %(e)s",
                           {'v': vrf_name, 's': sid_address, 'e': e})
 
-        local_sid = sid.format_sid(self.locator, function_id)
-        try:
-            priv_seg6.delete_route('%s/128' % local_sid, 'main',
-                                   family_v6=True)
-        except Exception as e:
-            LOG.debug("SRv6: removing SID %(s)s: %(e)s",
-                      {'s': local_sid, 'e': e})
+        # Both lengths whatever the encoding: one left from before a mode
+        # switch would otherwise outlive the domain.
+        for prefixlen in (128, constants.USID_FUNCTION_PREFIXLEN):
+            self._delete_decap_route(function_id, prefixlen)
         if ip_lib.device_exists(vrf_name):
             try:
                 priv_ip_lib.delete_interface(vrf_name, None)
@@ -694,16 +896,18 @@ class Srv6LinuxDataplane:
     # routes
     # ------------------------------------------------------------------
     def _transit_segments(self, segments):
-        """A route's transit SIDs, minus any leading End SID of this node.
+        """A route's transit SIDs, minus any leading transit SID of ours.
 
         The payload fans out to every node, and the server cannot know
         which one is the ingress. A path whose first waypoint is this node
         would otherwise send each packet into our own End behaviour and
         back out -- correct, but a pointless trip through the stack. Only
         LEADING occurrences are dropped: this node appearing later in the
-        list is a real waypoint. Compared as addresses, not strings.
+        list is a real waypoint. Compared as addresses, not strings. "Ours"
+        is the End SID, or the uN in usid mode -- whichever the server
+        resolved the via hosts to.
         """
-        own = ipaddress.IPv6Address(self.own_end_sid)
+        own = ipaddress.IPv6Address(self.own_transit_sid)
         transit = list(segments or [])
         while transit:
             try:
@@ -781,25 +985,32 @@ class Srv6LinuxDataplane:
             wanted.add(_normalise_prefix(prefix))
             remote_sid = sid.format_sid(locator, state.function_id)
             transit = self._transit_segments(route.get('segments'))
-            segments = transit + [remote_sid]
+            segments, mode = self._encode(transit + [remote_sid], prefix)
+            # The outer DA is the first PUSHED element: the decap SID, a
+            # transit End SID, or in usid mode the first C-SID container --
+            # which starts with the first hop's block and node, so it lies
+            # inside that node's locator and the edge filter covers it.
+            first = segments[0]
             if not transit:
-                rule_sids.add(_normalise_sid(remote_sid))
-            elif self._edge_filter_covers(transit[0]):
-                rule_sids.add(_normalise_sid(transit[0]))
+                rule_sids.add(_normalise_sid(first))
+            elif self._edge_filter_covers(first):
+                rule_sids.add(_normalise_sid(first))
             else:
                 LOG.warning("SRv6: domain %(d)s route %(p)s starts at "
                             "transit SID %(s)s, but the edge filter is not "
                             "active for it; the VRF may not reach an End SID "
                             "without it, so this "
                             "path is sealed",
-                            {'d': domain_id, 'p': prefix, 's': transit[0]})
+                            {'d': domain_id, 'p': prefix, 's': first})
             self._check_route_mtu(prefix,
                                   (mtus or {}).get(route.get('network_id')),
                                   len(segments))
+            extra = {'mode': mode} if self.usid else {}
             try:
                 priv_seg6.replace_seg6_route(
                     prefix, segments, self.underlay_interface,
-                    state.vrf_table, family_v6=':' in prefix.split('/')[0])
+                    state.vrf_table, family_v6=':' in prefix.split('/')[0],
+                    **extra)
             except Exception as e:
                 LOG.error("SRv6: could not install %(p)s -> %(s)s: %(e)s",
                           {'p': prefix, 's': segments, 'e': e})
@@ -808,6 +1019,27 @@ class Srv6LinuxDataplane:
                       {'d': domain_id, 'p': prefix, 's': segments,
                        't': state.vrf_table})
         return wanted, rule_sids
+
+    def _encode(self, segments, prefix):
+        """(what to push, seg6 mode) for a logical segment list.
+
+        Full SIDs with H.Encaps, or in usid mode the list packed into
+        NEXT-C-SID containers and pushed with H.Encaps.Red, so a path that
+        fits one container carries no SRH. A list that cannot be packed --
+        locators from different blocks -- is pushed as full SIDs, still
+        reduced: bigger, but it works, since every SID in it is a valid
+        SID on its own.
+        """
+        if not self.usid:
+            return segments, constants.SEG6_MODE_ENCAP
+        try:
+            return (sid.pack_next_csid(segments),
+                    constants.SEG6_MODE_ENCAP_RED)
+        except sid.InvalidLocator as e:
+            LOG.warning("SRv6: route %(p)s: cannot compress %(s)s (%(e)s); "
+                        "pushing full SIDs", {'p': prefix, 's': segments,
+                                              'e': e})
+            return segments, constants.SEG6_MODE_ENCAP_RED
 
     # ------------------------------------------------------------------
     # SID rules
@@ -934,6 +1166,8 @@ class Srv6LinuxDataplane:
         Depth 1 is the per-network check _apply_domain already makes. Each
         extra segment costs 16 bytes, so a network that fits at depth 1 may
         not fit steered; saying so on every resync would bury the log.
+        Depth counts what is pushed: in usid mode a steered route that fits
+        one container is depth 1 and costs no more than a direct one.
         """
         if depth < 2 or not network_mtu:
             return
@@ -953,7 +1187,7 @@ class Srv6LinuxDataplane:
         """
         if not network_mtu or not self.underlay_interface:
             return True
-        overhead = sid.encap_overhead(segment_count)
+        overhead = sid.encap_overhead(segment_count, reduced=self.usid)
         try:
             underlay_mtu = ip_lib.IPDevice(
                 self.underlay_interface).link.mtu

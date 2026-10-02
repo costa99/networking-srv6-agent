@@ -122,5 +122,7 @@ class Srv6TePath(resource.Resource):
     via_hosts = resource.Body('via_hosts', type=list)
     #: What the server resolved on read: via End SIDs, then the decap SID.
     segments = resource.Body('segments', type=list)
+    #: What the ingress pushes: the same SIDs, or microSID containers.
+    encoded_segments = resource.Body('encoded_segments', type=list)
     #: ACTIVE or DEGRADED.
     status = resource.Body('status')

@@ -158,7 +158,8 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             payloads = cctxt.call(
                 self.context, constants.SYNC_STATE,
                 host=self.host, locator=self.conf.locator,
-                payload_version=constants.PAYLOAD_VERSION)
+                payload_version=constants.PAYLOAD_VERSION,
+                capabilities=self.dataplane.capabilities)
         except Exception as e:
             LOG.error("SRv6: sync_state failed (%s); will retry on the next "
                       "resync interval", e)
@@ -275,8 +276,17 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         Both callers land here -- the domain_updated fanout and the
         periodic resync -- so reconciling here covers the missed-message
         case as well.
+
+        Returns whether the payload switched the node's dataplane encoding.
+        That happens before this domain is programmed, so this domain is
+        already encoded the new way; every OTHER domain needs a resync,
+        which domain_updated does. A full sync needs none: it applies every
+        domain after this one anyway.
         """
         domain_id = payload['id']
+        # Absent from an older server's payload, which only knew full SIDs.
+        encoding_changed = self.dataplane.ensure_encoding(
+            payload.get('encoding') or constants.DEFAULT_ENCODING)
         if self._merge_locators(payload.get('locators')):
             # A new node's SID space is filtered before any route of this
             # payload can lead a rule toward its End SID.
@@ -306,6 +316,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                                    self.locators, self.host,
                                    mtus=self._network_mtus(payload))
         self.domains[domain_id] = payload
+        return encoding_changed
 
     # ------------------------------------------------------------------
     # RPC handlers (server -> agent fanout)
@@ -331,10 +342,15 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         LOG.debug("SRv6: domain_updated %s", domain.get('id'))
         with self._lock:
             try:
-                self._apply_domain(domain)
+                encoding_changed = self._apply_domain(domain)
             except Exception:
                 LOG.exception("SRv6: failed to apply domain_updated for %s",
                               domain.get('id'))
+                return
+            if encoding_changed:
+                LOG.info("SRv6: dataplane encoding changed; re-encoding "
+                         "every domain")
+                self._do_sync_state()
 
     def routes_updated(self, context, domain_id=None, add=None, remove=None,
                        payload_version=1, **kwargs):
