@@ -23,6 +23,7 @@ the capabilities it checks agents for (D3).
 from unittest import mock
 
 from neutron_lib import exceptions as n_exc
+from oslo_db import exception as db_exc
 
 from networking_srv6_agent.common import config
 from networking_srv6_agent.db import srv6_db
@@ -177,3 +178,21 @@ class TestSyncState(UsidPluginTestCaseBase):
         with mock.patch.object(plugin, 'LOG') as log:
             self._sync('fc00:0:4::/48', capabilities=None)
         log.warning.assert_called()
+
+
+class TestPoolRace(test_plugin.PluginUnitTestCaseBase):
+    """Two first sync_states after a range change insert the same new ids."""
+
+    def test_a_concurrent_insert_is_retried_once(self):
+        self.srv6_db.sync_allocation_pool.side_effect = [
+            db_exc.DBDuplicateEntry(columns=['function_id']), None]
+        self.plugin._ensure_pool(mock.Mock())
+        self.assertEqual(2, self.srv6_db.sync_allocation_pool.call_count)
+        self.assertTrue(self.plugin._pool_synced)
+
+    def test_a_second_failure_is_not_swallowed(self):
+        self.srv6_db.sync_allocation_pool.side_effect = \
+            db_exc.DBDuplicateEntry(columns=['function_id'])
+        self.assertRaises(db_exc.DBDuplicateEntry,
+                          self.plugin._ensure_pool, mock.Mock())
+        self.assertFalse(self.plugin._pool_synced)

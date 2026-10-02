@@ -164,7 +164,18 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         if self._pool_synced:
             return
         ranges = srv6_db.parse_function_id_ranges(self.conf.function_id_ranges)
-        srv6_db.sync_allocation_pool(context, ranges)
+        try:
+            srv6_db.sync_allocation_pool(context, ranges)
+        except db_exc.DBDuplicateEntry:
+            # Two sync_state calls landing together -- every agent's first
+            # one after a server restart -- both find the newly configured
+            # ids missing and both insert them; the second fails on the
+            # primary key (seen on the testbed when function_id_ranges moved
+            # to the microSID LIB). The rows are there now, so one more
+            # pass inserts nothing and completes the sync.
+            LOG.debug("SRv6 function id pool populated concurrently; "
+                      "re-synchronising")
+            srv6_db.sync_allocation_pool(context, ranges)
         self._pool_synced = True
 
     @staticmethod
