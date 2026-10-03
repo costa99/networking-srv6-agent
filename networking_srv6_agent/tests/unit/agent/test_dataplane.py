@@ -415,6 +415,67 @@ class TestGatewayPort(DataplaneTestCaseBase):
         self.bridge.delete_port.assert_not_called()
 
 
+class TestLocalNetworkVlans(DataplaneTestCaseBase):
+    """Which networks have a live port on br-int, and on which VLAN.
+
+    From OVSDB (Port.other_config:net_uuid + Port.tag), which the OVS agent
+    writes when it binds a port and keeps across restarts -- unlike its
+    in-memory VLAN map, empty during every restart.
+    """
+
+    def _rows(self, *rows):
+        self.bridge.get_ports_attributes.return_value = [
+            {'name': n, 'tag': t, 'other_config': oc} for n, t, oc in rows]
+
+    def test_bound_ports_map_their_network_to_their_vlan(self):
+        self._rows(('tapa', 3, {'net_uuid': 'net1', 'tag': '3'}),
+                   ('tapb', 4, {'net_uuid': 'net2', 'tag': '4'}))
+        self.assertEqual({'net1': {3}, 'net2': {4}},
+                         self.dp.local_network_vlans())
+        self.bridge.get_ports_attributes.assert_called_once_with(
+            'Port', columns=['name', 'tag', 'other_config'], if_exists=True)
+
+    def test_two_ports_of_one_network_are_one_entry(self):
+        self._rows(('tapa', 3, {'net_uuid': 'net1'}),
+                   ('tapb', 3, {'net_uuid': 'net1'}))
+        self.assertEqual({'net1': {3}}, self.dp.local_network_vlans())
+
+    def test_gateway_ports_are_not_a_networks_ports(self):
+        self._rows(('svp-7-3', 3, {'net_uuid': 'net1'}))
+        self.assertEqual({}, self.dp.local_network_vlans())
+
+    def test_ports_without_a_network_are_skipped(self):
+        # patch ports, an internal port the agent has not bound yet
+        self._rows(('patch-tun', [], {}), ('tapnew', 5, {}))
+        self.assertEqual({}, self.dp.local_network_vlans())
+
+    def test_the_dead_vlan_is_not_live(self):
+        # admin-down or unbound ports sit in VLAN 4095
+        self._rows(('tapa', 4095, {'net_uuid': 'net1'}))
+        self.assertEqual({}, self.dp.local_network_vlans())
+
+    def test_an_untagged_port_is_skipped(self):
+        self._rows(('tapa', [], {'net_uuid': 'net1'}))
+        self.assertEqual({}, self.dp.local_network_vlans())
+
+    def test_a_one_element_list_tag_is_accepted(self):
+        self._rows(('tapa', [3], {'net_uuid': 'net1'}))
+        self.assertEqual({'net1': {3}}, self.dp.local_network_vlans())
+
+    def test_an_empty_bridge(self):
+        self.bridge.get_ports_attributes.return_value = []
+        self.assertEqual({}, self.dp.local_network_vlans())
+
+    def test_an_unreadable_bridge_is_none(self):
+        # None, not {}: {} would mean "nothing is live" and delete it all
+        self.bridge.get_ports_attributes.side_effect = RuntimeError('boom')
+        self.assertIsNone(self.dp.local_network_vlans())
+
+    def test_no_bridge_is_none(self):
+        self.dp.bridge = None
+        self.assertIsNone(self.dp.local_network_vlans())
+
+
 class TestGatewayPortReconciliation(DataplaneTestCaseBase):
     """Regression: a network leaving a domain leaked its gateway port.
 
@@ -434,25 +495,25 @@ class TestGatewayPortReconciliation(DataplaneTestCaseBase):
             'svp-7-100', 'svp-7-101', 'svp-9-100', 'tap-something']
 
     def test_a_network_that_left_the_domain_loses_its_port(self):
-        self.dp.reconcile_gateway_ports(self.domain_id, {100}, True)
+        self.dp.reconcile_gateway_ports(self.domain_id, {100})
         self.bridge.delete_port.assert_called_once_with('svp-7-101')
 
     def test_the_networks_that_stayed_keep_theirs(self):
-        self.dp.reconcile_gateway_ports(self.domain_id, {100, 101}, True)
+        self.dp.reconcile_gateway_ports(self.domain_id, {100, 101})
         self.bridge.delete_port.assert_not_called()
 
     def test_another_domains_ports_are_never_touched(self):
         # svp-9-100 belongs to function id 9. Matching on the bare prefix
         # would delete it.
-        self.dp.reconcile_gateway_ports(self.domain_id, {100, 101}, True)
-        self.dp.reconcile_gateway_ports(self.domain_id, set(), False)
+        self.dp.reconcile_gateway_ports(self.domain_id, {100, 101})
+        self.dp.reconcile_gateway_ports(self.domain_id, set())
         for call in self.bridge.delete_port.call_args_list:
             self.assertTrue(call[0][0].startswith('svp-7-'))
 
     def test_the_last_network_leaving_empties_the_domain(self):
         # The case in the evidence file: the domain survives with no
         # networks.
-        self.dp.reconcile_gateway_ports(self.domain_id, set(), False)
+        self.dp.reconcile_gateway_ports(self.domain_id, set())
         self.assertEqual(
             sorted([mock.call('svp-7-100'), mock.call('svp-7-101')], key=str),
             sorted(self.bridge.delete_port.call_args_list, key=str))
@@ -468,41 +529,44 @@ class TestGatewayPortReconciliation(DataplaneTestCaseBase):
         reconciliation deleted nothing and the leak survived every restart.
         """
         self.assertEqual({}, self.dp.gateway_ports[self.domain_id])
-        self.dp.reconcile_gateway_ports(self.domain_id, {100}, True)
+        self.dp.reconcile_gateway_ports(self.domain_id, {100})
         self.bridge.delete_port.assert_called_once_with('svp-7-101')
 
-    def test_a_vlan_map_that_is_not_ready_yet_deletes_nothing(self):
-        """Every agent restart passes through this state.
+    def test_an_empty_wanted_set_deletes_every_port_of_the_domain(self):
+        """F6 and F8: the domain has networks, none with a live port here.
 
-        _apply_domain runs from initialize() before the OVS agent has built
-        its VLAN mapping, so every network resolves to None. Reconciling
-        then would tear down every gateway and rebuild it on the first port
-        event.
+        This used to be the early return for "the VLAN map is not built
+        yet", which kept every leftover: after a detach (F6), and after a
+        network's last port left the node (F8), when t9 saw the reclaimed
+        VLAN reach another network that then injected into the domain. The
+        wanted set now comes from OVSDB, so empty means empty.
         """
-        self.dp.reconcile_gateway_ports(self.domain_id, set(), True)
-        self.bridge.delete_port.assert_not_called()
+        self.dp.reconcile_gateway_ports(self.domain_id, set())
+        self.assertEqual(
+            sorted([mock.call('svp-7-100'), mock.call('svp-7-101')], key=str),
+            sorted(self.bridge.delete_port.call_args_list, key=str))
 
     def test_the_stale_entry_is_dropped_from_the_map_too(self):
         self.dp.gateway_ports[self.domain_id] = {'net1': 'svp-7-100',
                                                  'net2': 'svp-7-101'}
-        self.dp.reconcile_gateway_ports(self.domain_id, {100}, True)
+        self.dp.reconcile_gateway_ports(self.domain_id, {100})
         self.assertEqual({'net1': 'svp-7-100'},
                          self.dp.gateway_ports[self.domain_id])
 
     def test_reconciling_an_unknown_domain_is_a_noop(self):
-        self.dp.reconcile_gateway_ports('no-such-domain', set(), False)
+        self.dp.reconcile_gateway_ports('no-such-domain', set())
         self.bridge.delete_port.assert_not_called()
 
     def test_reconciliation_is_idempotent(self):
-        self.dp.reconcile_gateway_ports(self.domain_id, {100}, True)
+        self.dp.reconcile_gateway_ports(self.domain_id, {100})
         self.bridge.reset_mock()
         self.bridge.get_port_name_list.return_value = ['svp-7-100']
-        self.dp.reconcile_gateway_ports(self.domain_id, {100}, True)
+        self.dp.reconcile_gateway_ports(self.domain_id, {100})
         self.bridge.delete_port.assert_not_called()
 
     def test_a_bridge_that_cannot_be_listed_deletes_nothing(self):
         self.bridge.get_port_name_list.side_effect = RuntimeError('boom')
-        self.dp.reconcile_gateway_ports(self.domain_id, set(), False)
+        self.dp.reconcile_gateway_ports(self.domain_id, set())
         self.bridge.delete_port.assert_not_called()
 
 

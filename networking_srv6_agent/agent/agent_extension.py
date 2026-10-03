@@ -263,6 +263,45 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         return changed
 
     @staticmethod
+    def _wanted_vlans(payload, present):
+        """The VLANs on which this domain's networks have a live port here.
+
+        present is dataplane.local_network_vlans(): network -> VLANs, from
+        OVSDB. Anything of the domain on another VLAN is a leftover.
+        """
+        wanted = set()
+        for network in payload.get('networks') or []:
+            wanted |= present.get(network['network_id'], set())
+        return wanted
+
+    def _reconcile_domain(self, domain_id, payload, present):
+        """Remove the domain's gateway ports that no live port backs.
+
+        present None means OVSDB could not be read: delete nothing, the next
+        trigger tries again.
+        """
+        if present is None:
+            LOG.warning("SRv6: br-int ports unreadable; not reconciling the "
+                        "gateway ports of domain %s", domain_id)
+            return
+        self.dataplane.reconcile_gateway_ports(
+            domain_id, self._wanted_vlans(payload, present))
+
+    def _reconcile_all_gateways(self):
+        """Reconcile every known domain's gateway ports. Caller holds the lock.
+
+        One OVSDB read for all of them; a domain that fails is logged and
+        does not stop the others.
+        """
+        present = self.dataplane.local_network_vlans()
+        for domain_id, payload in list(self.domains.items()):
+            try:
+                self._reconcile_domain(domain_id, payload, present)
+            except Exception:
+                LOG.exception("SRv6: reconciling the gateway ports of "
+                              "domain %s", domain_id)
+
+    @staticmethod
     def _network_mtus(payload):
         """network_id -> MTU, for the per-route check."""
         return {n['network_id']: n.get('mtu')
@@ -294,15 +333,16 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         self.dataplane.ensure_domain(domain_id, payload['function_id'],
                                      payload['behavior'])
         networks = payload.get('networks') or []
-        # Resolve every VLAN first: reconciliation needs the whole wanted
-        # set before it can call anything stale, and a second lookup per
-        # network would be a second chance to disagree with itself.
+        # What to KEEP comes from OVSDB (local_network_vlans): it is right
+        # even during a restart, when the in-memory map below is empty.
+        # Reconcile before ensuring, or a port (re-)created in this pass
+        # could be deleted by it.
+        self._reconcile_domain(domain_id, payload,
+                               self.dataplane.local_network_vlans())
+        # What to CREATE still comes from the OVS agent's own map: a gateway
+        # is made only once the agent has bound the network on this node.
         vlans = {n['network_id']: self._local_vlan_for(n['network_id'])
                  for n in networks}
-        self.dataplane.reconcile_gateway_ports(
-            domain_id,
-            {v for v in vlans.values() if v is not None},
-            has_networks=bool(networks))
         for network in networks:
             network_id = network['network_id']
             local_vlan = vlans[network_id]
@@ -406,6 +446,10 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         if not network_id:
             return
         with self._lock:
+            # First, so no leftover gateway can share the VLAN this port's
+            # network has just been given (F8). delete_port normally removed
+            # it already; this covers a removal the agent never saw.
+            self._reconcile_all_gateways()
             known = False
             for domain_id, payload in self.domains.items():
                 for network in payload.get('networks') or []:
@@ -429,10 +473,23 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                 self._do_sync_state()
 
     def delete_port(self, context, port):
-        """Nothing to do.
+        """A port left this node: drop the gateways no live port backs now.
 
-        The instance's own address is advertised by the *server*, which
-        learns of the deletion through its port registry receiver and fans
-        out a routes_updated(remove=...). Removing anything here would race
-        that message.
+        This is the fix for F8. When a network's last port leaves, the OVS
+        agent reclaims its local VLAN right after this call
+        (treat_devices_removed calls the extensions before port_unbound),
+        and it processes added ports before removed ones, so the VLAN can
+        reach another network no earlier than its next iteration. Removing
+        the gateway here therefore leaves no moment in which a leftover
+        shares a VLAN with somebody else's network. Before this, nothing
+        reacted, and t9 had an unrelated network inherit the VLAN and inject
+        into the domain (REPORT-ISOLATION.md 4.7).
+
+        The port is already gone from OVSDB when this runs, so
+        local_network_vlans() no longer counts it. Routes are still left
+        alone: the instance's address is the *server's* to withdraw, through
+        routes_updated(remove=...), and removing it here would race that
+        message. Only the gateway is node-local state.
         """
+        with self._lock:
+            self._reconcile_all_gateways()

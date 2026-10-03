@@ -79,6 +79,9 @@ class AgentExtensionTestCaseBase(base.BaseTestCase):
         self.ext.vlan_manager = mock.Mock()
         self.ext.dataplane = mock.Mock()
         self.ext.dataplane.present_function_ids.return_value = set()
+        # OVSDB's view of the live ports (network -> VLANs). Empty by
+        # default; a bare Mock would not behave like a dict.
+        self.ext.dataplane.local_network_vlans.return_value = {}
         # A real dataplane answers False when the encoding did not change;
         # a bare Mock would read as a switch on every payload.
         self.ext.dataplane.ensure_encoding.return_value = False
@@ -268,20 +271,61 @@ class TestApplyDomainReconciles(AgentExtensionTestCaseBase):
     def setUp(self):
         super().setUp()
         self.ext.vlan_manager.get_segments.return_value = {1: _segment(100)}
+        self.ext.dataplane.local_network_vlans.return_value = {'net1': {100}}
 
-    def test_the_resolved_vlans_are_what_is_kept(self):
-        self.ext.vlan_manager.get_segments.side_effect = \
-            lambda n: {1: _segment(100 if n == 'net1' else 101)}
+    def test_what_is_kept_comes_from_ovsdb(self):
+        self.ext.dataplane.local_network_vlans.return_value = {
+            'net1': {100}, 'net2': {101}, 'other-net': {102}}
         self.ext._apply_domain(_payload(self.domain_id,
                                         networks=[_network('net1'),
                                                   _network('net2')]))
+        # other-net is not in this domain: its VLAN is nobody's to keep here
         self.ext.dataplane.reconcile_gateway_ports.assert_called_once_with(
-            self.domain_id, {100, 101}, has_networks=True)
+            self.domain_id, {100, 101})
 
     def test_a_domain_with_no_networks_left_keeps_nothing(self):
         self.ext._apply_domain(_payload(self.domain_id, networks=[]))
         self.ext.dataplane.reconcile_gateway_ports.assert_called_once_with(
-            self.domain_id, set(), has_networks=False)
+            self.domain_id, set())
+
+    def test_a_network_with_no_live_port_here_keeps_nothing(self):
+        """F8 and F6: the domain still has the network, the node does not.
+
+        The network's last port left (or the network was detached on a
+        node where the domain has nothing else). The old code saw "has
+        networks, no VLANs", took it for a VLAN map not built yet, and kept
+        the leftover -- which t9 then saw inherited by another network.
+        """
+        self.ext.dataplane.local_network_vlans.return_value = {}
+        self.ext._apply_domain(_payload(self.domain_id,
+                                        networks=[_network('net1')]))
+        self.ext.dataplane.reconcile_gateway_ports.assert_called_once_with(
+            self.domain_id, set())
+
+    def test_a_restart_keeps_the_gateways_of_live_networks(self):
+        """The case the old early return existed for, still safe.
+
+        During a restart the OVS agent's in-memory map is empty, so every
+        network resolves to no VLAN; OVSDB still lists the bound ports.
+        Reconciliation must keep their gateways, not tear them down.
+        """
+        self.ext.vlan_manager.get_segments.side_effect = \
+            vlanmanager.MappingNotFound(net_id='net1', seg_id='<all>')
+        self.ext.dataplane.local_network_vlans.return_value = {'net1': {100}}
+        self.ext._apply_domain(_payload(self.domain_id,
+                                        networks=[_network('net1')]))
+        self.ext.dataplane.reconcile_gateway_ports.assert_called_once_with(
+            self.domain_id, {100})
+        # and no gateway is created before the agent has bound the network
+        self.ext.dataplane.ensure_gateway_port.assert_not_called()
+
+    def test_unreadable_ovsdb_reconciles_nothing(self):
+        self.ext.dataplane.local_network_vlans.return_value = None
+        self.ext._apply_domain(_payload(self.domain_id,
+                                        networks=[_network('net1')]))
+        self.ext.dataplane.reconcile_gateway_ports.assert_not_called()
+        # the rest of the domain is still programmed
+        self.ext.dataplane.ensure_gateway_port.assert_called_once()
 
     def test_reconciliation_precedes_the_ports_it_would_otherwise_delete(self):
         # Reconciling after ensure_gateway_port would delete a port that had
@@ -295,19 +339,9 @@ class TestApplyDomainReconciles(AgentExtensionTestCaseBase):
                                         networks=[_network()]))
         self.assertEqual(['reconcile', 'ensure'], order)
 
-    def test_an_unresolvable_network_still_reports_that_it_exists(self):
-        # has_networks is what stops the dataplane deleting on a VLAN map
-        # that is merely not ready.
-        self.ext.vlan_manager.get_segments.side_effect = \
-            vlanmanager.MappingNotFound(net_id='net1', seg_id='<all>')
-        self.ext._apply_domain(_payload(self.domain_id,
-                                        networks=[_network()]))
-        self.ext.dataplane.reconcile_gateway_ports.assert_called_once_with(
-            self.domain_id, set(), has_networks=True)
-
     def test_the_vlan_is_resolved_once_per_network(self):
-        # Reconciliation and ensure_gateway_port must agree on the VLAN; two
-        # lookups are two chances to disagree while ports are rebinding.
+        # The VLAN a gateway is CREATED on comes from one map lookup per
+        # network; a second would be a chance to disagree mid-rebind.
         self.ext._apply_domain(_payload(self.domain_id,
                                         networks=[_network()]))
         self.assertEqual(1, self.ext.vlan_manager.get_segments.call_count)
@@ -317,14 +351,14 @@ class TestApplyDomainReconciles(AgentExtensionTestCaseBase):
             _payload(self.domain_id, networks=[_network('net1')])]
         self.ext._sync_state()
         self.ext.dataplane.reconcile_gateway_ports.assert_called_once_with(
-            self.domain_id, {100}, has_networks=True)
+            self.domain_id, {100})
 
     def test_the_fanout_reconciles_too(self):
         self.ext.domain_updated(
             mock.Mock(),
             domain=_payload(self.domain_id, networks=[_network('net1')]))
         self.ext.dataplane.reconcile_gateway_ports.assert_called_once_with(
-            self.domain_id, {100}, has_networks=True)
+            self.domain_id, {100})
 
 
 class TestRpcHandlers(AgentExtensionTestCaseBase):
@@ -438,12 +472,79 @@ class TestPortEvents(AgentExtensionTestCaseBase):
         self.ext.handle_port(self.ext.context,
                              {'network_id': 'net1', 'port_id': 'p1'})
 
-    def test_delete_port_does_nothing(self):
-        # The server withdraws the address through routes_updated; removing
-        # anything here would race that message.
-        self.ext.delete_port(self.ext.context,
+    def test_port_events_reconcile_before_they_ensure(self):
+        """A leftover sharing the new port's VLAN goes first (F8)."""
+        self.ext.domains[self.domain_id] = _payload(self.domain_id,
+                                                    networks=[_network()])
+        self.ext.vlan_manager.get_segments.return_value = {1: _segment(100)}
+        self.ext.dataplane.local_network_vlans.return_value = {'net1': {100}}
+        order = []
+        self.ext.dataplane.reconcile_gateway_ports.side_effect = \
+            lambda *a, **kw: order.append('reconcile')
+        self.ext.dataplane.ensure_gateway_port.side_effect = \
+            lambda *a, **kw: order.append('ensure')
+        self.ext.handle_port(self.ext.context,
                              {'network_id': 'net1', 'port_id': 'p1'})
-        self.assertFalse(self.ext.dataplane.method_calls)
+        self.assertEqual(['reconcile', 'ensure'], order)
+
+
+class TestDeletePort(AgentExtensionTestCaseBase):
+    """F8: the port that leaves takes its network's gateway with it.
+
+    Before, delete_port did nothing: when a network's last port left a node
+    the gateway stayed, the OVS agent reclaimed the VLAN, and t9 saw an
+    unrelated network inherit it and inject into the domain
+    (REPORT-ISOLATION.md 4.7).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.other = uuidutils.generate_uuid()
+        self.ext.domains[self.domain_id] = _payload(
+            self.domain_id, networks=[_network('net1'), _network('net2')])
+        self.ext.domains[self.other] = _payload(
+            self.other, networks=[_network('net3')], function_id=9)
+
+    def _delete(self):
+        self.ext.delete_port(self.ext.context, {'port_id': 'p1'})
+
+    def test_every_domain_is_reconciled_against_ovsdb(self):
+        # net1's last port has gone; net2 and net3 still have theirs
+        self.ext.dataplane.local_network_vlans.return_value = {
+            'net2': {101}, 'net3': {102}}
+        self._delete()
+        self.assertEqual(
+            sorted([mock.call(self.domain_id, {101}),
+                    mock.call(self.other, {102})], key=str),
+            sorted(self.ext.dataplane.reconcile_gateway_ports.call_args_list,
+                   key=str))
+
+    def test_ovsdb_is_read_once_for_all_domains(self):
+        self._delete()
+        self.assertEqual(
+            1, self.ext.dataplane.local_network_vlans.call_count)
+
+    def test_unreadable_ovsdb_deletes_nothing(self):
+        self.ext.dataplane.local_network_vlans.return_value = None
+        self._delete()
+        self.ext.dataplane.reconcile_gateway_ports.assert_not_called()
+
+    def test_one_failing_domain_does_not_stop_the_others(self):
+        self.ext.dataplane.reconcile_gateway_ports.side_effect = [
+            RuntimeError('boom'), None]
+        self._delete()
+        self.assertEqual(
+            2, self.ext.dataplane.reconcile_gateway_ports.call_count)
+
+    def test_routes_are_left_to_the_server(self):
+        # The server withdraws the address through routes_updated; removing
+        # it here would race that message.
+        self._delete()
+        self.ext.dataplane.remove_routes.assert_not_called()
+        self.ext.dataplane.sync_routes.assert_not_called()
+
+    def test_delete_port_takes_and_releases_the_lock(self):
+        self._run_without_deadlocking('delete_port', self._delete)
 
 
 class TestConfigValidation(AgentExtensionTestCaseBase):

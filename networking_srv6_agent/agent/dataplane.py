@@ -68,6 +68,7 @@ import time
 
 from neutron.agent.linux import ip_lib
 from neutron.privileged.agent.linux import ip_lib as priv_ip_lib
+from neutron_lib.plugins.ml2 import ovs_constants as ovs_const
 from oslo_log import log as logging
 
 from networking_srv6_agent._i18n import _
@@ -836,31 +837,71 @@ class Srv6LinuxDataplane:
             LOG.warning("SRv6: could not list ports on the bridge: %s", e)
             return []
 
-    def reconcile_gateway_ports(self, domain_id, local_vlans, has_networks):
-        """Delete gateway ports for networks that have left the domain.
+    def local_network_vlans(self):
+        """network_id -> {local VLAN, ...} of every live port on br-int.
 
-        Without this a network association delete leaks its port forever:
-        ensure_gateway_port only ever added, and delete_domain only fires
-        when the node leaves the domain *entirely*.
+        Read from OVSDB, not from the OVS agent's in-memory LocalVlanManager.
+        port_bound writes Port.other_config:net_uuid and Port.tag before
+        any extension hears of the port, and the agent rebuilds its own VLAN
+        hints from those two columns after a restart
+        (_restore_local_vlan_map) -- so they are right even while the
+        in-memory map is still empty, which it is during every restart.
+        That emptiness is what used to force reconcile_gateway_ports to
+        give up, and giving up kept leftover gateways forever (F6, F8).
 
-        local_vlans is the set of local VLANs the domain's networks resolve
-        to on this node; has_networks says whether the domain has any
-        network at all. The two are separate because they fail differently:
+        A port in the dead VLAN (4095: admin down, unbound) is not live, and
+        a gateway port is not a network's port. Returns None if the bridge
+        cannot be read: the callers then delete nothing.
+        """
+        if self.bridge is None:
+            return None
+        try:
+            rows = self.bridge.get_ports_attributes(
+                'Port', columns=['name', 'tag', 'other_config'],
+                if_exists=True)
+        except Exception as e:
+            LOG.warning("SRv6: could not read br-int ports from OVSDB: %s", e)
+            return None
+        present = collections.defaultdict(set)
+        for row in rows or []:
+            if str(row.get('name', '')).startswith(constants.GW_PORT_PREFIX):
+                continue
+            net_id = (row.get('other_config') or {}).get('net_uuid')
+            tag = row.get('tag')
+            # an optional column: ovsdbapp gives an int when set and [] when
+            # not; a one-element list is accepted too, to be safe
+            if isinstance(tag, list) and len(tag) == 1:
+                tag = tag[0]
+            if not net_id or not isinstance(tag, int):
+                continue
+            if tag == ovs_const.DEAD_VLAN_TAG:
+                continue
+            present[net_id].add(tag)
+        return dict(present)
 
-        - has_networks and no local_vlans means the OVS agent has not built
-          its VLAN mapping yet, which is the state every agent restart
-          passes through. Deleting on that would tear every gateway down
-          and rebuild it seconds later on the first port event.
-        - not has_networks is unambiguous: no network is in the domain, so
-          every port of its is stale.
+    def reconcile_gateway_ports(self, domain_id, local_vlans):
+        """Delete gateway ports for networks that are no longer local.
+
+        local_vlans is the set of VLANs on which the domain's networks have
+        a live port on this node (local_network_vlans), so an empty set
+        means exactly that: nothing of this domain is here any more, and
+        every svp-<fid>-* of it goes. A port is stale when its network left
+        the domain (a detach, F6) or when the network's last port left the
+        node (a VM deleted or migrated, F8). The second case is the
+        dangerous one: the OVS agent reclaims the VLAN and hands it to the
+        next network that arrives, and a leftover gateway then routes that
+        network -- any project's -- into this domain. t9 measured it on
+        2026-10-03 (REPORT-ISOLATION.md 4.7): r1 +3, r2 +3.
+
+        There used to be an early return here for "the domain has networks
+        but none resolves to a VLAN", meant for the empty VLAN map every
+        restart passes through. It could not tell that apart from "no
+        network is local any more", and kept every leftover. The VLANs now
+        come from OVSDB, which is not empty at a restart, so the branch is
+        gone.
         """
         state = self.domains.get(domain_id)
         if state is None:
-            return
-        if has_networks and not local_vlans:
-            LOG.debug("SRv6: domain %s has networks but none resolve to a "
-                      "local VLAN yet; not reconciling its gateway ports",
-                      domain_id)
             return
         wanted = {sid.gateway_port_name(state.function_id, vlan)
                   for vlan in local_vlans}
