@@ -26,6 +26,9 @@ there is no L2 agent to host it -- and initialize() refuses anything else.
 
 import threading
 
+from neutron.agent import firewall
+from neutron.agent.linux import openvswitch_firewall
+from neutron.conf.agent import securitygroups_rpc as sg_conf
 from neutron.plugins.ml2.drivers.openvswitch.agent import vlanmanager
 from neutron_lib.agent import l2_extension
 from neutron_lib.agent import topics
@@ -90,7 +93,8 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             underlay_interface=self.conf.underlay_interface,
             vrf_table_base=self.vrf_table_base,
             bridge=bridge,
-            apply_sysctls=self.conf.apply_sysctls)
+            apply_sysctls=self.conf.apply_sysctls,
+            ovs_firewall=bridge is not None and self._ovs_firewall_active())
         self.dataplane.initialize_node()
 
         self._setup_rpc(connection)
@@ -109,6 +113,30 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                   "(it programs br-int and reads the OVS local VLAN map), "
                   "but it was loaded by the %r agent. Remove `srv6` from "
                   "[agent] extensions on this node.") % driver_type)
+
+    @staticmethod
+    def _ovs_firewall_active():
+        """Whether this agent filters ports with the OVS firewall driver.
+
+        Only that driver leaves the gateway ports outside the firewall (F1,
+        F2), and only its tables 73 and 94 exist for the flows the dataplane
+        adds. Under iptables_hybrid table 73 is empty, so the same flows
+        would DROP every frame from the gateway; under noop there is
+        nothing to join. The driver is resolved the way the agent resolves
+        it (alias or class path, unset meaning noop), so a subclass counts.
+        """
+        sg_conf.register_securitygroups_opts()
+        conf = cfg.CONF.SECURITYGROUP
+        if not conf.enable_security_group or not conf.firewall_driver:
+            return False
+        try:
+            driver = firewall.load_firewall_driver_class(conf.firewall_driver)
+        except Exception as e:
+            LOG.warning("SRv6: could not resolve firewall_driver %(d)r "
+                        "(%(e)s); gateway ports get no firewall flows",
+                        {'d': conf.firewall_driver, 'e': e})
+            return False
+        return issubclass(driver, openvswitch_firewall.OVSFirewallDriver)
 
     def _validate_config(self):
         if not self.conf.locator:

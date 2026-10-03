@@ -37,6 +37,12 @@ Per remote port:
     ip route replace <ip>/32 encap seg6 mode encap \
         segs [<transit End SID>,...]<remote sid> dev <underlay> table <table>
 
+With the OVS firewall driver, per gateway port (F1, F2: the port is not a
+Neutron port, so without these the firewall never sees its traffic):
+    table=60,priority=100,in_port=<of> actions=ct_clear,
+        set_field:<of>->reg5,set_field:<vlan>->reg6,resubmit(,73)
+    table=73,priority=80,reg5=<of> actions=resubmit(,94)
+
 Per first segment the domain encapsulates to -- a remote decap SID, or for a
 steered route (P6) a transit End SID, the latter only while the edge filter
 covers it:
@@ -68,6 +74,7 @@ import time
 
 from neutron.agent.linux import ip_lib
 from neutron.privileged.agent.linux import ip_lib as priv_ip_lib
+from neutron_lib.agent.common import constants as agent_consts
 from neutron_lib.plugins.ml2 import ovs_constants as ovs_const
 from oslo_log import log as logging
 
@@ -202,12 +209,17 @@ def render_edge_ruleset(networks):
 class Srv6LinuxDataplane:
 
     def __init__(self, locator, underlay_interface, vrf_table_base,
-                 bridge=None, apply_sysctls=True):
+                 bridge=None, apply_sysctls=True, ovs_firewall=False):
         self.locator = locator
         self.underlay_interface = underlay_interface
         self.vrf_table_base = vrf_table_base
         self.bridge = bridge
         self.apply_sysctls = apply_sysctls
+        # Whether the OVS agent filters ports with the openvswitch firewall
+        # driver; only then do gateway ports need firewall flows.
+        self.ovs_firewall = ovs_firewall
+        # gateway port name -> ofport its firewall flows were installed for
+        self.gateway_flows = {}
         # domain_id -> DomainState, and domain_id -> {network_id: port name}
         self.domains = {}
         self.gateway_ports = collections.defaultdict(dict)
@@ -756,6 +768,7 @@ class Srv6LinuxDataplane:
                           {'p': port_name, 't': DEVICE_WAIT_SECONDS,
                            'n': network_id})
                 return None
+            self._ensure_gateway_flows(port_name, local_vlan)
 
         # Enslave BEFORE addressing. An address added first lands in the
         # main table and does not move when the interface is later enslaved.
@@ -925,7 +938,99 @@ class Srv6LinuxDataplane:
             time.sleep(0.2)
         return ip_lib.device_exists(device)
 
+    # ------------------------------------------------------------------
+    # firewall flows of gateway ports (F1, F2)
+    # ------------------------------------------------------------------
+    def _ensure_gateway_flows(self, port_name, local_vlan):
+        """Show a gateway port to the OVS firewall as an unfiltered port.
+
+        The firewall only programs Neutron ports. An svp-* port is not one,
+        so table 60 sent its frames straight to NORMAL: they skipped the
+        destination's ingress pipeline, so the security group never applied
+        to traffic routed in (F2), and its conntrack zone never saw the
+        reply's other half, so the instance's reply was +inv and dropped
+        (F1). These are the two flows the firewall installs for a port with
+        port security disabled (_initialize_egress_no_port_security), so
+        frames from the gateway now enter the destination's ingress pipeline
+        like frames from any other port.
+
+        One difference, ct_clear, measured by t11 (LOG-2026-10-03-portsec.md
+        s2): the frames leave the host's IP stack carrying its own conntrack
+        entry whenever the host tracks connections at all (devstack's NAT
+        rules are enough), OVS takes it as +trk, and table 81 then skips the
+        guest-zone lookup and drops the reply as not established. qr-*
+        ports never show this because crossing a namespace clears it; svp-*
+        ports live in the root namespace.
+
+        Re-asserted on every call, with this process's cookie: the OVS agent
+        deletes flows of any other cookie at its first iteration
+        (cleanup_stale_flows), so a restart removes them, and the agent
+        installs them again when handle_port and the resync reach the port.
+        """
+        if not self.ovs_firewall:
+            return
+        ofport = self.bridge.get_port_ofport(port_name)
+        if not isinstance(ofport, int) or ofport <= 0:
+            LOG.warning("SRv6: gateway port %(p)s has no ofport yet "
+                        "(%(o)s); its firewall flows wait for the next "
+                        "resync", {'p': port_name, 'o': ofport})
+            return
+        if self.gateway_flows.get(port_name) not in (None, ofport):
+            # Same name, new ofport: the old flows would match whatever
+            # port OVS gives that number next.
+            self._delete_gateway_flows(port_name)
+        try:
+            self.bridge.add_flow(
+                table=ovs_const.TRANSIENT_TABLE,
+                priority=100,
+                in_port=ofport,
+                actions='ct_clear,'
+                        'set_field:%d->reg%d,'
+                        'set_field:%d->reg%d,'
+                        'resubmit(,%d)' % (
+                            ofport, agent_consts.REG_PORT,
+                            local_vlan, agent_consts.REG_NET,
+                            ovs_const.ACCEPT_OR_INGRESS_TABLE))
+            self.bridge.add_flow(
+                table=ovs_const.ACCEPT_OR_INGRESS_TABLE,
+                priority=80,
+                **{'reg%d' % agent_consts.REG_PORT: ofport,
+                   'actions': 'resubmit(,%d)' % (
+                       ovs_const.ACCEPTED_EGRESS_TRAFFIC_NORMAL_TABLE)})
+        except Exception as e:
+            LOG.error("SRv6: could not install the firewall flows of "
+                      "%(p)s: %(e)s. Instances behind it with port security "
+                      "on cannot answer routed traffic until the next "
+                      "resync.", {'p': port_name, 'e': e})
+            return
+        self.gateway_flows[port_name] = ofport
+
+    def _delete_gateway_flows(self, port_name):
+        """Remove the flows _ensure_gateway_flows installed for a port.
+
+        Only this process's cookie is matched (the bridge adds it), so a
+        firewall flow that took over the same match is left alone. Flows of
+        an earlier process are not known here; cleanup_stale_flows removes
+        them.
+        """
+        ofport = self.gateway_flows.pop(port_name, None)
+        if ofport is None or self.bridge is None:
+            return
+        try:
+            self.bridge.delete_flows(table=ovs_const.TRANSIENT_TABLE,
+                                     in_port=ofport)
+            self.bridge.delete_flows(
+                table=ovs_const.ACCEPT_OR_INGRESS_TABLE,
+                **{'reg%d' % agent_consts.REG_PORT: ofport})
+        except Exception as e:
+            LOG.warning("SRv6: could not remove the firewall flows of "
+                        "%(p)s (ofport %(o)s): %(e)s",
+                        {'p': port_name, 'o': ofport, 'e': e})
+
     def _delete_gateway_port(self, port_name):
+        # Flows first: once the port is gone OVS can hand its ofport to the
+        # next port, and the flows would apply to that one.
+        self._delete_gateway_flows(port_name)
         if self.bridge is not None:
             try:
                 self.bridge.delete_port(port_name)

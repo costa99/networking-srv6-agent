@@ -415,6 +415,180 @@ class TestGatewayPort(DataplaneTestCaseBase):
         self.bridge.delete_port.assert_not_called()
 
 
+class TestGatewayFirewallFlows(DataplaneTestCaseBase):
+    """F1 and F2: the OVS firewall has to see the gateway port.
+
+    t11 (LOG-2026-10-03-portsec.md) measured both on 4b607d3: every routed
+    leg into an instance with port security on lost ICMP and TCP (the reply
+    was +inv in table 72, F1) while a port the security group does not open
+    still received SYNs (F2), and an instance with port security on could
+    not open TCP to anything routed. The two flows below, the firewall's own
+    pair for an unfiltered port plus ct_clear, made all of it pass (B2,
+    32/0).
+    """
+
+    OFPORT = 42
+
+    def setUp(self):
+        super().setUp()
+        self._with_domain()
+        self.ip_lib.device_exists.return_value = True
+        self.subnets = [{'id': 'sub1', 'cidr': '10.0.0.0/24',
+                         'gateway_ip': '10.0.0.1'}]
+        self.dp.ovs_firewall = True
+        self.bridge.get_port_ofport.return_value = self.OFPORT
+
+    def _ensure(self, vlan=100):
+        return self.dp.ensure_gateway_port(self.domain_id, 'net1', vlan,
+                                           self.subnets)
+
+    def _expected_flows(self, ofport=OFPORT, vlan=100):
+        return [
+            mock.call(table=60, priority=100, in_port=ofport,
+                      actions='ct_clear,set_field:%d->reg5,'
+                              'set_field:%d->reg6,resubmit(,73)'
+                              % (ofport, vlan)),
+            mock.call(table=73, priority=80, reg5=ofport,
+                      actions='resubmit(,94)'),
+        ]
+
+    def test_the_gateway_is_given_the_unfiltered_port_flows(self):
+        # Table 60 tags the frame with port and network (the network is
+        # also the conntrack zone) and hands it to table 73, which sends a
+        # frame for a filtered port into its ingress pipeline and anything
+        # else to NORMAL (94) -- what the firewall does for a Neutron port
+        # with port security disabled.
+        self._ensure()
+        self.assertEqual(self._expected_flows(),
+                         self.bridge.add_flow.call_args_list)
+        self.assertEqual({PORT_NAME: self.OFPORT}, self.dp.gateway_flows)
+
+    def test_ct_clear_comes_before_anything_else(self):
+        """Regression from the spike: the pair alone is not enough.
+
+        Without ct_clear (t11 phase B1) frames from the gateway still carry
+        the host's conntrack entry, OVS takes them as +trk, table 81 skips
+        the instance's zone and the reply dies as not established: Rl and
+        Rl' lost everything, Rc lost TCP and UDP.
+        """
+        self._ensure()
+        actions = self.bridge.add_flow.call_args_list[0][1]['actions']
+        self.assertTrue(actions.startswith('ct_clear,'), actions)
+
+    def test_the_flows_follow_the_ports_vlan(self):
+        self._ensure(vlan=101)
+        self.assertEqual(self._expected_flows(vlan=101),
+                         self.bridge.add_flow.call_args_list)
+
+    def test_no_flows_without_the_ovs_firewall(self):
+        # Under iptables_hybrid table 73 is empty: the flows would drop
+        # every frame from the gateway.
+        self.dp.ovs_firewall = False
+        self._ensure()
+        self.bridge.add_flow.assert_not_called()
+        self.bridge.get_port_ofport.assert_not_called()
+
+    def test_flows_are_installed_before_the_gateway_answers(self):
+        # Before the address, so no routed frame meets the port while the
+        # firewall cannot see it.
+        order = []
+        self.bridge.add_flow.side_effect = lambda **kw: order.append('flow')
+        self.device.addr.add.side_effect = lambda *a: order.append('addr')
+        self._ensure()
+        self.assertEqual(['flow', 'flow', 'addr'], order)
+
+    def test_flows_are_reasserted_on_every_call(self):
+        # The OVS agent deletes every flow of another cookie at its first
+        # iteration after a restart (t11 phase C: 4 -> 0); handle_port and
+        # the resync put them back by calling this again.
+        self._ensure()
+        self._ensure()
+        self.assertEqual(self._expected_flows() * 2,
+                         self.bridge.add_flow.call_args_list)
+        self.bridge.delete_flows.assert_not_called()
+
+    def test_a_new_ofport_removes_the_flows_of_the_old_one(self):
+        # Left in place they would apply to whatever port OVS numbers 42
+        # next.
+        self._ensure()
+        self.bridge.get_port_ofport.return_value = 43
+        self._ensure()
+        self.assertEqual([mock.call(table=60, in_port=42),
+                          mock.call(table=73, reg5=42)],
+                         self.bridge.delete_flows.call_args_list)
+        self.assertEqual(self._expected_flows(ofport=43),
+                         self.bridge.add_flow.call_args_list[2:])
+        self.assertEqual({PORT_NAME: 43}, self.dp.gateway_flows)
+
+    def test_a_port_without_an_ofport_still_routes(self):
+        # Today's behaviour, not a failure: the next resync adds the flows.
+        for no_ofport in (-1, [], None):
+            self.bridge.get_port_ofport.return_value = no_ofport
+            self.assertEqual(PORT_NAME, self._ensure())
+        self.bridge.add_flow.assert_not_called()
+        self.assertEqual({}, self.dp.gateway_flows)
+        self.device.addr.add.assert_called_with('10.0.0.1/24')
+
+    def test_a_failed_install_is_not_recorded(self):
+        self.bridge.add_flow.side_effect = RuntimeError('boom')
+        self.assertEqual(PORT_NAME, self._ensure())
+        self.assertEqual({}, self.dp.gateway_flows)
+
+    def test_deleting_the_port_deletes_its_flows_first(self):
+        # Once the port is gone OVS may reuse its ofport.
+        self._ensure()
+        order = []
+        self.bridge.delete_flows.side_effect = \
+            lambda **kw: order.append('flows')
+        self.bridge.delete_port.side_effect = lambda *a: order.append('port')
+        self.dp._delete_gateway_port(PORT_NAME)
+        self.assertEqual(['flows', 'flows', 'port'], order)
+        self.assertEqual({}, self.dp.gateway_flows)
+
+    def test_only_this_processes_flows_are_deleted(self):
+        # No cookie argument: the cookie bridge adds its own, so a firewall
+        # flow that took over the same match survives.
+        self._ensure()
+        self.dp._delete_gateway_port(PORT_NAME)
+        for call in self.bridge.delete_flows.call_args_list:
+            self.assertNotIn('cookie', call[1])
+
+    def test_a_port_with_no_recorded_flows_deletes_none(self):
+        # After a restart: the earlier process's flows have its cookie, and
+        # cleanup_stale_flows removes them.
+        self.dp._delete_gateway_port(PORT_NAME)
+        self.bridge.delete_flows.assert_not_called()
+        self.bridge.delete_port.assert_called_once_with(PORT_NAME)
+
+    def test_a_reallocated_vlan_takes_the_flows_with_the_old_port(self):
+        self._ensure(vlan=100)
+        self.bridge.get_port_ofport.return_value = 43
+        self._ensure(vlan=101)
+        self.assertEqual([mock.call(table=60, in_port=42),
+                          mock.call(table=73, reg5=42)],
+                         self.bridge.delete_flows.call_args_list)
+        self.assertEqual({'svp-7-101': 43}, self.dp.gateway_flows)
+
+    def test_reconciliation_removes_the_flows_of_a_leftover(self):
+        self._ensure()
+        self.bridge.get_port_name_list.return_value = [PORT_NAME]
+        self.dp.reconcile_gateway_ports(self.domain_id, set())
+        self.assertEqual(2, self.bridge.delete_flows.call_count)
+        self.assertEqual({}, self.dp.gateway_flows)
+
+    def test_deleting_the_domain_removes_the_flows(self):
+        self._ensure()
+        self.dp.delete_domain(self.domain_id)
+        self.assertEqual(2, self.bridge.delete_flows.call_count)
+        self.assertEqual({}, self.dp.gateway_flows)
+
+    def test_a_failed_delete_does_not_stop_the_port_delete(self):
+        self._ensure()
+        self.bridge.delete_flows.side_effect = RuntimeError('boom')
+        self.dp._delete_gateway_port(PORT_NAME)
+        self.bridge.delete_port.assert_called_once_with(PORT_NAME)
+
+
 class TestLocalNetworkVlans(DataplaneTestCaseBase):
     """Which networks have a live port on br-int, and on which VLAN.
 

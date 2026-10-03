@@ -27,9 +27,11 @@ import inspect
 import threading
 from unittest import mock
 
+from neutron.conf.agent import securitygroups_rpc as sg_conf
 from neutron.plugins.ml2.drivers.openvswitch.agent import vlanmanager
 from neutron.tests import base
 from neutron_lib.plugins.ml2 import ovs_constants as ovs_const
+from oslo_config import cfg
 from oslo_utils import uuidutils
 
 from networking_srv6_agent.agent import agent_extension
@@ -746,6 +748,49 @@ class TestDriverType(base.BaseTestCase):
                               'macvtap')
         register.assert_not_called()
         dataplane.assert_not_called()
+
+
+class TestOvsFirewallDetection(base.BaseTestCase):
+    """Gateway firewall flows only under the openvswitch firewall driver.
+
+    Under iptables_hybrid table 73 is empty, so the flows would drop every
+    frame from the gateway; a wrong True here breaks routing on the node.
+    """
+
+    def setUp(self):
+        super().setUp()
+        sg_conf.register_securitygroups_opts()
+
+    def _active(self, driver, enabled=True):
+        for name, value in (('firewall_driver', driver),
+                            ('enable_security_group', enabled)):
+            cfg.CONF.set_override(name, value, group='SECURITYGROUP')
+            self.addCleanup(cfg.CONF.clear_override, name,
+                            group='SECURITYGROUP')
+        return agent_extension.Srv6AgentExtension._ovs_firewall_active()
+
+    def test_the_openvswitch_alias(self):
+        self.assertTrue(self._active('openvswitch'))
+
+    def test_the_class_path(self):
+        self.assertTrue(self._active(
+            'neutron.agent.linux.openvswitch_firewall.OVSFirewallDriver'))
+
+    def test_iptables_hybrid(self):
+        self.assertFalse(self._active('iptables_hybrid'))
+
+    def test_noop(self):
+        self.assertFalse(self._active('noop'))
+
+    def test_unset_means_noop(self):
+        # The agent itself reads an unset driver as noop.
+        self.assertFalse(self._active(None))
+
+    def test_security_groups_disabled(self):
+        self.assertFalse(self._active('openvswitch', enabled=False))
+
+    def test_an_unloadable_driver_is_not_the_ovs_firewall(self):
+        self.assertFalse(self._active('no.such.module:Driver'))
 
 
 class TestRpcSetup(base.BaseTestCase):
