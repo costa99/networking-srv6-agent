@@ -164,15 +164,26 @@ class TestNetworkAssociations(DomainDbTestCase):
             db_exc.DBDuplicateEntry,
             self._associate, domain['id'], net_id)
 
-    def test_one_network_may_be_in_two_domains(self):
+    def test_one_network_cannot_be_in_two_domains(self):
+        # F3: the plugin refuses it first; the constraint closes the race.
         net_id = self._create_network()
         a = self._create_domain(name='a')
         b = self._create_domain(name='b')
         self._associate(a['id'], net_id)
+        self.assertRaises(db_exc.DBDuplicateEntry,
+                          self._associate, b['id'], net_id)
+        self.assertEqual(
+            [a['id']], domain_db.get_domain_ids_for_network(self.ctx, net_id))
+
+    def test_a_detached_network_may_join_another_domain(self):
+        net_id = self._create_network()
+        a = self._create_domain(name='a')
+        b = self._create_domain(name='b')
+        assoc = self._associate(a['id'], net_id)
+        domain_db.delete_net_assoc(self.ctx, assoc['id'], a['id'])
         self._associate(b['id'], net_id)
         self.assertEqual(
-            {a['id'], b['id']},
-            set(domain_db.get_domain_ids_for_network(self.ctx, net_id)))
+            [b['id']], domain_db.get_domain_ids_for_network(self.ctx, net_id))
 
     def test_get_assoc_is_scoped_to_its_domain(self):
         a = self._create_domain(name='a')

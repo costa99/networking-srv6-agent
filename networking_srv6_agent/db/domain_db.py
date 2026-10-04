@@ -87,11 +87,17 @@ class SRv6DomainNetAssociation(model_base.BASEV2, model_base.HasId):
     # on: there, `sa.UniqueConstraint(bgpvpn_id, network_id)` sits in the
     # class body as a bare expression and therefore creates no constraint at
     # all. Attaching the same network twice is silently allowed upstream.
+    #
+    # network_id alone is unique too (F3, revision c2b7c83c3ad0): a network
+    # belongs to one domain. The plugin checks first; this closes the race.
     __table_args__ = (
         sa.UniqueConstraint(
             'domain_id', 'network_id',
             name='uniq_srv6_domain_network_associations0domain_id0network_id'
         ),
+        sa.UniqueConstraint(
+            'network_id',
+            name='uniq_srv6_domain_network_associations0network_id'),
         model_base.BASEV2.__table_args__,
     )
 
@@ -244,7 +250,10 @@ def delete_net_assoc(context, assoc_id, domain_id):
 
 @db_api.CONTEXT_READER
 def get_domain_ids_for_network(context, network_id):
-    """Which domains a network belongs to.
+    """Which domains a network belongs to: one at most since F3.
+
+    Still a list: a database upgraded from before the constraint may hold
+    more, and every caller has to see them.
 
     One query per port event, which is why it returns ids rather than dicts:
     the caller re-reads only the domains it is about to push.

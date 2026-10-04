@@ -33,6 +33,7 @@ that later rolls back.
 """
 
 import datetime
+import ipaddress
 
 from neutron_lib.api.definitions import portbindings
 from neutron_lib.callbacks import events
@@ -419,6 +420,68 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             raise srv6_ext.Srv6RouteredNetworkNotAllowed(
                 network_id=network_id,
                 router_id=router_ports[0]['device_id'])
+        self._check_one_domain(context, domain, network_id)
+        self._check_no_overlap(
+            context, domain, network_id,
+            [s['cidr'] for s in self._subnets_of(context, network_id)])
+
+    def _check_one_domain(self, context, domain, network_id):
+        """A network belongs to one domain (F3).
+
+        Two domains holding one network would each put a gateway with the
+        same address on the same L2 segment, and the network's instances
+        would be routed into whichever domain answered ARP -- t9 I8 saw
+        red's r1 reach blue's instance through such a network. The unique
+        constraint on network_id closes the race this check leaves open;
+        create_srv6_domain_network_association maps it back here.
+        """
+        for other in domain_db.get_domain_ids_for_network(
+                context.elevated(), network_id):
+            if other == domain['id']:
+                raise srv6_ext.Srv6DomainNetAssocAlreadyExists(
+                    network_id=network_id, domain_id=domain['id'])
+            raise srv6_ext.Srv6NetworkInAnotherDomain(
+                network_id=network_id, other_domain_id=other)
+
+    def _subnets_of(self, context, network_id):
+        """id, cidr and ip_version of every subnet; elevated, read only."""
+        return self._core_plugin().get_subnets(
+            context.elevated(), filters={'network_id': [network_id]},
+            fields=['id', 'cidr', 'ip_version'])
+
+    def _check_no_overlap(self, context, domain, network_id, cidrs):
+        """No two networks of a domain may have overlapping subnets (F10).
+
+        They share one routing table: the second connected route would
+        either be refused by the kernel or shadow the first, and the
+        domain would route to whichever gateway port came up last. Checked
+        per IP version; elevated, because a shared network's subnets may
+        belong to the owner only in name.
+        """
+        new = []
+        for cidr in cidrs:
+            try:
+                new.append(ipaddress.ip_network(cidr, strict=False))
+            except ValueError:
+                continue
+        if not new:
+            return
+        for other_id in domain.get(srv6_def.NETWORKS) or []:
+            if other_id == network_id:
+                continue
+            for subnet in self._subnets_of(context, other_id):
+                try:
+                    other = ipaddress.ip_network(subnet['cidr'],
+                                                 strict=False)
+                except ValueError:
+                    continue
+                for net in new:
+                    if net.version == other.version and net.overlaps(other):
+                        raise srv6_ext.Srv6OverlappingSubnets(
+                            cidr=str(net), network_id=network_id,
+                            other_cidr=str(other),
+                            other_network_id=other_id,
+                            domain_id=domain['id'])
 
     def create_srv6_domain_network_association(self, context, srv6_domain_id,
                                                network_association):
@@ -431,6 +494,9 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         try:
             assoc = domain_db.create_net_assoc(context, srv6_domain_id, body)
         except db_exc.DBDuplicateEntry:
+            # A concurrent attach got there first: to this domain or, since
+            # the network_id unique constraint (F3), to another one.
+            self._check_one_domain(context, domain, body['network_id'])
             raise srv6_ext.Srv6DomainNetAssocAlreadyExists(
                 network_id=body['network_id'], domain_id=srv6_domain_id)
         self._push_domain_by_id(context, srv6_domain_id)
@@ -460,6 +526,28 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             raise srv6_ext.Srv6DomainNetAssocNotFound(
                 id=id, domain_id=srv6_domain_id)
         self._push_domain_by_id(context, srv6_domain_id)
+
+    @registry.receives(resources.SUBNET, [events.BEFORE_CREATE])
+    def _refuse_overlapping_subnet_in_domain(self, resource, event, trigger,
+                                             payload=None):
+        """F10 again, through the other door: a subnet added after attach.
+
+        Only a request that names its cidr can be checked here: Neutron
+        publishes no precommit event for subnets, and a subnet allocated
+        from a pool gets its cidr after this event.
+        """
+        subnet = payload.latest_state or {}
+        network_id = subnet.get('network_id')
+        cidr = subnet.get('cidr')
+        if not network_id or not isinstance(cidr, str):
+            return
+        admin_context = payload.context.elevated()
+        for domain_id in domain_db.get_domain_ids_for_network(
+                admin_context, network_id):
+            domain = domain_db.get_domain(admin_context, domain_id)
+            if domain is not None:
+                self._check_no_overlap(admin_context, domain, network_id,
+                                       [cidr])
 
     @registry.receives(resources.ROUTER_INTERFACE, [events.BEFORE_CREATE])
     def _refuse_router_interface_on_domain_network(self, resource, event,

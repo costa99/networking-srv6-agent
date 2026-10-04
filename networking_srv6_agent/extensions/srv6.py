@@ -58,6 +58,18 @@ class Srv6DomainNetAssocAlreadyExists(n_exc.Conflict):
                 "domain %(domain_id)s")
 
 
+class Srv6NetworkInAnotherDomain(n_exc.Conflict):
+    message = _("Network %(network_id)s is already attached to SRv6 domain "
+                "%(other_domain_id)s; a network belongs to one domain")
+
+
+class Srv6OverlappingSubnets(n_exc.BadRequest):
+    message = _("Subnet %(cidr)s of network %(network_id)s overlaps "
+                "%(other_cidr)s of network %(other_network_id)s, which is "
+                "already in SRv6 domain %(domain_id)s: one routing table "
+                "cannot hold both")
+
+
 class Srv6ExternalNetworkNotAllowed(n_exc.BadRequest):
     message = _("External network %(network_id)s cannot be attached to an "
                 "SRv6 domain: a domain carries no north-south traffic")

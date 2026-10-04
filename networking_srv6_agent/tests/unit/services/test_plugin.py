@@ -239,6 +239,61 @@ class TestAssociationApi(Srv6RestTestCase):
         self._assoc(domain['id'], net['id'])
         self._assoc(domain['id'], net['id'], expected=409)
 
+    def test_a_network_in_another_domain_is_a_conflict(self):
+        # F3: t9 I8 saw red reach blue's instance through such a network.
+        red = self._domain()
+        blue = self._domain(name='blue')
+        net = self._network()
+        self._assoc(blue['id'], net['id'])
+        body = self._assoc(red['id'], net['id'], expected=409)
+        self.assertIn(blue['id'], body['NeutronError']['message'])
+        self.assertEqual([], self._show_domain(red['id'])['networks'])
+
+    def test_a_detached_network_may_join_another_domain(self):
+        red = self._domain()
+        blue = self._domain(name='blue')
+        net = self._network()
+        assoc = self._assoc(blue['id'], net['id'])
+        req = self.new_delete_request(DOMAINS, blue['id'],
+                                      subresource=ASSOCS, sub_id=assoc['id'])
+        self._check(req.get_response(self.ext_api), 204)
+        self._assoc(red['id'], net['id'])
+
+    def test_overlapping_subnets_in_one_domain_are_refused(self):
+        # F10: one routing table cannot hold two 10.0.0.0/24.
+        domain = self._domain()
+        first, second = self._network(), self._network()
+        self._subnet(first, '10.0.0.0/24')
+        self._subnet(second, '10.0.0.0/24')
+        self._assoc(domain['id'], first['id'])
+        self._assoc(domain['id'], second['id'], expected=400)
+
+    def test_a_containing_subnet_overlaps_too(self):
+        domain = self._domain()
+        first, second = self._network(), self._network()
+        self._subnet(first, '10.0.0.0/24')
+        self._make_subnet(self.fmt, {'network': second},
+                          gateway='10.0.0.1', cidr='10.0.0.0/16')
+        self._assoc(domain['id'], first['id'])
+        self._assoc(domain['id'], second['id'], expected=400)
+
+    def test_disjoint_subnets_in_one_domain_are_accepted(self):
+        domain = self._domain()
+        first, second = self._network(), self._network()
+        self._subnet(first, '10.0.0.0/24')
+        self._subnet(second, '10.0.1.0/24')
+        self._assoc(domain['id'], first['id'])
+        self._assoc(domain['id'], second['id'])
+
+    def test_the_same_cidr_in_two_domains_is_accepted(self):
+        # What a VRF is for (t9 I2): the tables are separate.
+        red, blue = self._domain(), self._domain(name='blue')
+        first, second = self._network(), self._network()
+        self._subnet(first, '10.0.0.0/24')
+        self._subnet(second, '10.0.0.0/24')
+        self._assoc(red['id'], first['id'])
+        self._assoc(blue['id'], second['id'])
+
     def test_external_network_is_refused(self):
         domain = self._domain()
         net = self._network(as_admin=True, **{'router:external': True})
@@ -649,3 +704,61 @@ class TestPortEvents(PluginUnitTestCaseBase):
             RuntimeError('boom')
         self.plugin.registry_port_deleted(None, None, None,
                                           self._payload(_port()))
+
+
+class TestSubnetGuard(PluginUnitTestCaseBase):
+    """F10 through the other door: a subnet added after the attach.
+
+    A unit test of the receiver: the REST harness's core plugin is not ML2
+    and publishes no SUBNET BEFORE_CREATE.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.domain_db.get_domain_ids_for_network.return_value = ['d1']
+        self.domain_db.get_domain.return_value = _domain(
+            id='d1', networks=['net1', 'net2'])
+        self.core.get_subnets.return_value = [
+            {'id': 's1', 'cidr': '10.0.0.0/24', 'ip_version': 4}]
+
+    def _create(self, cidr, network_id='net2'):
+        payload = mock.Mock(context=self.ctx,
+                            latest_state={'network_id': network_id,
+                                          'cidr': cidr})
+        self.plugin._refuse_overlapping_subnet_in_domain(
+            None, None, None, payload=payload)
+
+    def test_an_overlapping_subnet_is_refused(self):
+        self.assertRaises(plugin.srv6_ext.Srv6OverlappingSubnets,
+                          self._create, '10.0.0.0/25')
+
+    def test_a_disjoint_subnet_is_accepted(self):
+        self._create('10.0.1.0/24')
+
+    def test_another_ip_version_is_accepted(self):
+        self._create('fd00::/64')
+
+    def test_a_network_in_no_domain_is_not_checked(self):
+        self.domain_db.get_domain_ids_for_network.return_value = []
+        self._create('10.0.0.0/24')
+        self.core.get_subnets.assert_not_called()
+
+    def test_a_pool_allocation_is_not_checked(self):
+        # No cidr in the request: Neutron allocates it after this event.
+        payload = mock.Mock(context=self.ctx,
+                            latest_state={'network_id': 'net2',
+                                          'cidr': object()})
+        self.plugin._refuse_overlapping_subnet_in_domain(
+            None, None, None, payload=payload)
+        self.core.get_subnets.assert_not_called()
+
+    def test_its_own_network_is_not_compared_with_itself(self):
+        # The network's other subnets are neutron's own overlap check.
+        subnets = {'net1': [{'cidr': '10.0.0.0/24', 'ip_version': 4}],
+                   'net2': [{'cidr': '10.0.1.0/24', 'ip_version': 4}]}
+        self.core.get_subnets.side_effect = (
+            lambda ctx, filters, fields: subnets[filters['network_id'][0]])
+        self._create('10.0.0.0/24', network_id='net1')
+        self.assertEqual(
+            [['net2']], [c[1]['filters']['network_id']
+                         for c in self.core.get_subnets.call_args_list])
