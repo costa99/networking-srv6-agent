@@ -200,20 +200,28 @@ def get_function_id(context, domain_id):
 
 @db_api.CONTEXT_WRITER
 def set_host_locator(context, host, locator, when):
-    """Upsert the locator an agent reported."""
+    """Upsert the locator an agent reported.
+
+    Returns whether the stored locator changed: True for a host seen for
+    the first time or one whose locator differs, False for a report that
+    only refreshes updated_at. handle_sync_state re-broadcasts the domains
+    only on True (F13).
+    """
     row = context.session.query(SRv6HostLocator).filter_by(host=host).first()
     if row is None:
         context.session.add(SRv6HostLocator(host=host, locator=locator,
                                             updated_at=when))
         LOG.info("SRv6 agent on %(host)s registered locator %(loc)s",
                  {'host': host, 'loc': locator})
-        return
-    if row.locator != locator:
+        return True
+    changed = row.locator != locator
+    if changed:
         LOG.warning("SRv6 agent on %(host)s changed locator from %(old)s to "
-                    "%(new)s; remote nodes will be told on their next resync",
+                    "%(new)s; telling every other node",
                     {'host': host, 'old': row.locator, 'new': locator})
     row.locator = locator
     row.updated_at = when
+    return changed
 
 
 @db_api.CONTEXT_READER

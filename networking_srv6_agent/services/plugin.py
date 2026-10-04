@@ -345,7 +345,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                             'f': domain[srv6_def.SID_FUNCTION],
                             't': self._vrf_table(
                                 domain[srv6_def.SID_FUNCTION])})
-        # No RPC: a domain with no network has no presence on any node.
+        # No RPC: a domain with no network has no presence on any node
+        # (F11: handle_sync_state and the agents now agree).
         return domain
 
     def get_srv6_domain(self, context, id, fields=None):
@@ -1031,10 +1032,19 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
     def handle_sync_state(self, context, host, locator, capabilities=None):
         """Register a locator and return every domain's full state.
 
-        Also re-broadcasts each domain, because a node whose locator is new
-        (or changed) alters what every *other* node must encapsulate to.
-        Doing it here rather than making agents poll keeps convergence
-        bounded by one RPC round trip instead of one resync interval.
+        Also re-broadcasts each domain when the node's locator is new or
+        changed, because that alters what every *other* node must
+        encapsulate to. Doing it here rather than making agents poll keeps
+        convergence bounded by one RPC round trip instead of one resync
+        interval.
+
+        Only then (F13). It used to re-broadcast on every call, and every
+        agent calls this at start, on every resync, and on every port of a
+        network in no domain: domains x nodes casts per call, each one a
+        full re-apply on every agent. A re-broadcast built before a
+        concurrent domain delete could also land after the delete and
+        bring the domain back (F9). The caller itself always gets the
+        payloads as the return value, so it converges whatever is sent.
         """
         admin_context = n_context.get_admin_context()
         self._ensure_pool(admin_context)
@@ -1049,17 +1059,30 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                           "locator %(loc)s: %(err)s",
                           {'host': host, 'loc': locator, 'err': e})
                 return []
-            srv6_db.set_host_locator(admin_context, host, locator,
-                                     datetime.datetime.now(
-                                         datetime.timezone.utc))
+            locator_changed = srv6_db.set_host_locator(
+                admin_context, host, locator,
+                datetime.datetime.now(datetime.timezone.utc))
+        else:
+            locator_changed = False
         locators = srv6_db.get_host_locators(admin_context)
         payloads = []
         for domain in domain_db.get_domains(admin_context):
+            # F11: a domain with no network has no state on any node. It
+            # used to be left out of the RPCs (create sends none) but put in
+            # here, so every node built its VRF at the first sync after the
+            # create. Left out, the agent's stale-domain pass and its kernel
+            # garbage collector remove what an older build made.
+            if not domain.get(srv6_def.NETWORKS):
+                continue
             payload = self._build_domain_payload(admin_context, domain,
                                                  locators)
             if payload is not None:
                 payloads.append(payload)
-        # Tell everyone else about the (possibly new) locator.
-        for payload in payloads:
-            self.agent_rpc.domain_updated(admin_context, payload)
+        if locator_changed:
+            # Tell everyone else about the new locator.
+            LOG.info("SRv6: locator of %(h)s is new or changed; "
+                     "re-broadcasting %(n)d domain(s)",
+                     {'h': host, 'n': len(payloads)})
+            for payload in payloads:
+                self.agent_rpc.domain_updated(admin_context, payload)
         return payloads

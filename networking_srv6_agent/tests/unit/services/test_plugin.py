@@ -613,6 +613,8 @@ class TestSyncState(PluginUnitTestCaseBase):
         admin.start()
         self.addCleanup(admin.stop)
         self.domain_db.get_domains.return_value = []
+        self.core.get_network.return_value = {'subnets': []}
+        self.core.get_ports.return_value = []
 
     def test_unusable_locator_is_not_registered(self):
         self.assertEqual([], self.plugin.handle_sync_state(
@@ -626,26 +628,71 @@ class TestSyncState(PluginUnitTestCaseBase):
 
     def test_missing_locator_still_returns_state(self):
         self.srv6_db.get_function_id.return_value = 7
-        self.domain_db.get_domains.return_value = [_domain()]
+        self.domain_db.get_domains.return_value = [_domain(networks=['net1'])]
         payloads = self.plugin.handle_sync_state(self.ctx, 'node1', None)
         self.srv6_db.set_host_locator.assert_not_called()
         self.assertEqual(1, len(payloads))
 
-    def test_every_domain_is_rebroadcast(self):
+    def test_a_new_locator_rebroadcasts_every_domain(self):
         # A new locator changes what every *other* node must encapsulate
         # to, so convergence is one round trip, not one resync interval.
         self.srv6_db.get_function_id.return_value = 7
-        self.domain_db.get_domains.return_value = [_domain(), _domain()]
+        self.srv6_db.set_host_locator.return_value = True
+        self.domain_db.get_domains.return_value = [
+            _domain(networks=['net1']), _domain(networks=['net2'])]
         payloads = self.plugin.handle_sync_state(self.ctx, 'node1',
                                                  'fc00:0:1::/48')
         self.assertEqual(2, len(payloads))
         self.assertEqual(2, self.agent_rpc.domain_updated.call_count)
 
+    def test_an_unchanged_locator_rebroadcasts_nothing(self):
+        # F13: a restart, a resync or a port on a network in no domain
+        # used to cost domains x nodes casts, each a full re-apply.
+        self.srv6_db.get_function_id.return_value = 7
+        self.srv6_db.set_host_locator.return_value = False
+        self.domain_db.get_domains.return_value = [
+            _domain(networks=['net1']), _domain(networks=['net2'])]
+        payloads = self.plugin.handle_sync_state(self.ctx, 'node1',
+                                                 'fc00:0:1::/48')
+        self.assertEqual(2, len(payloads))
+        self.agent_rpc.domain_updated.assert_not_called()
+
+    def test_no_locator_rebroadcasts_nothing(self):
+        self.srv6_db.get_function_id.return_value = 7
+        self.domain_db.get_domains.return_value = [_domain(networks=['net1'])]
+        self.assertEqual(1, len(self.plugin.handle_sync_state(
+            self.ctx, 'node1', None)))
+        self.agent_rpc.domain_updated.assert_not_called()
+
     def test_unallocated_domains_are_left_out(self):
         self.srv6_db.get_function_id.return_value = None
-        self.domain_db.get_domains.return_value = [_domain()]
+        self.domain_db.get_domains.return_value = [_domain(networks=['net1'])]
         self.assertEqual([], self.plugin.handle_sync_state(
             self.ctx, 'node1', 'fc00:0:1::/48'))
+
+    def test_a_domain_with_no_network_is_left_out(self):
+        """F11: one rule for every path, no network means no node state.
+
+        It used to be in every sync_state reply and re-broadcast with it,
+        so each node built its VRF at the first sync after the create.
+        """
+        self.srv6_db.get_function_id.return_value = 7
+        self.srv6_db.set_host_locator.return_value = True
+        attached = _domain(networks=['net1'])
+        self.domain_db.get_domains.return_value = [_domain(), attached]
+        payloads = self.plugin.handle_sync_state(self.ctx, 'node1',
+                                                 'fc00:0:1::/48')
+        self.assertEqual([attached['id']], [p['id'] for p in payloads])
+        self.assertEqual(1, self.agent_rpc.domain_updated.call_count)
+
+    def test_creating_a_domain_tells_no_agent(self):
+        self.srv6_db.allocate_function_id.return_value = 7
+        self.domain_db.create_domain.return_value = _domain()
+        with mock.patch.object(plugin.db_api, 'CONTEXT_WRITER'):
+            self.plugin.create_srv6_domain(
+                self.ctx, {'srv6_domain': {'project_id': 'p1',
+                                           'srv6_behavior': 'End.DT46'}})
+        self.assertFalse(self.agent_rpc.method_calls)
 
 
 class PortEventsTestCaseBase(PluginUnitTestCaseBase):

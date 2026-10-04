@@ -278,6 +278,23 @@ class TestHostLocators(Srv6DbTestCase):
                           'node2': 'fc00:0:2::/48'},
                          srv6_db.get_host_locators(self.ctx))
 
+    def test_a_new_host_is_a_change(self):
+        # F13: the plugin re-broadcasts only on a change.
+        self.assertTrue(srv6_db.set_host_locator(
+            self.ctx, 'node1', 'fc00:0:1::/48', self._now()))
+
+    def test_the_same_locator_again_is_no_change(self):
+        srv6_db.set_host_locator(self.ctx, 'node1', 'fc00:0:1::/48',
+                                 self._now())
+        self.assertFalse(srv6_db.set_host_locator(
+            self.ctx, 'node1', 'fc00:0:1::/48', self._now()))
+
+    def test_a_different_locator_is_a_change(self):
+        srv6_db.set_host_locator(self.ctx, 'node1', 'fc00:0:1::/48',
+                                 self._now())
+        self.assertTrue(srv6_db.set_host_locator(
+            self.ctx, 'node1', 'fc00:0:9::/48', self._now()))
+
     def test_updated_at_is_recorded(self):
         when = self._now()
         srv6_db.set_host_locator(self.ctx, 'node1', 'fc00:0:1::/48', when)

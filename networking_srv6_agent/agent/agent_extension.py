@@ -25,6 +25,7 @@ there is no L2 agent to host it -- and initialize() refuses anything else.
 """
 
 import threading
+import time
 
 from neutron.agent import firewall
 from neutron.agent.linux import openvswitch_firewall
@@ -48,6 +49,19 @@ from networking_srv6_agent.common import sid
 
 
 LOG = logging.getLogger(__name__)
+
+# A port on a network in no domain resyncs only if the last full sync is
+# older than this (F13). Such a network is "unknown" forever -- DHCP ports,
+# router ports, any VM on a plain network -- so without a holdoff every
+# one of its port events was a full sync, and an agent restart a burst of
+# them. A network that really was just attached arrives by the
+# domain_updated fanout anyway; this is only the fallback for a lost one.
+UNKNOWN_NETWORK_SYNC_HOLDOFF = 60
+
+# How long a deleted domain's id is remembered (F9). Domain ids are UUIDs
+# and never reused, so the only cost of a long memory is the dict; an hour
+# is many resync intervals, far longer than any message can be in flight.
+TOMBSTONE_SECONDS = 3600
 
 
 class Srv6AgentExtension(l2_extension.L2AgentExtension):
@@ -82,6 +96,10 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         # in a domain?" without an RPC round trip on every port event.
         self.domains = {}
         self.locators = {}
+        # domain_id -> monotonic time of its domain_deleted (F9)
+        self.tombstones = {}
+        # monotonic time of the last successful sync_state (F13)
+        self._last_sync = None
         self._lock = threading.Lock()
 
         self.vlan_manager = vlanmanager.LocalVlanManager()
@@ -192,8 +210,16 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             LOG.error("SRv6: sync_state failed (%s); will retry on the next "
                       "resync interval", e)
             return
+        self._last_sync = time.monotonic()
         wanted = {}
         for payload in payloads or []:
+            # A reply built before a delete this agent has already applied
+            # (F9). The server's own state no longer has the domain, so the
+            # next sync agrees.
+            if self._is_tombstoned(payload['id']):
+                LOG.info("SRv6: sync_state still lists deleted domain %s; "
+                         "ignoring it", payload['id'])
+                continue
             wanted[payload['id']] = payload
             self.locators.update(payload.get('locators') or {})
         # Every resync, changed or not: a full replace is idempotent and
@@ -208,6 +234,45 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         self._collect_kernel_orphans(wanted)
         for payload in wanted.values():
             self._apply_domain(payload)
+
+    def _is_tombstoned(self, domain_id):
+        return domain_id in self.tombstones
+
+    def _tombstone(self, domain_id):
+        """Remember a deleted domain, so a late update cannot revive it (F9).
+
+        The server builds a domain_updated after its transaction commits and
+        casts it with no ordering against a concurrent delete, and the
+        sync_state reply of an earlier call can arrive after the delete too.
+        Either one used to re-create the VRF, the decap SID and the
+        gateways of a domain that no longer existed, until the next resync
+        collected them (t9 I6e, 2026-10-04: blue survived its own delete on
+        nodes 1 and 2).
+        """
+        now = time.monotonic()
+        self.tombstones = {d: t for d, t in self.tombstones.items()
+                           if now - t < TOMBSTONE_SECONDS}
+        self.tombstones[domain_id] = now
+
+    def _retire_domain(self, payload):
+        """A domain with no network has no state on any node (F11).
+
+        One rule for both paths -- the server leaves such a domain out of
+        sync_state, and its domain_updated arrives here -- so detaching the
+        last network removes the VRF everywhere, and an empty domain never
+        gets one. Unlike a delete this sets no tombstone: the domain may get
+        a network again.
+        """
+        domain_id = payload['id']
+        function_id = payload['function_id']
+        present = self.dataplane.present_function_ids() or set()
+        if domain_id not in self.domains and function_id not in present:
+            return
+        LOG.info("SRv6: domain %s has no network; removing its state on "
+                 "this node", domain_id)
+        self.dataplane.delete_domain(domain_id, function_id,
+                                     payload.get('vrf_table'))
+        self.domains.pop(domain_id, None)
 
     def _collect_kernel_orphans(self, wanted):
         """Delete VRFs in the kernel that no domain on the server owns.
@@ -358,9 +423,12 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             # A new node's SID space is filtered before any route of this
             # payload can lead a rule toward its End SID.
             self.dataplane.ensure_edge_filter(sorted(self.locators.values()))
+        networks = payload.get('networks') or []
+        if not networks:
+            self._retire_domain(payload)
+            return encoding_changed
         self.dataplane.ensure_domain(domain_id, payload['function_id'],
                                      payload['behavior'])
-        networks = payload.get('networks') or []
         # What to KEEP comes from OVSDB (local_network_vlans): it is right
         # even during a restart, when the in-memory map below is empty.
         # Reconcile before ensuring, or a port (re-)created in this pass
@@ -409,6 +477,10 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             return
         LOG.debug("SRv6: domain_updated %s", domain.get('id'))
         with self._lock:
+            if self._is_tombstoned(domain.get('id')):
+                LOG.info("SRv6: domain_updated for deleted domain %s; "
+                         "ignoring it", domain.get('id'))
+                return
             try:
                 encoding_changed = self._apply_domain(domain)
             except Exception:
@@ -452,6 +524,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             return
         LOG.info("SRv6: domain_deleted %s", domain_id)
         with self._lock:
+            self._tombstone(domain_id)
             try:
                 self.dataplane.delete_domain(domain_id, function_id,
                                              vrf_table)
@@ -496,9 +569,25 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                         LOG.exception("SRv6: gateway port for network %s",
                                       network_id)
             if not known:
-                LOG.debug("SRv6: port on unknown network %s; resyncing",
-                          network_id)
-                self._do_sync_state()
+                self._sync_for_unknown_network(network_id)
+
+    def _sync_for_unknown_network(self, network_id):
+        """Resync for a port whose network is in no known domain, rarely.
+
+        Caller holds the lock. A full sync from the last
+        UNKNOWN_NETWORK_SYNC_HOLDOFF seconds already reflects every attach
+        the server had made by then, and a later attach reaches this agent
+        through the domain_updated fanout; so within the holdoff the sync
+        would only repeat what is known (F13).
+        """
+        if (self._last_sync is not None and
+                time.monotonic() - self._last_sync <
+                UNKNOWN_NETWORK_SYNC_HOLDOFF):
+            LOG.debug("SRv6: port on unknown network %s; synced recently, "
+                      "not resyncing", network_id)
+            return
+        LOG.debug("SRv6: port on unknown network %s; resyncing", network_id)
+        self._do_sync_state()
 
     def delete_port(self, context, port):
         """A port left this node: drop the gateways no live port backs now.

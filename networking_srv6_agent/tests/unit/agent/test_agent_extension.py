@@ -63,6 +63,11 @@ def _network(network_id='net1', mtu=1450):
                          'gateway_ip': '10.0.0.1'}]}
 
 
+def _attached(domain_id, **kwargs):
+    """A payload with one network: since F11 an empty one is a removal."""
+    return _payload(domain_id, networks=[_network()], **kwargs)
+
+
 class AgentExtensionTestCaseBase(base.BaseTestCase):
 
     def setUp(self):
@@ -77,8 +82,12 @@ class AgentExtensionTestCaseBase(base.BaseTestCase):
         self.ext.context = mock.Mock()
         self.ext.domains = {}
         self.ext.locators = {}
+        self.ext.tombstones = {}
+        self.ext._last_sync = None
         self.ext._lock = threading.Lock()
         self.ext.vlan_manager = mock.Mock()
+        # No network is local unless a test says so.
+        self.ext.vlan_manager.get_segments.return_value = {}
         self.ext.dataplane = mock.Mock()
         self.ext.dataplane.present_function_ids.return_value = set()
         # OVSDB's view of the live ports (network -> VLANs). Empty by
@@ -174,7 +183,7 @@ class TestLockDiscipline(AgentExtensionTestCaseBase):
 class TestSyncState(AgentExtensionTestCaseBase):
 
     def test_state_is_applied(self):
-        self.cctxt.call.return_value = [_payload(self.domain_id)]
+        self.cctxt.call.return_value = [_attached(self.domain_id)]
         self.ext._sync_state()
         self.ext.dataplane.ensure_domain.assert_called_once_with(
             self.domain_id, 7, 'End.DT46')
@@ -234,12 +243,12 @@ class TestApplyDomain(AgentExtensionTestCaseBase):
     def test_locators_are_merged_and_passed_to_the_routes(self):
         self.ext.locators = {'node2': 'fc00:0:2::/48'}
         routes = [{'prefix': '10.0.0.5/32', 'host': 'node3'}]
-        self.ext._apply_domain(_payload(self.domain_id, routes=routes,
+        self.ext._apply_domain(_attached(self.domain_id, routes=routes,
                                         locators={'node3': 'fc00:0:3::/48'}))
         self.ext.dataplane.sync_routes.assert_called_once_with(
             self.domain_id, routes,
             {'node2': 'fc00:0:2::/48', 'node3': 'fc00:0:3::/48'}, HOST,
-            mtus={})
+            mtus={'net1': 1450})
 
     def test_multi_segment_network_uses_the_first_segment(self):
         self.ext.vlan_manager.get_segments.return_value = {
@@ -285,10 +294,14 @@ class TestApplyDomainReconciles(AgentExtensionTestCaseBase):
         self.ext.dataplane.reconcile_gateway_ports.assert_called_once_with(
             self.domain_id, {100, 101})
 
-    def test_a_domain_with_no_networks_left_keeps_nothing(self):
+    def test_a_domain_with_no_networks_left_is_removed(self):
+        """F11: detaching the last network removes the domain here."""
+        self.ext.domains[self.domain_id] = _attached(self.domain_id)
         self.ext._apply_domain(_payload(self.domain_id, networks=[]))
-        self.ext.dataplane.reconcile_gateway_ports.assert_called_once_with(
-            self.domain_id, set())
+        self.ext.dataplane.delete_domain.assert_called_once_with(
+            self.domain_id, 7, 10007)
+        self.ext.dataplane.ensure_domain.assert_not_called()
+        self.assertNotIn(self.domain_id, self.ext.domains)
 
     def test_a_network_with_no_live_port_here_keeps_nothing(self):
         """F8 and F6: the domain still has the network, the node does not.
@@ -367,7 +380,7 @@ class TestRpcHandlers(AgentExtensionTestCaseBase):
 
     def test_domain_updated_is_recorded(self):
         self.ext.domain_updated(self.ext.context,
-                                domain=_payload(self.domain_id))
+                                domain=_attached(self.domain_id))
         self.assertIn(self.domain_id, self.ext.domains)
 
     def test_domain_updated_without_a_payload_is_ignored(self):
@@ -585,14 +598,14 @@ class TestKernelGarbageCollection(AgentExtensionTestCaseBase):
     def test_an_orphan_found_after_a_restart_is_collected(self):
         self.assertEqual({}, self.ext.domains)       # just restarted
         self.ext.dataplane.present_function_ids.return_value = {7, 9}
-        self.cctxt.call.return_value = [_payload(self.domain_id)]
+        self.cctxt.call.return_value = [_attached(self.domain_id)]
         self.ext._sync_state()
         self.ext.dataplane.delete_domain.assert_called_once_with(
             None, function_id=9)
 
     def test_a_wanted_function_id_is_never_collected(self):
         self.ext.dataplane.present_function_ids.return_value = {7}
-        self.cctxt.call.return_value = [_payload(self.domain_id)]
+        self.cctxt.call.return_value = [_attached(self.domain_id)]
         self.ext._sync_state()
         self.ext.dataplane.delete_domain.assert_not_called()
 
@@ -620,7 +633,7 @@ class TestKernelGarbageCollection(AgentExtensionTestCaseBase):
         self.ext.dataplane.present_function_ids.return_value = {8, 9}
         self.ext.dataplane.delete_domain.side_effect = [RuntimeError('boom'),
                                                         None]
-        self.cctxt.call.return_value = [_payload(self.domain_id)]
+        self.cctxt.call.return_value = [_attached(self.domain_id)]
         self.ext._sync_state()
         self.assertEqual(2, self.ext.dataplane.delete_domain.call_count)
         self.assertTrue(self.ext.dataplane.ensure_domain.called)
@@ -663,7 +676,7 @@ class TestEdgeFilterTriggers(AgentExtensionTestCaseBase):
         self.ext.dataplane.ensure_domain.side_effect = \
             lambda *a: order.append('domain')
         self.cctxt.call.return_value = [
-            _payload(self.domain_id, locators={'node2': self.LOC2})]
+            _attached(self.domain_id, locators={'node2': self.LOC2})]
         self.ext._sync_state()
         self.assertEqual(['filter', 'domain'], order)
 
@@ -701,7 +714,7 @@ class TestEdgeFilterTriggers(AgentExtensionTestCaseBase):
             lambda *a, **kw: order.append('routes')
         self.ext.domain_updated(
             self.ext.context,
-            domain=_payload(self.domain_id, locators={'node3': self.LOC3}))
+            domain=_attached(self.domain_id, locators={'node3': self.LOC3}))
         self.assertEqual(['filter', 'routes'], order)
 
 
@@ -859,7 +872,7 @@ class TestEncoding(AgentExtensionTestCaseBase):
             lambda enc: order.append(('encoding', enc)) and False
         self.ext.dataplane.ensure_domain.side_effect = \
             lambda *a: order.append(('domain',))
-        payload = dict(_payload(self.domain_id), encoding='usid')
+        payload = dict(_attached(self.domain_id), encoding='usid')
         self.ext._apply_domain(payload)
         self.assertEqual([('encoding', 'usid'), ('domain',)], order)
 
@@ -883,3 +896,133 @@ class TestEncoding(AgentExtensionTestCaseBase):
         self.ext._sync_state()
         self.assertEqual(['encap-red', 'next-csid'],
                          self.cctxt.call.call_args[1]['capabilities'])
+
+
+class TestEmptyDomain(AgentExtensionTestCaseBase):
+    """F11: a node holds a domain's state only while it has a network."""
+
+    def test_an_unknown_empty_domain_creates_nothing(self):
+        self.ext.domain_updated(self.ext.context,
+                                domain=_payload(self.domain_id))
+        self.ext.dataplane.ensure_domain.assert_not_called()
+        self.ext.dataplane.delete_domain.assert_not_called()
+        self.assertNotIn(self.domain_id, self.ext.domains)
+
+    def test_detaching_the_last_network_removes_the_vrf(self):
+        self.ext.domains[self.domain_id] = _attached(self.domain_id)
+        self.ext.domain_updated(self.ext.context,
+                                domain=_payload(self.domain_id))
+        self.ext.dataplane.delete_domain.assert_called_once_with(
+            self.domain_id, 7, 10007)
+        self.assertNotIn(self.domain_id, self.ext.domains)
+
+    def test_kernel_state_of_an_empty_domain_goes_after_a_restart(self):
+        # self.domains is empty after a restart, the VRF is not.
+        self.ext.dataplane.present_function_ids.return_value = {7}
+        self.ext.domain_updated(self.ext.context,
+                                domain=_payload(self.domain_id))
+        self.ext.dataplane.delete_domain.assert_called_once_with(
+            self.domain_id, 7, 10007)
+
+    def test_an_emptied_domain_can_come_back(self):
+        # Not a delete: no tombstone, the next attach programs it again.
+        self.ext.domains[self.domain_id] = _attached(self.domain_id)
+        self.ext.domain_updated(self.ext.context,
+                                domain=_payload(self.domain_id))
+        self.ext.domain_updated(self.ext.context,
+                                domain=_attached(self.domain_id))
+        self.ext.dataplane.ensure_domain.assert_called_once_with(
+            self.domain_id, 7, 'End.DT46')
+        self.assertIn(self.domain_id, self.ext.domains)
+
+
+class TestTombstones(AgentExtensionTestCaseBase):
+    """F9: a deleted domain is not brought back by a late message.
+
+    t9 I6e (2026-10-04): DELETE iso-blue, and on nodes 1 and 2 a
+    re-broadcast built before the delete arrived 100 ms after it, waited for
+    the lock and re-created the whole domain.
+    """
+
+    def _delete(self, domain_id=None):
+        self.ext.domain_deleted(self.ext.context,
+                                domain_id=domain_id or self.domain_id,
+                                function_id=7, vrf_table=10007)
+
+    def test_a_late_domain_updated_is_ignored(self):
+        self._delete()
+        self.ext.domain_updated(self.ext.context,
+                                domain=_attached(self.domain_id))
+        self.ext.dataplane.ensure_domain.assert_not_called()
+        self.assertNotIn(self.domain_id, self.ext.domains)
+
+    def test_a_late_sync_reply_does_not_revive_it(self):
+        self._delete()
+        self.cctxt.call.return_value = [_attached(self.domain_id)]
+        self.ext._sync_state()
+        self.ext.dataplane.ensure_domain.assert_not_called()
+
+    def test_other_domains_are_unaffected(self):
+        self._delete()
+        other = uuidutils.generate_uuid()
+        self.ext.domain_updated(self.ext.context,
+                                domain=_attached(other, function_id=8))
+        self.ext.dataplane.ensure_domain.assert_called_once_with(
+            other, 8, 'End.DT46')
+
+    def test_a_new_domain_on_the_same_function_id_is_unaffected(self):
+        # Keyed on the domain id, which is never reused; function ids are.
+        self._delete()
+        other = uuidutils.generate_uuid()
+        self.ext.domain_updated(self.ext.context, domain=_attached(other))
+        self.ext.dataplane.ensure_domain.assert_called_once_with(
+            other, 7, 'End.DT46')
+
+    def test_old_tombstones_are_dropped(self):
+        with mock.patch.object(agent_extension.time, 'monotonic',
+                               return_value=1000.0):
+            self._delete('old')
+        later = 1000.0 + agent_extension.TOMBSTONE_SECONDS + 1
+        with mock.patch.object(agent_extension.time, 'monotonic',
+                               return_value=later):
+            self._delete()
+        self.assertEqual({self.domain_id}, set(self.ext.tombstones))
+
+
+class TestUnknownNetworkHoldoff(AgentExtensionTestCaseBase):
+    """F13: a port on a network in no domain no longer means a full sync."""
+
+    def _port_on_unknown_network(self):
+        self.ext.handle_port(self.ext.context,
+                             {'network_id': 'net-plain', 'port_id': 'p1'})
+
+    def test_a_recent_sync_is_not_repeated(self):
+        self.ext._sync_state()
+        self.cctxt.call.reset_mock()
+        self._port_on_unknown_network()
+        self.cctxt.call.assert_not_called()
+
+    def test_a_burst_costs_at_most_one_sync(self):
+        # An agent restart: every port of every plain network in a row.
+        for _ in range(6):
+            self._port_on_unknown_network()
+        self.assertEqual(1, self.cctxt.call.call_count)
+
+    def test_an_old_sync_is_refreshed(self):
+        with mock.patch.object(agent_extension.time, 'monotonic',
+                               return_value=1000.0):
+            self.ext._sync_state()
+        self.cctxt.call.reset_mock()
+        later = 1000.0 + agent_extension.UNKNOWN_NETWORK_SYNC_HOLDOFF + 1
+        with mock.patch.object(agent_extension.time, 'monotonic',
+                               return_value=later):
+            self._port_on_unknown_network()
+        self.cctxt.call.assert_called_once()
+
+    def test_a_failed_sync_does_not_start_the_holdoff(self):
+        self.cctxt.call.side_effect = Exception('no route to server')
+        self.ext._sync_state()
+        self.cctxt.call.side_effect = None
+        self.cctxt.call.reset_mock()
+        self._port_on_unknown_network()
+        self.cctxt.call.assert_called_once()
