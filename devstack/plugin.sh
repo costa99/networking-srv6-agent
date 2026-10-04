@@ -69,8 +69,14 @@ elif [[ "$1" == "stack" && "$2" == "post-config" ]]; then
     fi
 
 elif [[ "$1" == "clean" ]]; then
-    # Undo the copy above; Horizon then starts without the SRv6 panels.
+    # Undo the copy above; Horizon then starts without the SRv6 panels,
+    # and with its own Network Topology panel again. That file has
+    # Horizon's name, so remove it only if it is ours.
     rm -f $HORIZON_DIR/openstack_dashboard/local/enabled/_*_srv6_*panel.py
+    _srv6_topology=$HORIZON_DIR/openstack_dashboard/local/enabled/_1420_project_network_topology_panel.py
+    if grep -qs srv6_dashboard $_srv6_topology; then
+        rm -f $_srv6_topology
+    fi
 fi
 
 $_XTRACE_NETWORKING_SRV6_AGENT

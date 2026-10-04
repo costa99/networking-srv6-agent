@@ -26,5 +26,7 @@ SRV6_VRF_TABLE_BASE=${SRV6_VRF_TABLE_BASE:-10000}
 SRV6_RESYNC_INTERVAL=${SRV6_RESYNC_INTERVAL:-300}
 
 # The Horizon panels (srv6_dashboard): the enabled files plugin.sh copies into
-# Horizon when the horizon service is enabled.
-SRV6_DASHBOARD_ENABLE=${SRV6_DASHBOARD_ENABLE:-$NETWORKING_SRV6_AGENT_DIR/srv6_dashboard/enabled/_[0-9]*_srv6_*panel.py}
+# Horizon when the horizon service is enabled. The SRv6 panels, plus
+# _1420_project_network_topology_panel.py, which replaces Horizon's Network
+# Topology panel by sharing its file name (FEATURE-HORIZON-DASHBOARD D24).
+SRV6_DASHBOARD_ENABLE=${SRV6_DASHBOARD_ENABLE:-$NETWORKING_SRV6_AGENT_DIR/srv6_dashboard/enabled/_[0-9]*_srv6_*panel.py $NETWORKING_SRV6_AGENT_DIR/srv6_dashboard/enabled/_1420_project_network_topology_panel.py}

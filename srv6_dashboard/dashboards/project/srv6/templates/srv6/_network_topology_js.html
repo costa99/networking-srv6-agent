@@ -1,0 +1,297 @@
+{% load i18n %}
+{% trans "SRv6 domain" as domain_label %}
+<style>
+  /* Horizon's graph sets every link's stroke-width inline on mouseout;
+     !important keeps the domain links thick and dashed. */
+  #topologyCanvasContainer line.link.srv6-link {
+    stroke-width: 3px !important;
+    stroke-dasharray: 8 5;
+  }
+  #topologyCanvasContainer text.srv6-label,
+  #topology_canvas g.srv6-bus text {
+    font-size: 12px;
+    font-weight: bold;
+    paint-order: stroke;
+    stroke: #fff;
+    stroke-width: 3px;
+  }
+</style>
+<script>
+/*
+ * SRv6 domain links on Horizon's Network Topology (FEATURE D24).
+ *
+ * The JSON (network_topology/views.py) carries srv6_domains: each domain
+ * that joins two or more of the drawn networks, with those networks and
+ * every pair of them (network_topology/topology.py decides all of it).
+ * This script only draws them, by wrapping Horizon's own drawing calls:
+ *
+ *   - Graph tab (horizon.network_topology): a dashed line in the domain's
+ *     colour between each pair of its networks, labelled with the
+ *     domain's name. They are ordinary links of the force layout, so they
+ *     also pull the domain's networks together;
+ *   - Topology tab (horizon.flat_network_topology): under the devices,
+ *     one dashed bar per domain across the network columns, with a dot
+ *     on each of its networks. Clicking it opens the domain.
+ *
+ * Every string from the API goes in through d3's text() or attr(), never
+ * html(), so a domain name cannot inject markup.
+ */
+(function () {
+  'use strict';
+  var graph = horizon.network_topology;
+  var flat = horizon.flat_network_topology;
+  if (!graph || !flat || !document.getElementById('networktopology')) {
+    return;
+  }
+
+  var LABEL = '{{ domain_label|escapejs }}';
+  // The admin SRv6 Topology's palette.
+  var COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+                '#8c564b', '#e377c2', '#17becf'];
+  var BUS_ROW = 28;    // flat view: height of one domain's bar
+  var LINK_DISTANCE = 220;   // graph view: length of a domain link
+
+  function domainsOf(model) {
+    return (model && model.srv6_domains) || [];
+  }
+
+  function color(i) {
+    return COLORS[i % COLORS.length];
+  }
+
+  /* Our drawing runs inside Horizon's handlers of the topology's 'change'
+     event: an exception there would also stop the handlers after it
+     (the Graph tab's comes after the Topology tab's). Log it instead. */
+  function safely(fn) {
+    try {
+      fn();
+    } catch (e) {
+      if (window.console) { console.error('SRv6 domain links:', e); }
+    }
+  }
+
+  /* --- Graph tab ------------------------------------------------------ */
+
+  // 'domain net-a net-b' -> the link object in graph.links. Each carries
+  // srv6 = {key, name, color}, which is how a <line> is told apart.
+  var graphLinks = {};
+  var tickHooked = false;
+
+  function liveGraphLinks(g) {
+    return Object.keys(graphLinks).map(function (k) {
+      return graphLinks[k];
+    }).filter(function (link) {
+      return g.links.indexOf(link) >= 0;
+    });
+  }
+
+  function placeLabels(g) {
+    g.vis.selectAll('text.srv6-label')
+      .attr('x', function (d) { return (d.source.x + d.target.x) / 2; })
+      .attr('y', function (d) { return (d.source.y + d.target.y) / 2 - 6; });
+  }
+
+  /* Horizon binds lines to graph.links by index, so removing a link
+     shifts which datum each <line> holds: style every line from its
+     datum, after every change, never once at creation. */
+  function restyleGraph(g) {
+    g.vis.selectAll('line.link').each(function (d) {
+      var line = d3.select(this);
+      line.classed('srv6-link', !!d.srv6);
+      line.select('title').remove();
+      line.style('stroke', d.srv6 ? d.srv6.color : 'black');
+      if (d.srv6) {
+        line.append('title').text(LABEL + ' ' + d.srv6.name);
+      }
+    });
+
+    var layer = g.vis.select('g.srv6-labels');
+    if (layer.empty()) {
+      // Under the nodes, like the lines.
+      layer = g.vis.insert('g', 'g.node').attr('class', 'srv6-labels');
+    }
+    var labels = layer.selectAll('text.srv6-label')
+      .data(liveGraphLinks(g), function (d) { return d.srv6.key; });
+    labels.enter().append('text')
+      .attr('class', 'srv6-label')
+      .attr('text-anchor', 'middle');
+    labels
+      .style('fill', function (d) { return d.srv6.color; })
+      .text(function (d) { return LABEL + ' ' + d.srv6.name; });
+    labels.exit().remove();
+    placeLabels(g);
+  }
+
+  function syncGraph(g, domains) {
+    var wanted = {};
+    var added = false;
+    domains.forEach(function (dom, i) {
+      dom.links.forEach(function (pair) {
+        var key = [dom.id, pair[0], pair[1]].join(' ');
+        var link = graphLinks[key];
+        wanted[key] = true;
+        if (link && g.links.indexOf(link) >= 0) {
+          link.srv6.name = dom.name;
+          link.srv6.color = color(i);
+          return;
+        }
+        // New, or Horizon dropped it with a network node it removed.
+        var a = g.find_by_id(pair[0]);
+        var b = g.find_by_id(pair[1]);
+        if (!a || !b) {
+          delete graphLinks[key];
+          return;
+        }
+        g.new_link(a, b);
+        link = g.links[g.links.length - 1];
+        link.srv6 = {key: key, name: dom.name, color: color(i)};
+        graphLinks[key] = link;
+        added = true;
+      });
+    });
+    Object.keys(graphLinks).forEach(function (key) {
+      if (!wanted[key]) {
+        if (g.links.indexOf(graphLinks[key]) >= 0) {
+          g.removeLink(graphLinks[key]);
+        }
+        delete graphLinks[key];
+      }
+    });
+    if (!tickHooked) {
+      // A named listener, beside Horizon's own 'tick'.
+      g.force.on('tick.srv6', function () { placeLabels(g); });
+      // Horizon's distance for two networks is 70, which hides the line
+      // and its label behind the two network circles.
+      var distance = g.force.linkDistance();
+      g.force.linkDistance(function (d, i) {
+        return d.srv6 ? LINK_DISTANCE : distance.call(this, d, i);
+      });
+      tickHooked = true;
+    }
+    restyleGraph(g);
+    if (added) {
+      g.force.start();
+    }
+  }
+
+  var graphLoad = graph.load_topology;
+  graph.load_topology = function (data) {
+    var g = this;
+    var out = graphLoad.apply(g, arguments);
+    safely(function () { syncGraph(g, domainsOf(data)); });
+    return out;
+  };
+
+  var graphRemoveLink = graph.removeLink;
+  graph.removeLink = function () {
+    var g = this;
+    var out = graphRemoveLink.apply(g, arguments);
+    safely(function () { restyleGraph(g); });
+    return out;
+  };
+
+  /* --- Topology tab --------------------------------------------------- */
+
+  /* The first free y under the devices: every router and instance sits in
+     its own row (data_convert sets pos_y), whatever its network. */
+  function busTop(f, props) {
+    var top = props.top_margin;
+    [f.model.routers, f.model.servers].forEach(function (devices) {
+      (devices || []).forEach(function (d) {
+        top = Math.max(top, d.pos_y + d.height + props.margin);
+      });
+    });
+    return top;
+  }
+
+  function drawBuses(f, domains, top, props) {
+    var svg = d3.select(f.svg);
+    // Horizon renders the Topology tab only when it is shown or chosen
+    // (preload = False): opened as ?tab=topology_tabs__graph, the page
+    // has no canvas and no templates for it.
+    var rect = d3.select(f.network_tmpl[f.draw_mode]).select('.network-rect');
+    if (svg.empty() || rect.empty()) {
+      return;
+    }
+    svg.selectAll('g.srv6-bus').remove();
+    if (!f.model.networks.length) {
+      return;
+    }
+    // The column's width, from Horizon's own template for this mode.
+    var width = Number(rect.attr('width')) || 16;
+    domains.forEach(function (dom, i) {
+      var xs = dom.networks.map(function (id) {
+        return f.get_network_index(id);
+      }).filter(function (index) {
+        return index !== undefined;
+      }).map(function (index) {
+        return index * props.network_width + width / 2;
+      });
+      if (xs.length < 2) {
+        return;
+      }
+      var y = top + i * BUS_ROW + BUS_ROW / 2;
+      var x1 = Math.min.apply(null, xs);
+      var x2 = Math.max.apply(null, xs);
+      var link = svg.append('g').attr('class', 'srv6-bus')
+        .append('a').attr('href', dom.url);
+      link.append('title').text(LABEL + ' ' + dom.name);
+      link.append('line')
+        .attr('x1', x1).attr('y1', y).attr('x2', x2).attr('y2', y)
+        .style('stroke', color(i))
+        .style('stroke-width', 4)
+        .style('stroke-dasharray', '8 5');
+      xs.forEach(function (x) {
+        link.append('circle')
+          .attr('cx', x).attr('cy', y).attr('r', 6)
+          .style('fill', color(i))
+          .style('stroke', '#fff')
+          .style('stroke-width', 2);
+      });
+      link.append('text')
+        .attr('x', x1 + width).attr('y', y - 7)
+        .style('fill', color(i))
+        .text(LABEL + ' ' + dom.name);
+    });
+  }
+
+  var flatDraw = flat.draw_topology;
+  flat.draw_topology = function () {
+    var f = this;
+    var domains = domainsOf(f.model);
+    var props = f.element_properties[f.draw_mode];
+    var top = props.top_margin;
+    safely(function () {
+      top = busTop(f, props);
+      if (domains.length) {
+        // Room for the bars: Horizon sizes the columns and the canvas
+        // from network_height when it draws.
+        f.network_height = Math.max(
+          f.network_height,
+          top + domains.length * BUS_ROW + props.top_margin);
+      }
+    });
+    var args = arguments;
+    var out = flatDraw.apply(f, args);
+    safely(function () {
+      if (domains.length) {
+        // Each column ends with its subnets' CIDRs, written upwards from
+        // its foot: the bars must stay above the longest. Its length is
+        // known only once drawn, so draw again if the columns must grow.
+        var cidr = 0;
+        d3.select(f.svg).selectAll('.network-cidr').each(function () {
+          cidr = Math.max(cidr, this.getComputedTextLength());
+        });
+        var need = top + domains.length * BUS_ROW + cidr +
+          f.element_properties.cidr_margin + f.fa_globe_glyph_width;
+        if (need > f.network_height) {
+          f.network_height = need;
+          flatDraw.apply(f, args);
+        }
+      }
+      drawBuses(f, domains, top, props);
+    });
+    return out;
+  };
+})();
+</script>

@@ -1,0 +1,11 @@
+{% extends 'project/network_topology/index.html' %}
+{% comment %}
+  Horizon's Network Topology page, unchanged, plus the script that draws
+  the SRv6 domain links (FEATURE D24). It lives here, not next to the
+  network_topology panel: see that panel's panel.py.
+{% endcomment %}
+
+{% block js %}
+  {{ block.super }}
+  {% include 'project/srv6/_network_topology_js.html' %}
+{% endblock %}

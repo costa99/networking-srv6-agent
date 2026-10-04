@@ -40,8 +40,9 @@ def _enabled_modules():
 
 class EnabledFilesTests(helpers.TestCase):
 
-    def test_the_three_panels(self):
-        self.assertEqual(['_1496_project_srv6_panel',
+    def test_the_panels(self):
+        self.assertEqual(['_1420_project_network_topology_panel',
+                          '_1496_project_srv6_panel',
                           '_2361_admin_srv6_panel',
                           '_2362_admin_srv6_topology_panel'],
                          _enabled_modules())
@@ -60,7 +61,17 @@ class EnabledFilesTests(helpers.TestCase):
 
     def test_devstack_glob_matches_every_file(self):
         # devstack/settings SRV6_DASHBOARD_ENABLE, relative to the repo.
-        pattern = os.path.join(_DIR, '_[0-9]*_srv6_*panel.py')
+        patterns = ['_[0-9]*_srv6_*panel.py',
+                    '_1420_project_network_topology_panel.py']
         self.assertEqual(
             [m + '.py' for m in _enabled_modules()],
-            sorted(os.path.basename(f) for f in glob.glob(pattern)))
+            sorted(os.path.basename(f) for p in patterns
+                   for f in glob.glob(os.path.join(_DIR, p))))
+
+    def test_topology_file_shadows_horizons(self):
+        # Same name as Horizon's file, so Horizon applies ours instead
+        # (D24). A rename on either side would register both panels.
+        import openstack_dashboard.enabled as core_enabled
+        core = {name for __, name, __ in
+                pkgutil.iter_modules(core_enabled.__path__)}
+        self.assertIn('_1420_project_network_topology_panel', core)
