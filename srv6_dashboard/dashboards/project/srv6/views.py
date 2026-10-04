@@ -15,9 +15,8 @@
 """Project > Network > SRv6 Domains: the views behind each URL.
 
 Which API calls each view makes, in order, is listed in FEATURE §5.2. The
-admin panel subclasses every view here; the hooks it overrides are the
-methods named _list_domains / _project_id and the class attributes ending
-in _url.
+admin panel subclasses the form and detail views here, overriding the
+class attributes ending in _url and the form, table and tab classes.
 """
 
 from django.urls import reverse
@@ -35,40 +34,45 @@ from srv6_dashboard.dashboards.project.srv6 import tables as srv6_tables
 from srv6_dashboard.dashboards.project.srv6 import tabs as srv6_tabs
 
 
+def add_network_names(request, domains, **network_filters):
+    """Put the {id: name} map of networks on each domain, for its column.
+
+    One network request for the whole table (FEATURE D15), and none when
+    no domain has a network. The admin panel calls it too.
+    """
+    if not any(d.networks for d in domains):
+        return domains
+    try:
+        names = srv6_api.network_names(
+            srv6_api.network_list(request, **network_filters))
+    except Exception:
+        # The table still lists the networks, by ID.
+        names = {}
+        exceptions.handle(request, _('Unable to retrieve network names.'))
+    for domain in domains:
+        domain.network_names = names
+    return domains
+
+
 class IndexView(tables.DataTableView):
     table_class = srv6_tables.DomainsTable
     template_name = 'horizon/common/_data_table_view.html'
     page_title = _("SRv6 Domains")
 
-    def _list_domains(self):
+    def get_data(self):
         # The project panel shows the current project's domains, even to
         # an admin, as every Project panel does (FEATURE D14). Without the
         # filter an admin would see every project's domains here.
-        return srv6_api.domain_list(
-            self.request, project_id=self.request.user.project_id)
-
-    def _list_networks(self):
-        return srv6_api.network_list(
-            self.request, project_id=self.request.user.project_id)
-
-    def get_data(self):
+        project_id = self.request.user.project_id
         try:
-            domains = self._list_domains()
+            domains = srv6_api.domain_list(self.request,
+                                           project_id=project_id)
         except Exception:
             exceptions.handle(self.request,
                               _('Unable to retrieve SRv6 domains.'))
             return []
-        if any(d.networks for d in domains):
-            try:
-                names = srv6_api.network_names(self._list_networks())
-            except Exception:
-                # The table still lists the networks, by ID.
-                names = {}
-                exceptions.handle(self.request,
-                                  _('Unable to retrieve network names.'))
-            for domain in domains:
-                domain.network_names = names
-        return domains
+        return add_network_names(self.request, domains,
+                                 project_id=project_id)
 
 
 class CreateView(forms.ModalFormView):

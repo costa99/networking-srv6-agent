@@ -1,0 +1,15 @@
+{% extends "horizon/common/_modal_form.html" %}
+{% load i18n %}
+
+{% block modal-body-right %}
+  <h3>{% trans "Description:" %}</h3>
+  <p>{% blocktrans trimmed %}
+    Create an SRv6 domain on behalf of a project. The domain belongs to that
+    project: only its networks can be associated with it, and its members
+    can rename, associate and delete it.
+  {% endblocktrans %}</p>
+  <p>{% blocktrans trimmed %}
+    The server allocates the domain a SID function from the configured
+    ranges; it appears in the SID Function column once created.
+  {% endblocktrans %}</p>
+{% endblock %}

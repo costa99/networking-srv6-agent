@@ -1,0 +1,13 @@
+{% extends 'project/srv6/_detail_overview.html' %}
+{% load i18n %}
+
+{% block extra_fields %}
+    <dt>{% trans "Project" %}</dt>
+    <dd>{{ project_name }}</dd>
+    <dt>{% trans "SID Function" %}</dt>
+    <dd>{{ sid_function }}</dd>
+    {% if vrf_name %}
+    <dt>{% trans "VRF on each node" %}</dt>
+    <dd><code>{{ vrf_name }}</code></dd>
+    {% endif %}
+{% endblock %}
