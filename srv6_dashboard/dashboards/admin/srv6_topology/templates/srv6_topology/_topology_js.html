@@ -1,0 +1,250 @@
+<script>
+/*
+ * SRv6 topology: draws what data/ returns (srv6_topology/topology.py).
+ * Plain DOM and SVG, no library (FEATURE D22). Every string from the API
+ * goes in through textContent or setAttribute, never innerHTML.
+ *
+ *   - hosts sit on a circle, in the API's (sorted) order;
+ *   - each domain present on a host is a coloured badge under it, with
+ *     its VM count;
+ *   - each TE path is a line from its first waypoint, hop by hop, to its
+ *     destination, green when ACTIVE and dashed amber when DEGRADED;
+ *     paths sharing a hop are drawn side by side, not on top of each
+ *     other;
+ *   - the Domain select shows one domain's badges and paths only.
+ */
+(function () {
+  'use strict';
+  var root = document.getElementById('srv6-topology');
+  if (!root) { return; }
+
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+  var COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+                '#8c564b', '#e377c2', '#17becf'];
+  var STATUS_COLOR = {ACTIVE: '#3c763d', DEGRADED: '#f0ad4e'};
+  var W = 900, H = 520, CX = W / 2, CY = H / 2 - 10, RADIUS = 175;
+  var NODE_W = 170, NODE_H = 54, BADGE_R = 11, PATH_GAP = 9;
+
+  var svg = document.getElementById('srv6-topology-svg');
+  var select = document.getElementById('srv6-topology-domain');
+  var legend = document.getElementById('srv6-topology-legend');
+  var pathRows = document.getElementById('srv6-topology-paths');
+  var errorBox = document.getElementById('srv6-topology-error');
+  var data = null;
+  var domainColor = {};
+  var domainName = {};
+
+  function svgEl(name, attrs, parent) {
+    var node = document.createElementNS(SVG_NS, name);
+    Object.keys(attrs || {}).forEach(function (k) {
+      node.setAttribute(k, attrs[k]);
+    });
+    if (parent) { parent.appendChild(node); }
+    return node;
+  }
+
+  function htmlEl(tag, text, parent, attrs) {
+    var node = document.createElement(tag);
+    if (text !== undefined && text !== null) { node.textContent = text; }
+    Object.keys(attrs || {}).forEach(function (k) {
+      node.setAttribute(k, attrs[k]);
+    });
+    if (parent) { parent.appendChild(node); }
+    return node;
+  }
+
+  function clear(node) {
+    while (node.firstChild) { node.removeChild(node.firstChild); }
+  }
+
+  /* Host centres on a circle, the first at the top; one host sits in the
+     middle, two side by side. */
+  function layout(hosts) {
+    var pos = {};
+    var n = hosts.length;
+    hosts.forEach(function (h, i) {
+      if (n === 1) {
+        pos[h.host] = {x: CX, y: CY};
+      } else {
+        var a = -Math.PI / 2 + 2 * Math.PI * i / n;
+        if (n === 2) { a = Math.PI * i; }
+        pos[h.host] = {x: CX + RADIUS * Math.cos(a),
+                       y: CY + RADIUS * Math.sin(a)};
+      }
+    });
+    return pos;
+  }
+
+  /* Where the segment from a to b leaves a's box: lines stop at the box
+     edge, so arrowheads stay visible. */
+  function edgePoint(a, b) {
+    var dx = b.x - a.x, dy = b.y - a.y;
+    var t = Math.min(dx ? (NODE_W / 2 + 4) / Math.abs(dx) : Infinity,
+                     dy ? (NODE_H / 2 + 4) / Math.abs(dy) : Infinity);
+    return {x: a.x + dx * t, y: a.y + dy * t};
+  }
+
+  function defs() {
+    var d = svgEl('defs', {}, svg);
+    Object.keys(STATUS_COLOR).forEach(function (status) {
+      var m = svgEl('marker', {id: 'srv6-arrow-' + status, viewBox: '0 0 10 10',
+                               refX: 9, refY: 5, markerWidth: 7,
+                               markerHeight: 7, orient: 'auto'}, d);
+      svgEl('path', {d: 'M0,0 L10,5 L0,10 z',
+                     fill: STATUS_COLOR[status]}, m);
+    });
+  }
+
+  function drawPath(path, k, count, pos) {
+    var color = STATUS_COLOR[path.status] || '#777';
+    var g = svgEl('g', {'class': 'srv6-te-path', style: 'cursor: pointer'},
+                  svg);
+    svgEl('title', {}, g).textContent =
+      (domainName[path.domain_id] || path.domain_id) + ': ' +
+      path.hops.join(' → ') + ' (' + path.status + ')';
+    g.addEventListener('click', function () {
+      window.location.href = path.url;
+    });
+    var offset = (k - (count - 1) / 2) * PATH_GAP;
+    for (var i = 0; i + 1 < path.hops.length; i++) {
+      var a = pos[path.hops[i]], b = pos[path.hops[i + 1]];
+      if (!a || !b || a === b) { continue; }
+      var len = Math.hypot(b.x - a.x, b.y - a.y);
+      var ox = -(b.y - a.y) / len * offset, oy = (b.x - a.x) / len * offset;
+      var p1 = edgePoint({x: a.x + ox, y: a.y + oy},
+                         {x: b.x + ox, y: b.y + oy});
+      var p2 = edgePoint({x: b.x + ox, y: b.y + oy},
+                         {x: a.x + ox, y: a.y + oy});
+      var attrs = {x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, stroke: color,
+                   'stroke-width': 3};
+      if (path.status !== 'ACTIVE') { attrs['stroke-dasharray'] = '7 5'; }
+      if (i + 2 === path.hops.length && STATUS_COLOR[path.status]) {
+        attrs['marker-end'] = 'url(#srv6-arrow-' + path.status + ')';
+      }
+      svgEl('line', attrs, g);
+    }
+  }
+
+  function drawHost(host, pos, domains) {
+    var p = pos[host.host];
+    var g = svgEl('g', {'class': 'srv6-host'}, svg);
+    var box = {x: p.x - NODE_W / 2, y: p.y - NODE_H / 2, width: NODE_W,
+               height: NODE_H, rx: 6, fill: '#fff', stroke: '#555',
+               'stroke-width': 1.5};
+    if (!host.locator) {
+      box.stroke = '#a94442';
+      box['stroke-dasharray'] = '5 4';
+    }
+    svgEl('rect', box, g);
+    svgEl('text', {x: p.x, y: p.y - 6, 'text-anchor': 'middle',
+                   'font-weight': 'bold', 'font-size': 14}, g)
+      .textContent = host.host;
+    svgEl('text', {x: p.x, y: p.y + 14, 'text-anchor': 'middle',
+                   'font-family': 'monospace', 'font-size': 12,
+                   fill: host.locator ? '#333' : '#a94442'}, g)
+      .textContent = host.locator || 'no locator';
+    var present = domains.filter(function (d) {
+      return d.hosts[host.host];
+    });
+    present.forEach(function (d, i) {
+      var bx = p.x + (i - (present.length - 1) / 2) * (2 * BADGE_R + 4);
+      var by = p.y + NODE_H / 2 + BADGE_R + 4;
+      var b = svgEl('g', {}, g);
+      svgEl('title', {}, b).textContent =
+        d.name + ': ' + d.hosts[host.host] + ' VM(s) on ' + host.host;
+      svgEl('circle', {cx: bx, cy: by, r: BADGE_R,
+                       fill: domainColor[d.id]}, b);
+      svgEl('text', {x: bx, y: by + 4, 'text-anchor': 'middle',
+                     'font-size': 11, fill: '#fff'}, b)
+        .textContent = String(d.hosts[host.host]);
+    });
+  }
+
+  function drawLegend(domains) {
+    clear(legend);
+    domains.forEach(function (d) {
+      var item = htmlEl('span', null, legend,
+                        {style: 'margin-right: 1.5em; white-space: nowrap'});
+      htmlEl('span', '● ', item, {style: 'color: ' + domainColor[d.id]});
+      htmlEl('span', d.name + ' (' + d.networks + ' network' +
+             (d.networks === 1 ? '' : 's') + ')', item);
+    });
+    var st = htmlEl('span', null, legend, {style: 'white-space: nowrap'});
+    htmlEl('span', '— ACTIVE ', st,
+           {style: 'color: ' + STATUS_COLOR.ACTIVE});
+    htmlEl('span', '- - DEGRADED', st,
+           {style: 'color: ' + STATUS_COLOR.DEGRADED});
+  }
+
+  function fillPathTable(paths) {
+    clear(pathRows);
+    if (!paths.length) {
+      var tr0 = htmlEl('tr', null, pathRows);
+      htmlEl('td', 'No TE paths.', tr0, {colspan: 3});
+      return;
+    }
+    paths.forEach(function (path) {
+      var tr = htmlEl('tr', null, pathRows);
+      var td = htmlEl('td', null, tr);
+      htmlEl('span', '● ', td,
+             {style: 'color: ' + (domainColor[path.domain_id] || '#777')});
+      htmlEl('span', domainName[path.domain_id] || path.domain_id, td);
+      var route = htmlEl('td', null, tr);
+      var text = (path.via.length ? 'via ' + path.via.join(' → ') +
+                  ' to ' : 'direct to ') + path.destination;
+      htmlEl('a', text, route, {href: path.url});
+      htmlEl('td', path.status, tr);
+    });
+  }
+
+  function render() {
+    clear(svg);
+    defs();
+    var only = select.value;
+    var domains = data.domains.filter(function (d) {
+      return !only || d.id === only;
+    });
+    var paths = data.te_paths.filter(function (p) {
+      return !only || p.domain_id === only;
+    });
+    var pos = layout(data.hosts);
+    if (!data.hosts.length) {
+      svgEl('text', {x: CX, y: CY, 'text-anchor': 'middle'}, svg)
+        .textContent = 'No host has registered an SRv6 locator.';
+    }
+    /* Paths under the hosts, so boxes and labels stay readable. */
+    var drawn = paths.filter(function (p) { return p.hops.length > 1; });
+    drawn.forEach(function (p, k) { drawPath(p, k, drawn.length, pos); });
+    data.hosts.forEach(function (h) { drawHost(h, pos, domains); });
+    drawLegend(domains);
+    fillPathTable(paths);
+  }
+
+  function showError(message) {
+    errorBox.textContent = 'Unable to load the SRv6 topology: ' + message;
+    errorBox.hidden = false;
+  }
+
+  fetch(root.getAttribute('data-url'),
+        {credentials: 'same-origin', headers: {Accept: 'application/json'}})
+    .then(function (response) {
+      return response.json().then(function (body) {
+        if (!response.ok) {
+          throw new Error(body.error || response.statusText);
+        }
+        return body;
+      });
+    })
+    .then(function (body) {
+      data = body;
+      data.domains.forEach(function (d, i) {
+        domainColor[d.id] = COLORS[i % COLORS.length];
+        domainName[d.id] = d.name;
+        htmlEl('option', d.name, select, {value: d.id});
+      });
+      select.addEventListener('change', render);
+      render();
+    })
+    .catch(function (err) { showError(err.message); });
+})();
+</script>

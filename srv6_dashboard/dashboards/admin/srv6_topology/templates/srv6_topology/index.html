@@ -1,0 +1,39 @@
+{% extends 'base.html' %}
+{% load i18n %}
+{% block title %}{% trans "SRv6 Topology" %}{% endblock %}
+
+{% block main %}
+<div id="srv6-topology" data-url="{% url 'horizon:admin:srv6_topology:data' %}">
+  <p class="help-block">{% blocktrans trimmed %}
+    Every host with an SRv6 locator, the domains whose VMs run on it (a
+    coloured badge per domain, with its VM count), and every TE path, drawn
+    from its first waypoint to its destination: the domain's traffic enters
+    a path from any of the domain's hosts. Click a path for its segments.
+  {% endblocktrans %}</p>
+  <div class="form-inline">
+    <label for="srv6-topology-domain">{% trans "Domain" %}</label>
+    <select id="srv6-topology-domain" class="form-control">
+      <option value="">{% trans "All domains" %}</option>
+    </select>
+  </div>
+  <div id="srv6-topology-error" class="alert alert-danger" hidden></div>
+  <svg id="srv6-topology-svg" viewBox="0 0 900 520" width="100%"
+       role="img" aria-label="{% trans 'SRv6 topology' %}"
+       style="max-width: 900px; display: block;"></svg>
+  <div id="srv6-topology-legend"></div>
+  <h4>{% trans "TE paths" %}</h4>
+  <table class="table table-condensed table-striped">
+    <thead><tr>
+      <th>{% trans "Domain" %}</th><th>{% trans "Route" %}</th>
+      <th>{% trans "Status" %}</th>
+    </tr></thead>
+    <tbody id="srv6-topology-paths"></tbody>
+  </table>
+  <noscript>{% trans "This page needs JavaScript to draw the topology." %}</noscript>
+</div>
+{% endblock %}
+
+{% block js %}
+  {{ block.super }}
+  {% include 'admin/srv6_topology/_topology_js.html' %}
+{% endblock %}
