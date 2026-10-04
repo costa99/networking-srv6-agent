@@ -112,7 +112,8 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             vrf_table_base=self.vrf_table_base,
             bridge=bridge,
             apply_sysctls=self.conf.apply_sysctls,
-            ovs_firewall=bridge is not None and self._ovs_firewall_active())
+            ovs_firewall=bridge is not None and self._ovs_firewall_active(),
+            tunnel_patch_port=self._tunnel_patch_port())
         self.dataplane.initialize_node()
 
         self._setup_rpc(connection)
@@ -155,6 +156,21 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                         {'d': conf.firewall_driver, 'e': e})
             return False
         return issubclass(driver, openvswitch_firewall.OVSFirewallDriver)
+
+    @staticmethod
+    def _tunnel_patch_port():
+        """br-int's patch port to br-tun, or None if this agent has no tunnels.
+
+        The gateway ARP/ND flows (F12) filter what arrives through it. Read
+        from the OVS agent's own options, which it registered before loading
+        any extension.
+        """
+        try:
+            if not cfg.CONF.AGENT.tunnel_types:
+                return None
+            return cfg.CONF.OVS.int_peer_patch_port
+        except (cfg.NoSuchOptError, cfg.NoSuchGroupError):
+            return None
 
     def _validate_config(self):
         if not self.conf.locator:

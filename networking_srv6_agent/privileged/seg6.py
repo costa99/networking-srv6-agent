@@ -377,6 +377,23 @@ def list_vrf_names():
     return names
 
 
+def add_address_nodad(device, cidr):
+    """`ip -6 addr add <cidr> dev <device> nodad`; existing is success.
+
+    For the gateway address of an IPv6 subnet (F12). The same address sits
+    on every node's gateway port of a network, all in one L2 segment, so
+    duplicate address detection would disable it on all nodes but the
+    first. neutron's ip_lib has no way to pass IFA_F_NODAD.
+    """
+    try:
+        return ip_route_cmd(['-6', 'addr', 'add', cidr, 'dev', device,
+                             'nodad'])
+    except processutils.ProcessExecutionError as e:
+        if 'File exists' in str(e):
+            return None
+        raise
+
+
 def local_rule_prefs(family_v6=False):
     """Priorities of the `from all lookup local` rules, in order.
 

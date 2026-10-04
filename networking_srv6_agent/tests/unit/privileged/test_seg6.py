@@ -252,6 +252,21 @@ class TestSidRules(Seg6ArgvTestCase):
         self.assertRaises(RuntimeError, seg6.list_sid_rules)
 
 
+class TestAddressNoDad(Seg6ArgvTestCase):
+    """F12: the IPv6 gateway address skips duplicate address detection."""
+
+    def test_argv(self):
+        seg6.add_address_nodad('svp-7-100', 'fd98:1::/64')
+        self.assertEqual(['-6', 'addr', 'add', 'fd98:1::/64', 'dev',
+                          'svp-7-100', 'nodad'], self.argv)
+
+    def test_an_existing_address_is_success(self):
+        self.ip_route_cmd.side_effect = \
+            seg6.processutils.ProcessExecutionError(
+                stderr='RTNETLINK answers: File exists')
+        self.assertIsNone(seg6.add_address_nodad('svp-7-100', 'fd98:1::/64'))
+
+
 class TestLocalRule(Seg6ArgvTestCase):
     """F7: moving the kernel's `local` rule after l3mdev."""
 

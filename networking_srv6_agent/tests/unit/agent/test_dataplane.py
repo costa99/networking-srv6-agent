@@ -402,9 +402,11 @@ class TestGatewayPort(DataplaneTestCaseBase):
             self.domain_id, 'net1', 100,
             self.subnets + [{'id': 'sub2', 'cidr': '2001:db8::/64',
                              'gateway_ip': '2001:db8::1'}])
-        self.assertEqual([mock.call('10.0.0.1/24'),
-                          mock.call('2001:db8::1/64')],
+        self.assertEqual([mock.call('10.0.0.1/24')],
                          self.device.addr.add.call_args_list)
+        # IPv6 without DAD (F12): TestGatewayIpv6NoDad.
+        self.priv_seg6.add_address_nodad.assert_called_once_with(
+            PORT_NAME, '2001:db8::1/64')
 
     def test_port_is_recorded_for_teardown(self):
         name = self.dp.ensure_gateway_port(self.domain_id, 'net1', 100,
@@ -643,6 +645,166 @@ class TestGatewayFirewallFlows(DataplaneTestCaseBase):
         self.bridge.delete_flows.side_effect = RuntimeError('boom')
         self.dp._delete_gateway_port(PORT_NAME)
         self.bridge.delete_port.assert_called_once_with(PORT_NAME)
+
+
+class TestGatewayIpv6NoDad(DataplaneTestCaseBase):
+    """F12, part a: an IPv6 gateway address is added without DAD.
+
+    Every node's gateway of a network holds it on one L2 segment, so DAD
+    disabled it on all nodes but the first (t10 s_dad), and a guest there
+    lost IPv6 routing for good when the first one's gateway went (spike,
+    2026-10-04).
+    """
+
+    V4 = {'id': 's4', 'cidr': '10.0.0.0/24', 'gateway_ip': '10.0.0.1'}
+    V6 = {'id': 's6', 'cidr': 'fd98:1::/64', 'gateway_ip': 'fd98:1::'}
+
+    def setUp(self):
+        super().setUp()
+        self._with_domain()
+        self.ip_lib.device_exists.return_value = True
+
+    def _ensure(self):
+        self.dp.ensure_gateway_port(self.domain_id, 'net1', 100,
+                                    [self.V4, self.V6])
+
+    def test_ipv6_is_nodad_and_ipv4_is_unchanged(self):
+        self._ensure()
+        self.priv_seg6.add_address_nodad.assert_called_once_with(
+            PORT_NAME, 'fd98:1::/64')
+        self.device.addr.add.assert_called_once_with('10.0.0.1/24')
+
+    def test_a_dadfailed_address_is_re_added_without_dad(self):
+        # What every node upgraded from an older build holds.
+        self.device.addr.list.return_value = [
+            {'cidr': '10.0.0.1/24', 'dadfailed': False},
+            {'cidr': 'fd98:1::/64', 'dadfailed': True, 'tentative': True}]
+        self._ensure()
+        self.device.addr.delete.assert_called_once_with('fd98:1::/64')
+        self.priv_seg6.add_address_nodad.assert_called_once_with(
+            PORT_NAME, 'fd98:1::/64')
+        self.device.addr.add.assert_not_called()
+
+    def test_healthy_addresses_are_left_alone(self):
+        self.device.addr.list.return_value = [
+            {'cidr': '10.0.0.1/24', 'dadfailed': False},
+            {'cidr': 'fd98:1::/64', 'dadfailed': False}]
+        self._ensure()
+        self.device.addr.delete.assert_not_called()
+        self.device.addr.add.assert_not_called()
+        self.priv_seg6.add_address_nodad.assert_not_called()
+
+
+class TestGatewayNdFlows(DataplaneTestCaseBase):
+    """F12, part b: a gateway's ARP and ND do not cross nodes.
+
+    The spike (LOG-2026-10-04-vrf-fixes.md) dropped, on the way in from
+    patch-tun, ARP and ND frames naming the gateway on the network's VLAN:
+    node 3's gateway then passed DAD although node 1 held the address, and
+    every guest resolved both gateways to its own node's port.
+    """
+
+    PATCH_OFPORT = 2
+
+    def setUp(self):
+        super().setUp()
+        self._with_domain()
+        self.ip_lib.device_exists.return_value = True
+        self.dp.tunnel_patch_port = 'patch-tun'
+        self.bridge.get_port_ofport.side_effect = \
+            lambda name: {'patch-tun': self.PATCH_OFPORT}.get(name, 42)
+        self.subnets = [
+            {'id': 's4', 'cidr': '10.0.0.0/24', 'gateway_ip': '10.0.0.1'},
+            {'id': 's6', 'cidr': 'fd98:1::/64', 'gateway_ip': 'fd98:1::'}]
+
+    def _ensure(self, vlan=100, subnets=None):
+        self.dp.ensure_gateway_port(self.domain_id, 'net1', vlan,
+                                    self.subnets if subnets is None
+                                    else subnets)
+
+    @staticmethod
+    def _flow(vlan=100, **match):
+        return mock.call(table=0, priority=100, in_port=2, dl_vlan=vlan,
+                         actions='drop', **match)
+
+    def _added(self):
+        return [c for c in self.bridge.add_flow.call_args_list
+                if c[1].get('table') == 0]
+
+    def test_arp_and_nd_for_the_gateway_from_the_tunnel_are_dropped(self):
+        self._ensure()
+        self.assertCountEqual(
+            [self._flow(proto='arp', arp_tpa='10.0.0.1'),
+             self._flow(proto='arp', arp_spa='10.0.0.1'),
+             self._flow(proto='icmp6', icmp_type=135, nd_target='fd98:1::'),
+             self._flow(proto='icmp6', icmp_type=136, nd_target='fd98:1::')],
+            self._added())
+
+    def test_no_flows_without_tunnels(self):
+        self.dp.tunnel_patch_port = None
+        self._ensure()
+        self.assertEqual([], self._added())
+
+    def test_no_flows_without_a_patch_ofport(self):
+        self.bridge.get_port_ofport.side_effect = None
+        self.bridge.get_port_ofport.return_value = -1
+        self._ensure()
+        self.assertEqual([], self._added())
+        # the gateway is still programmed
+        self.priv_seg6.set_link_master.assert_called_once()
+
+    def test_the_flows_come_before_the_address(self):
+        order = []
+        self.bridge.add_flow.side_effect = \
+            lambda **kw: order.append('flow') if kw['table'] == 0 else None
+        self.priv_seg6.add_address_nodad.side_effect = \
+            lambda *a: order.append('address')
+        self._ensure(subnets=self.subnets[1:])
+        self.assertEqual(['flow', 'flow', 'address'], order)
+
+    def test_they_are_re_asserted_on_every_call(self):
+        # The OVS agent sweeps them at its first iteration after a restart.
+        self._ensure()
+        self._ensure()
+        self.assertEqual(8, len(self._added()))
+        self.bridge.delete_flows.assert_not_called()
+
+    def test_a_removed_subnet_takes_its_flows_along(self):
+        self._ensure()
+        self._ensure(subnets=self.subnets[:1])
+        deleted = [c[1] for c in self.bridge.delete_flows.call_args_list]
+        self.assertCountEqual(
+            [dict(table=0, in_port=2, dl_vlan=100, proto='icmp6',
+                  icmp_type=t, nd_target='fd98:1::') for t in (135, 136)],
+            deleted)
+
+    def test_deleting_the_gateway_deletes_its_flows_first(self):
+        self._ensure()
+        order = []
+        self.bridge.delete_flows.side_effect = \
+            lambda **kw: order.append('flow') if kw['table'] == 0 else None
+        self.bridge.delete_port.side_effect = \
+            lambda *a: order.append('port')
+        self.dp._delete_gateway_port(PORT_NAME)
+        self.assertEqual(['flow'] * 4 + ['port'], order)
+        self.assertEqual({}, self.dp.gateway_nd_flows)
+
+    def test_only_this_processes_flows_are_deleted(self):
+        # No cookie argument: the bridge matches its own cookie.
+        self._ensure()
+        self.dp._delete_gateway_port(PORT_NAME)
+        for call in self.bridge.delete_flows.call_args_list:
+            self.assertNotIn('cookie', call[1])
+
+    def test_a_vlan_change_moves_the_flows(self):
+        self._ensure(vlan=100)
+        self._ensure(vlan=101)
+        deleted_vlans = {c[1]['dl_vlan']
+                         for c in self.bridge.delete_flows.call_args_list
+                         if c[1]['table'] == 0}
+        self.assertEqual({100}, deleted_vlans)
+        self.assertIn(self._flow(vlan=101, proto='arp', arp_tpa='10.0.0.1'),
+                      self._added())
 
 
 class TestLocalNetworkVlans(DataplaneTestCaseBase):

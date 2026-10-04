@@ -806,6 +806,28 @@ class TestOvsFirewallDetection(base.BaseTestCase):
         self.assertFalse(self._active('no.such.module:Driver'))
 
 
+class TestTunnelPatchPort(base.BaseTestCase):
+    """F12: the gateway ARP/ND flows filter what arrives from br-tun."""
+
+    def setUp(self):
+        super().setUp()
+        self.conf = mock.patch.object(agent_extension, 'cfg').start()
+        self.addCleanup(mock.patch.stopall)
+        self.conf.NoSuchOptError = cfg.NoSuchOptError
+        self.conf.NoSuchGroupError = cfg.NoSuchGroupError
+
+    def test_with_tunnels_it_is_the_ovs_agents_patch_port(self):
+        self.conf.CONF.AGENT.tunnel_types = ['vxlan']
+        self.conf.CONF.OVS.int_peer_patch_port = 'patch-tun'
+        ext = agent_extension.Srv6AgentExtension
+        self.assertEqual('patch-tun', ext._tunnel_patch_port())
+
+    def test_without_tunnels_there_is_none(self):
+        self.conf.CONF.AGENT.tunnel_types = []
+        self.assertIsNone(
+            agent_extension.Srv6AgentExtension._tunnel_patch_port())
+
+
 class TestRpcSetup(base.BaseTestCase):
 
     def test_topics(self):

@@ -37,6 +37,14 @@ Per remote port:
     ip route replace <ip>/32 encap seg6 mode encap \
         segs [<transit End SID>,...]<remote sid> dev <underlay> table <table>
 
+Per gateway port and gateway address, on a node with tunnels (F12: every
+node's gateway of a network holds the same address on one L2 segment, so
+its ARP and ND must not cross nodes; IPv6 gateways are added `nodad`):
+    table=0,priority=100,in_port=<patch-tun>,dl_vlan=<vlan>,arp,
+        arp_tpa=<gw4> actions=drop                 # and arp_spa=<gw4>
+    table=0,priority=100,in_port=<patch-tun>,dl_vlan=<vlan>,icmp6,
+        icmp_type=135,nd_target=<gw6> actions=drop # and icmp_type=136
+
 With the OVS firewall driver, per gateway port (F1, F2: the port is not a
 Neutron port, so without these the firewall never sees its traffic):
     table=60,priority=100,in_port=<of> actions=ct_clear,
@@ -218,7 +226,8 @@ def render_edge_ruleset(networks):
 class Srv6LinuxDataplane:
 
     def __init__(self, locator, underlay_interface, vrf_table_base,
-                 bridge=None, apply_sysctls=True, ovs_firewall=False):
+                 bridge=None, apply_sysctls=True, ovs_firewall=False,
+                 tunnel_patch_port=None):
         self.locator = locator
         self.underlay_interface = underlay_interface
         self.vrf_table_base = vrf_table_base
@@ -229,6 +238,10 @@ class Srv6LinuxDataplane:
         self.ovs_firewall = ovs_firewall
         # gateway port name -> ofport its firewall flows were installed for
         self.gateway_flows = {}
+        # br-int's patch port to br-tun, or None without tunnels; and
+        # gateway port name -> the ND/ARP flow matches installed for it (F12)
+        self.tunnel_patch_port = tunnel_patch_port
+        self.gateway_nd_flows = {}
         # domain_id -> DomainState, and domain_id -> {network_id: port name}
         self.domains = {}
         self.gateway_ports = collections.defaultdict(dict)
@@ -814,6 +827,8 @@ class Srv6LinuxDataplane:
                            'n': network_id})
                 return None
             self._ensure_gateway_flows(port_name, local_vlan)
+            # Before the address: no other node may hear it claimed.
+            self._ensure_gateway_nd_flows(port_name, local_vlan, subnets)
 
         # Enslave BEFORE addressing. An address added first lands in the
         # main table and does not move when the interface is later enslaved.
@@ -839,19 +854,31 @@ class Srv6LinuxDataplane:
         # class or message to detect "already present" is brittle enough that
         # it produced a false warning on every single resync.
         try:
-            existing = {a['cidr'] for a in device.addr.list()}
+            existing = {a['cidr']: a for a in device.addr.list()}
         except Exception:
-            existing = set()
+            existing = {}
         for subnet in subnets:
             gateway_ip = subnet.get('gateway_ip')
             if not gateway_ip:
                 continue
             prefixlen = subnet['cidr'].split('/')[1]
             cidr = '%s/%s' % (gateway_ip, prefixlen)
-            if cidr in existing:
+            present = existing.get(cidr)
+            if present is not None and not present.get('dadfailed'):
                 continue
             try:
-                device.addr.add(cidr)
+                if ':' not in gateway_ip:
+                    device.addr.add(cidr)
+                    continue
+                if present is not None:
+                    # Added by an older build, with DAD, and it lost to
+                    # another node's gateway: the kernel neither uses nor
+                    # answers for it, and never retries (F12).
+                    LOG.info("SRv6: %(c)s on %(p)s failed duplicate address "
+                             "detection; re-adding it without DAD",
+                             {'c': cidr, 'p': port_name})
+                    device.addr.delete(cidr)
+                priv_seg6.add_address_nodad(port_name, cidr)
             except Exception as e:
                 LOG.warning("SRv6: could not add %(c)s to %(p)s: %(e)s",
                             {'c': cidr, 'p': port_name, 'e': e})
@@ -1072,10 +1099,113 @@ class Srv6LinuxDataplane:
                         "%(p)s (ofport %(o)s): %(e)s",
                         {'p': port_name, 'o': ofport, 'e': e})
 
+    # ------------------------------------------------------------------
+    # neighbour discovery of gateway ports (F12)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _gateway_nd_matches(subnets):
+        """The ARP/ND fields that name a gateway address, per subnet.
+
+        Who-has and is-at for an IPv4 gateway (a request names it as target,
+        a reply or a gratuitous ARP as sender); Neighbor Solicitation (135)
+        and Advertisement (136) for an IPv6 one -- DAD's probe is an NS too.
+        """
+        matches = set()
+        for subnet in subnets or []:
+            gateway_ip = subnet.get('gateway_ip')
+            if not gateway_ip:
+                continue
+            if ':' in gateway_ip:
+                for icmp_type in (135, 136):
+                    matches.add((('proto', 'icmp6'),
+                                 ('icmp_type', icmp_type),
+                                 ('nd_target', gateway_ip)))
+            else:
+                for field in ('arp_tpa', 'arp_spa'):
+                    matches.add((('proto', 'arp'), (field, gateway_ip)))
+        return matches
+
+    def _ensure_gateway_nd_flows(self, port_name, local_vlan, subnets):
+        """Keep the gateway's ARP and ND on this node (F12).
+
+        Every node with a port of the network has a gateway port on it,
+        each holding the subnet's gateway address, and neutron joins the
+        nodes' local VLANs of the network into one L2 segment over the
+        tunnels. So a guest's who-has or Neighbor Solicitation for its
+        gateway reached every node's gateway, and any of them could answer:
+        for IPv4 a race the local one usually won, for IPv6 worse, because
+        duplicate address detection disabled the address on every node but
+        the first ("dadfailed"), whose gateway then served the network on
+        every node, over the tunnel. When that gateway went, IPv6 routing
+        on the others stopped for good: DAD is not retried (spike,
+        LOG-2026-10-04-vrf-fixes.md).
+
+        Dropping, on the way in from the tunnel, every ARP or ND frame that
+        names a gateway address of this network makes each node's gateway
+        the only one its guests can hear, and hides it from the other
+        nodes' DAD. Only these frames: the guests' own ARP and ND, and all
+        unicast traffic, cross the tunnel as before. Matched on the
+        network's local VLAN, since another network may use the same
+        gateway address.
+
+        Re-asserted on every call, with this process's cookie, like the
+        firewall flows, and for the same reason: the OVS agent sweeps them
+        at its first iteration after a restart. Only br-tun is covered: a
+        network carried by a physical bridge (VLAN or flat) has no tunnel
+        port to filter, and keeps the old behaviour.
+        """
+        if self.bridge is None or not self.tunnel_patch_port:
+            return
+        ofport = self.bridge.get_port_ofport(self.tunnel_patch_port)
+        if not isinstance(ofport, int) or ofport <= 0:
+            LOG.warning("SRv6: no ofport for %(t)s; the gateway ARP/ND "
+                        "flows of %(p)s wait for the next resync",
+                        {'t': self.tunnel_patch_port, 'p': port_name})
+            return
+        wanted = {(ofport, local_vlan, match)
+                  for match in self._gateway_nd_matches(subnets)}
+        stale = self.gateway_nd_flows.get(port_name, set()) - wanted
+        if stale:
+            self._delete_nd_flows(port_name, stale)
+        installed = set()
+        for flow in sorted(wanted):
+            of, vlan, match = flow
+            try:
+                self.bridge.add_flow(
+                    table=ovs_const.LOCAL_SWITCHING,
+                    priority=constants.GATEWAY_ND_FLOW_PRIORITY,
+                    in_port=of, dl_vlan=vlan, actions='drop',
+                    **dict(match))
+            except Exception as e:
+                LOG.error("SRv6: could not install a gateway ARP/ND flow of "
+                          "%(p)s (%(m)s): %(e)s",
+                          {'p': port_name, 'm': dict(match), 'e': e})
+                continue
+            installed.add(flow)
+        self.gateway_nd_flows[port_name] = installed
+
+    def _delete_nd_flows(self, port_name, flows):
+        for of, vlan, match in sorted(flows):
+            try:
+                self.bridge.delete_flows(table=ovs_const.LOCAL_SWITCHING,
+                                         in_port=of, dl_vlan=vlan,
+                                         **dict(match))
+            except Exception as e:
+                LOG.warning("SRv6: could not remove a gateway ARP/ND flow "
+                            "of %(p)s (%(m)s): %(e)s",
+                            {'p': port_name, 'm': dict(match), 'e': e})
+
+    def _delete_gateway_nd_flows(self, port_name):
+        flows = self.gateway_nd_flows.pop(port_name, None)
+        if flows and self.bridge is not None:
+            self._delete_nd_flows(port_name, flows)
+
     def _delete_gateway_port(self, port_name):
         # Flows first: once the port is gone OVS can hand its ofport to the
-        # next port, and the flows would apply to that one.
+        # next port, and the flows would apply to that one; and the VLAN
+        # the ND flows match can go to another network.
         self._delete_gateway_flows(port_name)
+        self._delete_gateway_nd_flows(port_name)
         if self.bridge is not None:
             try:
                 self.bridge.delete_port(port_name)

@@ -135,6 +135,12 @@ SID_RULE_PRIORITY = 999
 #     ip [-6] rule add pref 32765 lookup local; ip [-6] rule del pref 0
 LOCAL_RULE_PRIORITY = 32765
 
+# br-int table-0 priority of the flows that keep a gateway's ARP and ND on
+# its own node (F12): above the OVS agent's own table-0 flows for patch
+# ports (single digits, a few more with DVR), below its dead-VLAN drop
+# (65535).
+GATEWAY_ND_FLOW_PRIORITY = 100
+
 # The nftables table of the SRv6 edge filter: on the
 # gateway ports, drop tenant packets addressed into the SID space or carrying
 # any SRH at all. Its own table in the inet family, so neutron's iptables-nft
