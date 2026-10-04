@@ -26,6 +26,7 @@ from openstack_dashboard.api import keystone
 from openstack_dashboard.test import helpers as test
 
 from srv6_dashboard.api import srv6 as srv6_api
+from srv6_dashboard.dashboards.admin.srv6.te_paths import tables as te_tables
 from srv6_dashboard.dashboards.admin.srv6.te_paths import tabs as te_tabs
 from srv6_dashboard.test import helpers
 
@@ -157,6 +158,46 @@ class CreateTePathTests(helpers.BaseAdminViewTests):
         ports = [c[0] for c in form.fields['destination_port_id'].choices
                  if c[0]]
         self.assertEqual([self._vm_port(net1.id).id], ports)
+
+    @test.create_mocks({srv6_api: ('domain_list', 'locator_list',
+                                   'port_list')})
+    def test_create_get_offers_any_source_then_each_host(self):
+        self._mock_choices()
+
+        res = self.client.get(CREATE_URL)
+
+        choices = res.context['form'].fields['source_host'].choices
+        # '' first: every ingress, the API's None.
+        self.assertEqual('', choices[0][0])
+        self.assertEqual(HOSTS, [c[0] for c in choices[1:]])
+
+    @test.create_mocks({srv6_api: ('domain_list', 'locator_list',
+                                   'port_list', 'te_path_create')})
+    def test_create_with_a_source_sends_it(self):
+        self._mock_choices()
+        self.mock_te_path_create.return_value = self.srv6_te_paths.first()
+        red = self.srv6_domains.first()
+
+        res = self._post(destination_host='ale-node3', source_host='ale',
+                         via_host_1='ale-XPS-15-9570')
+
+        self.assertNoFormErrors(res)
+        self.mock_te_path_create.assert_called_once_with(
+            test.IsHttpRequest(), domain_id=red.id,
+            destination_host='ale-node3', source_host='ale',
+            via_hosts=['ale-XPS-15-9570'])
+
+    @test.create_mocks({srv6_api: ('domain_list', 'locator_list',
+                                   'port_list', 'te_path_create')})
+    def test_create_source_as_destination_is_refused(self):
+        # Mirrors _validate_source_host: the path would steer nothing.
+        self._mock_choices()
+
+        res = self._post(destination_host='ale-node3',
+                         source_host='ale-node3')
+
+        self.assertFormErrors(res, 1)
+        self.mock_te_path_create.assert_not_called()
 
     @test.create_mocks({srv6_api: ('domain_list', 'locator_list',
                                    'port_list')})
@@ -377,6 +418,20 @@ class TePathDetailTests(helpers.BaseAdminViewTests):
 
         self.assertContains(res, 'has no registered SRv6 locator')
 
+    @test.create_mocks({srv6_api: ('te_path_get', 'domain_get')})
+    def test_detail_of_a_source_path(self):
+        path = self.srv6_te_path_from_source
+        self.mock_te_path_get.return_value = path
+        self.mock_domain_get.return_value = self.srv6_domains.first()
+
+        res = self.client.get(self._url(path))
+
+        self.assertContains(res, '<code>ale</code>')
+        self.assertContains(res, 'enters the domain at this host')
+        # The ingress's own SID is not in the segments, and the roles
+        # still line up: first the real waypoint.
+        self.assertContains(res, 'Waypoint ale-XPS-15-9570')
+
     @test.create_mocks({srv6_api: ('te_path_get',)})
     def test_detail_unknown_redirects(self):
         self.mock_te_path_get.side_effect = self.exceptions.neutron
@@ -406,3 +461,25 @@ class SegmentRolesTests(helpers.TestCase):
 
         self.assertEqual([''] * len(path.segments),
                          [r for __, r in roles])
+
+    def test_a_leading_source_waypoint_is_left_out(self):
+        # The server drops it from the segments (the ingress drops its
+        # own SID), so the roles skip it too.
+        path = self.srv6_te_path_from_source
+
+        roles = te_tabs.segment_roles(path)
+
+        self.assertEqual(path.segments, [s for s, __ in roles])
+        self.assertIn('ale-XPS-15-9570', str(roles[0][1]))
+        self.assertIn('End.DT46', str(roles[1][1]))
+
+
+class SourceColumnTests(helpers.TestCase):
+
+    def test_a_source_is_shown_as_code(self):
+        self.assertEqual('<code>ale</code>',
+                         str(te_tables.source(self.srv6_te_path_from_source)))
+
+    def test_no_source_reads_any(self):
+        self.assertEqual('any',
+                         str(te_tables.source(self.srv6_te_paths.first())))

@@ -27,7 +27,10 @@ lays out and draws what this returns, it decides nothing.
               host): where the domain's traffic enters and leaves.
     te_paths  each path as its hop list: the waypoints in order, then the
               destination host (for a port path, the host the port is
-              bound to, if any).
+              bound to, if any). A path limited to one ingress (source)
+              starts its hops at that host, minus leading waypoints equal
+              to it: the node drops its own SID, so the packet never
+              visits it twice (FEATURE-TE-SOURCE-HOST).
 """
 
 import collections
@@ -80,7 +83,14 @@ def build(locators, domains, ports, te_paths, path_url):
             dest = port_host.get(p.destination_port_id)
             label = 'port %s%s' % (p.destination_port_id[:8],
                                    ' on %s' % dest if dest else '')
-        hops = list(p.via_hosts or []) + ([dest] if dest else [])
+        via = list(p.via_hosts or [])
+        source = getattr(p, 'source_host', None)
+        start = []
+        if source:
+            start = [source]
+            while via and via[0] == source:
+                via.pop(0)
+        hops = start + via + ([dest] if dest else [])
         for host in hops:
             hosts.setdefault(host, {'host': host, 'locator': None,
                                     'updated_at': None})
@@ -89,6 +99,7 @@ def build(locators, domains, ports, te_paths, path_url):
             'domain_id': p.domain_id,
             'status': p.status,
             'via': list(p.via_hosts or []),
+            'source': source,
             'destination': label,
             'hops': hops,
             'segments': list(p.segments or []),

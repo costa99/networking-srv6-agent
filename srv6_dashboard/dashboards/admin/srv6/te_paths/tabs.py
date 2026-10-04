@@ -32,9 +32,16 @@ def segment_roles(path):
     is the host's End SID (<locator>:fff0::) in encap mode and its uN SID
     (the locator's own address) in usid mode; the dashboard cannot see
     the mode, so the role is worded for both.
+
+    For a path with a source host, the server leaves out leading waypoints
+    equal to the source (that node is the ingress and drops its own SID),
+    so those waypoints are left out here too before lining up.
     """
     segments = path.segments or []
-    via = path.via_hosts or []
+    via = list(path.via_hosts or [])
+    source = getattr(path, 'source_host', None)
+    while source and via and via[0] == source:
+        via.pop(0)
     if len(segments) != len(via) + 1:
         return [(s, '') for s in segments]
     roles = [_("Waypoint %s: forward to the next segment") % h
@@ -61,6 +68,7 @@ class OverviewTab(tabs.Tab):
             'path': path,
             'domain': te_tables.domain_link(path),
             'destination': te_tables.destination(path),
+            'source': te_tables.source(path),
             'via': srv6_common.via_hosts(path.via_hosts),
             'segments': segment_roles(path),
             'encoded': srv6_common.sid_list(path.encoded_segments),

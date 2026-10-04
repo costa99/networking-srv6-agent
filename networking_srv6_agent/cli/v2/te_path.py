@@ -16,8 +16,12 @@
 
 Admin-only. A path has no name, so it is addressed by ID. The via-host count
 and the host names are checked by the server, not here.
+
+--source-host limits a path to the traffic entering the domain at one node;
+such a path outranks every path without one (FEATURE-TE-SOURCE-HOST).
 """
 
+from cliff import columns as cliff_columns
 from osc_lib.command import command
 from osc_lib.utils import columns as column_util
 
@@ -31,6 +35,7 @@ _attr_map = (
     ('domain_id', 'Domain ID', column_util.LIST_BOTH),
     ('destination_host', 'Destination Host', column_util.LIST_BOTH),
     ('destination_port_id', 'Destination Port', column_util.LIST_BOTH),
+    ('source_host', 'Source Host', column_util.LIST_BOTH),
     ('via_hosts', 'Via Hosts', column_util.LIST_BOTH),
     ('status', 'Status', column_util.LIST_BOTH),
     ('segments', 'Segments', column_util.LIST_LONG_ONLY),
@@ -39,8 +44,26 @@ _attr_map = (
 )
 # Field name -> column header.
 _column_map = {attr: header for attr, header, _unused in _attr_map}
-# Show these lists as plain comma-separated text, keeping their order.
+
+
+class SourceHostColumn(cliff_columns.FormattableColumn):
+    """A path's source: None means every ingress, and says so.
+
+    An empty cell would read as "unknown"; machine-readable output keeps
+    the API's None.
+    """
+
+    def human_readable(self):
+        return self._value or _('any')
+
+    def machine_readable(self):
+        return self._value
+
+
+# Show these lists as plain comma-separated text, keeping their order,
+# and the source as "any" when the path has none.
 _formatters = {
+    'source_host': SourceHostColumn,
     'via_hosts': common.PathColumn,
     'segments': common.PathColumn,
     'encoded_segments': common.PathColumn,
@@ -85,6 +108,12 @@ class CreateTePath(command.ShowOne):
             metavar='<port>',
             help=_("Steer only the traffic toward this port's fixed IPs "
                    "(name or ID)"))
+        parser.add_argument(
+            '--source-host',
+            metavar='<host>',
+            help=_("Steer only the traffic that enters the domain at this "
+                   "host (the ingress node). Such a path outranks every path "
+                   "without a source. Default: every ingress"))
         _add_via_host_argument(
             parser, _("Waypoint host, in traversal order (repeat option "
                       "for more hosts). Without it the path is direct"))
@@ -102,6 +131,9 @@ class CreateTePath(command.ShowOne):
         else:
             attrs['destination_port_id'] = client.find_port(
                 parsed_args.destination_port, ignore_missing=False).id
+        # Only send a source if the user gave one: None is "any ingress".
+        if parsed_args.source_host is not None:
+            attrs['source_host'] = parsed_args.source_host
         # Only send waypoints if the user gave some.
         if parsed_args.via_hosts is not None:
             attrs['via_hosts'] = parsed_args.via_hosts
@@ -126,6 +158,17 @@ class ListTePath(command.Lister):
             '--destination-port',
             metavar='<port>',
             help=_("List only the path toward this port (name or ID)"))
+        # A source, or none at all: one or the other.
+        source = parser.add_mutually_exclusive_group()
+        source.add_argument(
+            '--source-host',
+            metavar='<host>',
+            help=_("List only the paths limited to this ingress host"))
+        source.add_argument(
+            '--any-source',
+            action='store_true',
+            help=_("List only the paths without a source host (they apply "
+                   "at every ingress)"))
         parser.add_argument(
             '--long',
             action='store_true',
@@ -144,6 +187,13 @@ class ListTePath(command.Lister):
         if parsed_args.destination_port is not None:
             filters['destination_port_id'] = client.find_port(
                 parsed_args.destination_port, ignore_missing=False).id
+        if parsed_args.source_host is not None:
+            filters['source_host'] = parsed_args.source_host
+        elif parsed_args.any_source:
+            # The server stores "any" as '' and matches it as a filter
+            # value (it needs neutron's empty-string-filtering, which ML2
+            # loads).
+            filters['source_host'] = ''
         # Get the matching paths and print them as a table.
         return common.list_columns(
             client._list(resources.Srv6TePath, **filters),

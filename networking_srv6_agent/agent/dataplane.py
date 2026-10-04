@@ -1216,12 +1216,33 @@ class Srv6LinuxDataplane:
     # ------------------------------------------------------------------
     # routes
     # ------------------------------------------------------------------
+    @staticmethod
+    def _segments_for(route, local_host):
+        """The transit SIDs this node, as the ingress, pushes for a route.
+
+        One payload fans out to every node, so a route carries the transit
+        list of each ingress that a source-specific TE path names
+        (`segments_by_source`, keyed by host) next to the list that holds
+        at every other ingress (`segments`). This node takes its own entry
+        when there is one, and `segments` otherwise. An entry that is an
+        empty list is an explicit "direct from this node": it must win over
+        `segments`, which is why membership is tested, not truth. All of
+        the precedence between paths is the server's (_attach_segments);
+        this is only the lookup of the answer it computed for this host.
+        """
+        by_source = route.get('segments_by_source') or {}
+        if local_host in by_source:
+            return by_source[local_host]
+        return route.get('segments')
+
     def _transit_segments(self, segments):
         """A route's transit SIDs, minus any leading transit SID of ours.
 
-        The payload fans out to every node, and the server cannot know
-        which one is the ingress. A path whose first waypoint is this node
-        would otherwise send each packet into our own End behaviour and
+        The payload fans out to every node, and the server does not know
+        which one will encapsulate a given packet: any-source segments are
+        pushed by every node, a source entry by the node it names, which
+        may also be its first waypoint. A path whose first waypoint is this
+        node would otherwise send each packet into our own End behaviour and
         back out -- correct, but a pointless trip through the stack. Only
         LEADING occurrences are dropped: this node appearing later in the
         list is a real waypoint. Compared as addresses, not strings. "Ours"
@@ -1249,9 +1270,10 @@ class Srv6LinuxDataplane:
 
         A route may carry `segments` -- transit End SIDs the server resolved
         from an operator's TE path (P6) -- which go before the remote decap
-        SID. A route without them is exactly the depth-1 route of the old
-        build. `mtus` maps network_id -> MTU, for the per-route check of a
-        steered route.
+        SID, and `segments_by_source`, the lists that hold only at the
+        ingress nodes it names (_segments_for). A route without either is
+        exactly the depth-1 route of the old build. `mtus` maps network_id
+        -> MTU, for the per-route check of a steered route.
 
         Also makes sure the domain's VRF may reach the first segment of
         every route (_ensure_sid_rules); only adds, like the routes.
@@ -1305,7 +1327,8 @@ class Srv6LinuxDataplane:
             prefix = route['prefix']
             wanted.add(_normalise_prefix(prefix))
             remote_sid = sid.format_sid(locator, state.function_id)
-            transit = self._transit_segments(route.get('segments'))
+            transit = self._transit_segments(
+                self._segments_for(route, local_host))
             segments, mode = self._encode(transit + [remote_sid], prefix)
             # The outer DA is the first PUSHED element: the decap SID, a
             # transit End SID, or in usid mode the first C-SID container --

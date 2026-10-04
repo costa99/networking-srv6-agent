@@ -109,7 +109,8 @@ class Srv6TePath(resource.Resource):
     allow_list = True
 
     _query_mapping = resource.QueryParameters(
-        'domain_id', 'destination_host', 'destination_port_id', 'project_id')
+        'domain_id', 'destination_host', 'destination_port_id', 'source_host',
+        'project_id')
 
     id = resource.Body('id')
     project_id = resource.Body('project_id', alias='tenant_id')
@@ -118,6 +119,9 @@ class Srv6TePath(resource.Resource):
     #: Exactly one of the two selectors is set; both are create-only.
     destination_host = resource.Body('destination_host')
     destination_port_id = resource.Body('destination_port_id')
+    #: The ingress node the path is limited to; None: every ingress.
+    #: Create-only.
+    source_host = resource.Body('source_host')
     #: Traversal order. An update replaces the whole list.
     via_hosts = resource.Body('via_hosts', type=list)
     #: What the server resolved on read: via End SIDs, then the decap SID.

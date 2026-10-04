@@ -30,6 +30,9 @@ The package installs an OpenStackClient plugin, so wherever it sits next to
     openstack srv6 locator list
     openstack srv6 te path create --domain red --destination-host node2 \
         --via-host node3
+    # only the traffic that enters the domain at node1
+    openstack srv6 te path create --domain red --destination-host node2 \
+        --source-host node1 --via-host node3
     openstack srv6 te path set <te-path> --no-via-host
 
 ``openstack command list --group openstack.srv6.v2`` lists all of them.

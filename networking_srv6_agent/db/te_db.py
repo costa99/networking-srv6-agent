@@ -17,7 +17,10 @@
 A path says "in this domain, traffic towards <selector> goes via these
 transit nodes, in this order". The selector is exactly one of a destination
 host -- all of the domain's traffic toward that node -- or a destination
-port -- one VM's addresses only (P6). The plugin turns
+port -- one VM's addresses only (P6). A path may also name a source
+host, the ingress node: it then applies only to the domain's traffic that
+enters at that node, and outranks every path without a source
+(FEATURE-TE-SOURCE-HOST). The plugin turns
 each path into the prefix of the segment list on the matching encapsulation
 routes; without a path, the segment list is just the destination's domain
 SID and the packet follows the underlay shortest path.
@@ -69,6 +72,15 @@ class SRv6TePath(model_base.BASEV2, model_base.HasId):
                                     sa.ForeignKey('ports.id',
                                                   ondelete='CASCADE'),
                                     nullable=True)
+    # The ingress node the path is limited to; '' means "any ingress", the
+    # meaning of every path created before this column existed. A sentinel
+    # rather than NULL because the column is part of both unique
+    # constraints below, and NULLs are distinct there: with NULL, two "any
+    # source" paths to one destination would both be accepted. The API
+    # shows '' as None (_make_te_path_dict). Not a foreign key: hosts are
+    # symbolic here, resolved against the locator registry on every use.
+    source_host = sa.Column(sa.String(255), nullable=False, default='',
+                            server_default='')
 
     # order_by is what makes a read return TRAVERSAL order rather than
     # whatever order the rows happen to come back in.
@@ -80,16 +92,20 @@ class SRv6TePath(model_base.BASEV2, model_base.HasId):
         backref=orm.backref('path'))
 
     __table_args__ = (
-        # One path per selector per domain. A second one would give two
-        # answers to "how do I reach this", and nothing downstream could
-        # choose between them. NULLs are distinct in a unique constraint,
-        # so host paths and port paths do not collide on the unset column.
+        # One path per (selector, source) per domain. A second one would
+        # give two answers to "how does this ingress reach this", and
+        # nothing downstream could choose between them. A source path and
+        # an any-source path ('') to the same destination are different
+        # rows on purpose: precedence chooses between them per ingress.
+        # NULLs are distinct in a unique constraint, so host paths and port
+        # paths do not collide on their unset destination column.
         sa.UniqueConstraint(
-            'domain_id', 'destination_host',
-            name='uniq_srv6_te_paths0domain_id0destination_host'),
+            'domain_id', 'destination_host', 'source_host',
+            name='uniq_srv6_te_paths0domain_id0destination_host0source_host'),
         sa.UniqueConstraint(
-            'domain_id', 'destination_port_id',
-            name='uniq_srv6_te_paths0domain_id0destination_port_id'),
+            'domain_id', 'destination_port_id', 'source_host',
+            name=('uniq_srv6_te_paths0domain_id0destination_port_id0'
+                  'source_host')),
         model_base.BASEV2.__table_args__,
     )
 
@@ -128,6 +144,8 @@ def _make_te_path_dict(path_db, fields=None):
         'domain_id': path_db.domain_id,
         'destination_host': path_db.destination_host,
         'destination_port_id': path_db.destination_port_id,
+        # The '' sentinel is a storage detail: the API says None.
+        'source_host': path_db.source_host or None,
         'via_hosts': [hop.via_host for hop in path_db.hops],
         'segments': [],
         'encoded_segments': [],
@@ -179,7 +197,10 @@ def create_te_path(context, domain_id, te_path):
         project_id=te_path['project_id'],
         domain_id=domain_id,
         destination_host=te_path.get('destination_host'),
-        destination_port_id=te_path.get('destination_port_id'))
+        destination_port_id=te_path.get('destination_port_id'),
+        # Set explicitly, not left to the column default: the dict below
+        # reads it, and an unset attribute would be expired and re-read.
+        source_host=te_path.get('source_host') or '')
     context.session.add(path_db)
     context.session.flush()
     _set_hops(context, path_db, te_path.get('via_hosts'))
@@ -195,8 +216,11 @@ def get_te_path(context, path_id, domain_id=None, fields=None):
     return _make_te_path_dict(path_db, fields)
 
 
+# A source_host filter of [''] selects the any-source paths: the sentinel is
+# what is stored, and neutron passes an empty filter value through only
+# with its empty-string-filtering extension (loaded by ML2).
 _FILTERS = ('id', 'domain_id', 'destination_host', 'destination_port_id',
-            'project_id')
+            'source_host', 'project_id')
 
 
 def _filtered(query, filters):
@@ -214,6 +238,7 @@ def get_te_paths(context, domain_id, filters=None, fields=None):
         filters)
     return [_make_te_path_dict(path_db, fields)
             for path_db in query.order_by(SRv6TePath.destination_host,
+                                          SRv6TePath.source_host,
                                           SRv6TePath.id).all()]
 
 
@@ -255,38 +280,33 @@ def delete_te_path(context, path_id, domain_id=None):
 
 @db_api.CONTEXT_READER
 def get_te_paths_for_domain(context, domain_id):
-    """Both selector maps for one domain.
+    """Every path of one domain, as the selector maps precedence reads.
 
         {'by_port': {port_id: [via_host, ...]},
-         'by_host': {destination_host: [via_host, ...]}}
+         'by_host': {destination_host: [via_host, ...]},
+         'by_source': {source_host: {'by_port': {...}, 'by_host': {...}}}}
 
-    One query per payload build, rather than one per route: a domain with
-    200 ports would otherwise issue 200 identical lookups. The two maps are
-    kept apart because precedence (port path > host path) is decided per
-    route by the caller, which is the only one that knows both keys.
+    by_port and by_host hold the any-source paths, by_source the paths
+    limited to one ingress node, under that node. One query per payload
+    build, rather than one per route: a domain with 200 ports would
+    otherwise issue 200 identical lookups. The maps are kept apart because
+    precedence ((port, source) > (host, source) > port > host) is decided
+    per route by the caller, which is the only one that knows the keys.
+
+    The source is read FIRST: a source path filed under the any-source
+    maps would overwrite (or be overwritten by) the any-source path to the
+    same destination, depending only on row order.
     """
-    res = {'by_port': {}, 'by_host': {}}
+    res = {'by_port': {}, 'by_host': {}, 'by_source': {}}
     for path_db in context.session.query(SRv6TePath).filter_by(
             domain_id=domain_id).all():
         via_hosts = [hop.via_host for hop in path_db.hops]
+        maps = res
+        if path_db.source_host:
+            maps = res['by_source'].setdefault(
+                path_db.source_host, {'by_port': {}, 'by_host': {}})
         if path_db.destination_port_id:
-            res['by_port'][path_db.destination_port_id] = via_hosts
+            maps['by_port'][path_db.destination_port_id] = via_hosts
         elif path_db.destination_host:
-            res['by_host'][path_db.destination_host] = via_hosts
+            maps['by_host'][path_db.destination_host] = via_hosts
     return res
-
-
-@db_api.CONTEXT_READER
-def get_via_hosts(context, domain_id, destination_host):
-    """The transits of one host path, or [] if no such path is defined.
-
-    [] is returned both when no path exists and when a path exists with an
-    empty via list -- deliberately, because the two mean the same thing to
-    the dataplane: no transit SIDs, shortest path. Port paths are not
-    consulted; get_te_paths_for_domain is the lookup that knows both.
-    """
-    path_db = context.session.query(SRv6TePath).filter_by(
-        domain_id=domain_id, destination_host=destination_host).one_or_none()
-    if path_db is None:
-        return []
-    return [hop.via_host for hop in path_db.hops]

@@ -7,7 +7,8 @@
  *   - hosts sit on a circle, in the API's (sorted) order;
  *   - each domain present on a host is a coloured badge under it, with
  *     its VM count;
- *   - each TE path is a line from its first waypoint, hop by hop, to its
+ *   - each TE path is a line from its first waypoint (or from its source
+ *     host, for a path limited to one ingress), hop by hop, to its
  *     destination, green when ACTIVE and dashed amber when DEGRADED;
  *     paths sharing a hop are drawn side by side, not on top of each
  *     other;
@@ -190,7 +191,8 @@
              {style: 'color: ' + (domainColor[path.domain_id] || '#777')});
       htmlEl('span', domainName[path.domain_id] || path.domain_id, td);
       var route = htmlEl('td', null, tr);
-      var text = (path.via.length ? 'via ' + path.via.join(' → ') +
+      var text = (path.source ? 'from ' + path.source + ' ' : '') +
+                 (path.via.length ? 'via ' + path.via.join(' → ') +
                   ' to ' : 'direct to ') + path.destination;
       htmlEl('a', text, route, {href: path.url});
       htmlEl('td', path.status, tr);

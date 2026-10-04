@@ -109,6 +109,7 @@ def data(TEST):
         'domain_id': domain_red['id'],
         'destination_host': 'ale-node3',
         'destination_port_id': None,
+        'source_host': None,
         'via_hosts': ['ale-XPS-15-9570'],
         'segments': ['fc00:0:2::', 'fc00:0:3:e000::'],
         'encoded_segments': ['fc00:0:2:3:e000::'],
@@ -121,6 +122,7 @@ def data(TEST):
         'domain_id': domain_red['id'],
         'destination_host': None,
         'destination_port_id': TEST.ports.first().id,
+        'source_host': None,
         'via_hosts': ['gone-host'],
         'segments': [],
         'encoded_segments': [],
@@ -129,6 +131,14 @@ def data(TEST):
     for p in (path_via_node2, path_degraded):
         _add(TEST.api_srv6_te_paths, TEST.srv6_te_paths,
              resources.Srv6TePath, srv6.TePath, p)
+    # Not in the container (its tests count two paths): a path limited to
+    # the ingress ale, whose first waypoint is ale itself -- the server
+    # leaves that SID out of the segments (FEATURE-TE-SOURCE-HOST).
+    TEST.srv6_te_path_from_source = srv6.TePath(dict(
+        path_via_node2, id='c3d4e5f6-0a1b-4c2d-8e3f-4a5b6c7d8e03',
+        source_host='ale', via_hosts=['ale', 'ale-XPS-15-9570'],
+        segments=['fc00:0:2::', 'fc00:0:3:e000::'],
+        encoded_segments=['fc00:0:2:3:e000::']))
 
 
 def _container():

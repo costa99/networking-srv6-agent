@@ -24,9 +24,19 @@ A path picks its traffic with exactly one selector:
     destination_host      all of the domain's traffic toward that node
     destination_port_id   traffic toward one VM, that port's fixed IPs only
 
-and steers it through via_hosts, in traversal order. Precedence per route is
-port path > host path > direct. "Exactly one" is enforced by the plugin, not
-here and not by a CHECK constraint.
+and steers it through via_hosts, in traversal order. "Exactly one" is
+enforced by the plugin, not here and not by a CHECK constraint.
+
+It may also name source_host, the ingress node: the path then applies only
+to the domain's traffic that enters the SRv6 domain at that node (is
+encapsulated there). Without it the path applies at every ingress. Per route
+and per ingress, the first of these that exists wins:
+
+    destination port + this source    >  destination host + this source
+    >  destination port, any source   >  destination host, any source
+    >  direct
+
+so a source path outranks every path without one (FEATURE-TE-SOURCE-HOST).
 
 `segments` and `status` are what the SERVER resolved when the path was read,
 not an acknowledgement from any agent.
@@ -42,7 +52,7 @@ NAME = 'SRv6 traffic engineering'
 ALIAS = 'srv6-te'
 DESCRIPTION = ("Admin-only SRv6 paths that steer a domain's traffic toward a "
                "compute node, or a single port, through explicit waypoints")
-UPDATED_TIMESTAMP = '2026-09-10T00:00:00-00:00'
+UPDATED_TIMESTAMP = '2026-10-04T00:00:00-00:00'
 API_PREFIX = ''
 IS_SHIM_EXTENSION = False
 IS_STANDARD_ATTR_EXTENSION = False
@@ -53,6 +63,7 @@ COLLECTION_NAME = 'srv6_te_paths'
 DOMAIN_ID = 'domain_id'
 DESTINATION_HOST = 'destination_host'
 DESTINATION_PORT_ID = 'destination_port_id'
+SOURCE_HOST = 'source_host'
 VIA_HOSTS = 'via_hosts'
 SEGMENTS = 'segments'
 ENCODED_SEGMENTS = 'encoded_segments'
@@ -102,6 +113,15 @@ RESOURCE_ATTRIBUTE_MAP = {
                               'is_visible': True,
                               'is_filter': True,
                               'enforce_policy': True},
+        # The ingress the path is limited to; None: every ingress. Create-only
+        # like the selectors, for the same reason.
+        SOURCE_HOST: {'allow_post': True, 'allow_put': False,
+                      'default': None,
+                      'validate': {
+                          'type:string_or_none': HOST_FIELD_SIZE},
+                      'is_visible': True,
+                      'is_filter': True,
+                      'enforce_policy': True},
         # PUT REPLACES the list: re-steering without a delete/create window.
         # [] means "explicitly direct".
         VIA_HOSTS: {'allow_post': True, 'allow_put': True,
@@ -112,7 +132,9 @@ RESOURCE_ATTRIBUTE_MAP = {
                     'is_visible': True,
                     'enforce_policy': True},
         # [<via End SIDs>..., <destination decap SID>], or [] when the path
-        # is not in effect.
+        # is not in effect. For a path with a source_host, without leading
+        # SIDs of that node: it is the ingress, and drops them (the agent's
+        # _transit_segments).
         SEGMENTS: {'allow_post': False, 'allow_put': False,
                    'is_visible': True,
                    'enforce_policy': True},

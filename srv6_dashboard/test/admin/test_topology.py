@@ -118,6 +118,19 @@ class BuildTests(helpers.TestCase):
         self.assertEqual('port %s' % path.destination_port_id[:8],
                          data['te_paths'][0]['destination'])
 
+    def test_a_source_path_starts_at_its_source(self):
+        # Limited to the ingress ale, first waypoint ale itself: the hops
+        # start at ale once, then the real waypoint, then the destination.
+        data = self._build(paths=[self.srv6_te_path_from_source])
+
+        path = data['te_paths'][0]
+        self.assertEqual('ale', path['source'])
+        self.assertEqual(['ale', 'ale-XPS-15-9570', 'ale-node3'],
+                         path['hops'])
+
+    def test_an_any_source_path_has_no_source(self):
+        self.assertIsNone(self._build()['te_paths'][0]['source'])
+
     def test_is_json_serialisable(self):
         json.dumps(self._build())
 

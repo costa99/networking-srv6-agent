@@ -20,6 +20,9 @@ resolves names against. Waypoints are MAX_TE_VIA_HOSTS ordered choice
 fields -- the server's own limit -- because a waypoint list is ordered and
 a multi-select is not.
 
+The source host is optional: empty means every ingress, as the API's None
+(FEATURE-TE-SOURCE-HOST).
+
 Each clean() rule names the server check it mirrors. The server stays the
 authority: whatever passes here is still validated there, and its refusal
 is shown as is.
@@ -90,6 +93,10 @@ class CreateTePathForm(ViaHostsMixin, forms.SelfHandlingForm):
             'class': 'switched', 'data-switch-on': 'desttype',
             'data-desttype-port': _("Destination port"),
             'data-required-when-shown': 'true'}))
+    source_host = forms.ThemableChoiceField(
+        label=_("Source host"), required=False,
+        help_text=_("Steer only the traffic that enters the domain at this "
+                    "host. Such a path outranks every path without one."))
 
     def __init__(self, request, *args, **kwargs):
         super().__init__(request, *args, **kwargs)
@@ -106,6 +113,8 @@ class CreateTePathForm(ViaHostsMixin, forms.SelfHandlingForm):
             sorted(domains, key=lambda d: d.name_or_id)]
         self.fields['destination_host'].choices = (
             [('', _("Select a host"))] + [(h, h) for h in hosts])
+        self.fields['source_host'].choices = (
+            [('', _("Any node (every ingress)"))] + [(h, h) for h in hosts])
         # port id -> network id, for clean(): see _domain_ports.
         self._port_network = {p.id: p.network_id for p, __ in ports}
         self._domain_networks = {d.id: set(d.networks) for d in domains}
@@ -164,11 +173,23 @@ class CreateTePathForm(ViaHostsMixin, forms.SelfHandlingForm):
                 self.add_error('destination_port_id',
                                _("This port is not on a network of the "
                                  "selected domain."))
+        # Mirrors _validate_source_host: a node never encapsulates the
+        # traffic toward its own VMs, so a path from the destination host
+        # would steer nothing. (A port bound on the source is the server's
+        # check: the form does not read bindings.)
+        source = cleaned.get('source_host')
+        if (dtype == 'host' and source and
+                source == cleaned.get('destination_host')):
+            self.add_error('source_host',
+                           _("The source cannot be the destination host."))
         cleaned['via_hosts'] = self._clean_via_hosts(cleaned)
         return cleaned
 
     def handle(self, request, data):
         attrs = {'domain_id': data['domain_id']}
+        # As the CLI does: a source only when one is chosen.
+        if data.get('source_host'):
+            attrs['source_host'] = data['source_host']
         if data['destination_host']:
             attrs['destination_host'] = data['destination_host']
         else:

@@ -676,38 +676,98 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                                constants.NODE_END_FUNCTION_ID)
                 for host in via_hosts]
 
+    def _route_transit(self, domain_id, route, by_port, by_host, locators,
+                       source=None):
+        """The transit SIDs one set of paths gives a route, or None.
+
+        by_port and by_host are the paths of one rank pair: the any-source
+        paths, or the paths of one source. Port path > host path, and a
+        port path with no vias is an explicit "direct" that still wins
+        over a host path.
+
+            None   no path of this set applies to the route
+            []     a path applies and says direct: no vias, or DEGRADED (a
+                   via host, or the source, has no registered locator).
+                   Degraded is direct, not "fall through to the next path
+                   down", which the admin did not ask for either.
+            [...]  the transit SIDs, in traversal order
+        """
+        via_hosts = by_port.get(route.get('port_id'))
+        if via_hosts is None:
+            via_hosts = by_host.get(route.get('host'))
+        if via_hosts is None:
+            return None
+        if not via_hosts:
+            return []
+        transit = None
+        if source is None or locators.get(source):
+            transit = self._transit_sids(via_hosts, locators)
+        if transit is None:
+            LOG.warning("SRv6 domain %(d)s: the TE path toward %(p)s%(s)s "
+                        "names a host with no registered locator (via "
+                        "%(v)s); routing it directly",
+                        {'d': domain_id, 'p': route['prefix'],
+                         's': ' from %s' % source if source else '',
+                         'v': ', '.join(via_hosts)})
+            return []
+        return transit
+
     def _attach_segments(self, admin_context, domain_id, routes, locators):
         """Give each steered route its transit SIDs. Mutates `routes`.
 
-        Precedence per route: port path > host path > direct. A port path
-        with no vias is an explicit "direct", and still wins over a host
-        path. A DEGRADED path contributes nothing, so its routes fall back
-        to the DIRECT route -- not to the next path down, which the admin
-        did not ask for either.
+        One payload goes to every node, so a route carries the answer for
+        every ingress at once:
+
+            segments             the any-source answer: what every ingress
+                                 pushes unless it has an entry below
+            segments_by_source   {source host: transit SIDs}, one entry per
+                                 source whose paths apply to the route;
+                                 the agent of that host uses it instead
+
+        Precedence per route and ingress, highest first (FEATURE-TE-SOURCE-
+        HOST, user decision U1):
+
+            (port, source) > (host, source) > (port, any) > (host, any)
+            > direct
+
+        The two source ranks live in segments_by_source, the two any-source
+        ranks in segments; the agent's choice of its own entry over
+        `segments` is what puts every source path above every any-source
+        path. An entry may be [] -- an explicit or degraded "direct from
+        this source" -- and must still be sent, or that ingress would fall
+        back to `segments`.
+
+        A source that is the route's own host gets no entry: that node never
+        encapsulates its own VMs' traffic (the agent skips the route). Both
+        keys are added only when non-empty, so a route nothing steers stays
+        byte-for-byte the P5 route.
 
         Transit SIDs only: the agent appends the decap SID, from the locator
-        of the route's host, as it always has. A route with no path carries
-        no `segments` key at all, which keeps it byte-for-byte the P5 route.
+        of the route's host, as it always has.
         """
         paths = te_db.get_te_paths_for_domain(admin_context, domain_id)
         by_port, by_host = paths['by_port'], paths['by_host']
-        if not by_port and not by_host:
+        by_source = paths.get('by_source') or {}
+        # by_source too: a domain whose only paths name a source must not
+        # leave here unsteered.
+        if not by_port and not by_host and not by_source:
             return routes
         for route in routes:
-            via_hosts = by_port.get(route.get('port_id'))
-            if via_hosts is None:
-                via_hosts = by_host.get(route.get('host'))
-            if not via_hosts:
-                continue
-            transit = self._transit_sids(via_hosts, locators)
-            if transit is None:
-                LOG.warning("SRv6 domain %(d)s: the TE path toward %(p)s "
-                            "names a via host with no registered locator "
-                            "(%(v)s); routing it directly",
-                            {'d': domain_id, 'p': route['prefix'],
-                             'v': ', '.join(via_hosts)})
-                continue
-            route['segments'] = transit
+            transit = self._route_transit(domain_id, route, by_port, by_host,
+                                          locators)
+            if transit:
+                route['segments'] = transit
+            per_source = {}
+            for source in sorted(by_source):
+                if source == route.get('host'):
+                    continue
+                transit = self._route_transit(
+                    domain_id, route, by_source[source]['by_port'],
+                    by_source[source]['by_host'], locators, source=source)
+                if transit is not None:
+                    per_source[source] = transit
+            if per_source:
+                route['segments_by_source'] = per_source
         return routes
 
     def _destination_of(self, admin_context, path):
@@ -721,12 +781,35 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             return None
         return port.get(portbindings.HOST_ID) or None
 
+    @staticmethod
+    def _drop_leading(transit, own_sid):
+        """transit without its leading occurrences of own_sid.
+
+        The server-side twin of the agent's _transit_segments, for a path
+        with a source: that node is the ingress, and a first waypoint equal
+        to itself is dropped before the push. Compared as addresses.
+        """
+        own = ipaddress.IPv6Address(own_sid)
+        transit = list(transit)
+        while transit and ipaddress.IPv6Address(transit[0]) == own:
+            transit.pop(0)
+        return transit
+
     def _resolve_te_path(self, context, path, locators, function_id):
         """Attach `segments` and `status` -- what the server resolved.
 
         ACTIVE:   [<via End SIDs>..., <destination decap SID>]
         DEGRADED: [], because a via host or the destination has no locator,
                   or the port is unbound; the routes go direct meanwhile.
+                  For a path with a source_host, also when the source has
+                  no locator, or the destination is the source itself (a
+                  port path whose VM has moved onto it): its agent never
+                  encapsulates traffic to its own VMs, so the path steers
+                  nothing.
+
+        For a path with a source_host the source is the only ingress, so
+        `segments` leaves out leading SIDs of that node, exactly as its
+        agent drops them: the list shown is the list pushed.
 
         `encoded_segments` is what the ingress will actually push: the
         same list with full SIDs, the C-SID containers in usid mode --
@@ -737,10 +820,17 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         payload carries this list, not that any kernel holds it.
         """
         path = dict(path)
+        source = path.get(te_def.SOURCE_HOST)
         destination = self._destination_of(context.elevated(), path)
         transit = self._transit_sids(path[te_def.VIA_HOSTS], locators)
-        if (destination and locators.get(destination) and
-                transit is not None and function_id is not None):
+        active = bool(destination and locators.get(destination) and
+                      transit is not None and function_id is not None)
+        if active and source:
+            active = bool(locators.get(source)) and destination != source
+        if active:
+            own = self._transit_sids([source], locators) if source else None
+            if own:
+                transit = self._drop_leading(transit, own[0])
             segments = transit + [
                 sid.format_sid(locators[destination], function_id)]
             path[te_def.SEGMENTS] = segments
@@ -748,9 +838,11 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             path[te_def.STATUS] = te_def.STATUS_ACTIVE
             return path
         LOG.warning("SRv6 TE path %(id)s is DEGRADED: destination %(dst)s, "
-                    "via %(via)s; not every host on it has a registered "
-                    "locator (or the port is unbound), so its routes go "
+                    "source %(src)s, via %(via)s; not every host on it has "
+                    "a registered locator, the port is unbound, or the "
+                    "destination is the source itself, so its routes go "
                     "direct", {'id': path['id'], 'dst': destination,
+                               'src': source or 'any',
                                'via': path[te_def.VIA_HOSTS]})
         path[te_def.SEGMENTS] = []
         path[te_def.ENCODED_SEGMENTS] = []
@@ -788,6 +880,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                          "GET /v2.0/srv6_locators)") % ', '.join(unknown))
 
     def _validate_destination_port(self, admin_context, domain, port_id):
+        """The port, if it may be a destination of this domain; else 400."""
         try:
             port = self._core_plugin().get_port(admin_context, port_id)
         except n_exc.PortNotFound:
@@ -799,6 +892,34 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                          "attached to SRv6 domain %(d)s")
                 % {'p': port_id, 'n': port['network_id'],
                    'd': domain['id']})
+        return port
+
+    @staticmethod
+    def _validate_source_host(source, locators, host, port):
+        """A 400 for a source that could never steer anything.
+
+        The source must be an SRv6 node: its agent is the one that would
+        push the path. And it must not be the destination: a node never
+        encapsulates traffic toward its own VMs, so such a path would be
+        accepted and do nothing. For a port path that is checked against
+        the port's binding NOW; a later migration onto the source makes the
+        path inert, and _resolve_te_path then reports it DEGRADED.
+        """
+        if source not in locators:
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("source_host %s has no registered SRv6 locator "
+                         "(see GET /v2.0/srv6_locators)") % source)
+        if host and host == source:
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("source_host and destination_host are both %s: a "
+                         "node never encapsulates the traffic toward its own "
+                         "VMs, so the path would steer nothing") % source)
+        if port and port.get(portbindings.HOST_ID) == source:
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("port %(p)s is bound on the source_host %(s)s: a "
+                         "node never encapsulates the traffic toward its own "
+                         "VMs, so the path would steer nothing")
+                % {'p': port['id'], 's': source})
 
     def create_srv6_te_path(self, context, srv6_te_path):
         body = srv6_te_path[te_def.RESOURCE_NAME]
@@ -819,8 +940,15 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             raise te_ext.Srv6TePathInvalid(
                 reason=_("destination_host %s has no registered SRv6 "
                          "locator (see GET /v2.0/srv6_locators)") % host)
+        port = None
         if port_id:
-            self._validate_destination_port(admin_context, domain, port_id)
+            port = self._validate_destination_port(admin_context, domain,
+                                                   port_id)
+        # '' is "any ingress" too: string_or_none lets it through, and it
+        # is what the column stores for that.
+        source = body.get(te_def.SOURCE_HOST) or None
+        if source:
+            self._validate_source_host(source, locators, host, port)
         # via == destination is accepted on purpose: a harmless detour, and
         # on two nodes the only depth-2 SRH there is (TE-DEPTH2).
         via_hosts = body.get(te_def.VIA_HOSTS) or []
@@ -829,8 +957,10 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         # Forced, never the caller's, as for associations: the path belongs
         # with the domain it steers.
         body = dict(body, project_id=domain['project_id'],
-                    via_hosts=via_hosts)
+                    via_hosts=via_hosts, source_host=source)
         selector = ('port %s' % port_id) if port_id else ('host %s' % host)
+        if source:
+            selector += ' from %s' % source
         try:
             path = te_db.create_te_path(context, domain_id, body)
         except db_exc.DBDuplicateEntry:

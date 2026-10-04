@@ -10,15 +10,25 @@
     <dd>{{ path.project_id }}</dd>
     <dt>{% trans "Destination" %}</dt>
     <dd>{{ destination }}</dd>
+    <dt>{% trans "Source" %}</dt>
+    <dd>{{ source }}
+      {% if path.source_host %}
+      <p class="help-block">{% blocktrans trimmed %}
+        Only the traffic that enters the domain at this host is steered; this
+        path outranks every path without a source.
+      {% endblocktrans %}</p>
+      {% endif %}
+    </dd>
     <dt>{% trans "Via" %}</dt>
     <dd>{{ via }}</dd>
     <dt>{% trans "Status" %}</dt>
     <dd>{{ status }}
       {% if path.status == 'DEGRADED' %}
       <p class="help-block">{% blocktrans trimmed %}
-        A waypoint or the destination has no registered SRv6 locator, or the
-        destination port is unbound. Until that is fixed the domain's
-        traffic toward this destination goes direct.
+        A waypoint, the destination or the source has no registered SRv6
+        locator, the destination port is unbound, or it is now on the source
+        host itself. Until that is fixed the traffic this path selects goes
+        direct.
       {% endblocktrans %}</p>
       {% endif %}
     </dd>

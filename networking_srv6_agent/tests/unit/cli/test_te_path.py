@@ -28,7 +28,8 @@ SEGMENTS = ['fc00:0:2:fff0::', 'fc00:0:2:7::']
 def _path(**attrs):
     body = {'id': base.TE_PATH_ID, 'project_id': base.PROJECT_ID,
             'domain_id': base.DOMAIN_ID, 'destination_host': None,
-            'destination_port_id': base.PORT_ID, 'via_hosts': ['node2'],
+            'destination_port_id': base.PORT_ID, 'source_host': None,
+            'via_hosts': ['node2'],
             'segments': SEGMENTS, 'encoded_segments': SEGMENTS,
             'status': 'ACTIVE'}
     body.update(attrs)
@@ -76,6 +77,7 @@ class TestCreateTePath(_Base):
             'Domain ID': base.DOMAIN_ID,
             'Destination Host': None,
             'Destination Port': base.PORT_ID,
+            'Source Host': te_path.SourceHostColumn(None),
             'Via Hosts': common.PathColumn(['node2']),
             'Status': 'ACTIVE',
             'Segments': common.PathColumn(SEGMENTS),
@@ -89,6 +91,15 @@ class TestCreateTePath(_Base):
         self.network.find_port.assert_not_called()
         self.network._create.assert_called_once_with(
             TE, domain_id=base.DOMAIN_ID, destination_host='node2')
+
+    def test_source_host_is_sent(self):
+        self.run_cmd(self.cmd, ['--domain', 'red',
+                                '--destination-host', 'node3',
+                                '--source-host', 'node1',
+                                '--via-host', 'node2'])
+        self.network._create.assert_called_once_with(
+            TE, domain_id=base.DOMAIN_ID, destination_host='node3',
+            source_host='node1', via_hosts=['node2'])
 
     def test_both_selectors(self):
         self.assertParserFails(self.cmd, [
@@ -113,10 +124,12 @@ class TestListTePath(_Base):
         headers, rows = self.run_cmd(self.cmd, [])
         self.network._list.assert_called_once_with(TE)
         self.assertEqual(('ID', 'Domain ID', 'Destination Host',
-                          'Destination Port', 'Via Hosts', 'Status'),
+                          'Destination Port', 'Source Host', 'Via Hosts',
+                          'Status'),
                          headers)
         self.assertEqual(
             [(base.TE_PATH_ID, base.DOMAIN_ID, None, base.PORT_ID,
+              te_path.SourceHostColumn(None),
               common.PathColumn(['node2']), 'ACTIVE')],
             list(rows))
 
@@ -129,6 +142,30 @@ class TestListTePath(_Base):
             destination_port_id=base.PORT_ID)
         self.assertEqual(('Segments', 'Encoded Segments', 'Project'),
                          headers[-3:])
+
+    def test_by_source_host(self):
+        self.run_cmd(self.cmd, ['--source-host', 'node1'])
+        self.network._list.assert_called_once_with(TE, source_host='node1')
+
+    def test_any_source_sends_the_empty_value(self):
+        self.run_cmd(self.cmd, ['--any-source'])
+        self.network._list.assert_called_once_with(TE, source_host='')
+
+    def test_a_source_and_any_source_exclude_each_other(self):
+        self.assertParserFails(self.cmd, ['--source-host', 'node1',
+                                          '--any-source'])
+
+
+class TestSourceHostColumn(base.TestCommand):
+
+    def test_none_reads_any_for_people_and_none_for_machines(self):
+        self.assertEqual('any',
+                         te_path.SourceHostColumn(None).human_readable())
+        self.assertIsNone(te_path.SourceHostColumn(None).machine_readable())
+
+    def test_a_host_is_itself(self):
+        self.assertEqual('node1',
+                         te_path.SourceHostColumn('node1').human_readable())
 
 
 class TestShowTePath(_Base):

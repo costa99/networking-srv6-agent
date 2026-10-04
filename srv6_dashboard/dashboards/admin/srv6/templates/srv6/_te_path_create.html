@@ -15,6 +15,13 @@
     hosts with a registered SRv6 locator are offered.
   {% endblocktrans %}</p>
   <p>{% blocktrans trimmed %}
+    A source host limits the path to the traffic that enters the domain at
+    that node; the other nodes ignore it. A path with a source outranks
+    every path without one: per destination and node, a port path from the
+    source, then a host path from the source, then a port path, then a host
+    path, then direct.
+  {% endblocktrans %}</p>
+  <p>{% blocktrans trimmed %}
     Without waypoints the path is direct, as if there were none: useful to
     pin a VM's traffic to the direct route while a host path exists.
   {% endblocktrans %}</p>

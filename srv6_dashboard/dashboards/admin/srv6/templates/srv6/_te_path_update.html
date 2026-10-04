@@ -8,8 +8,14 @@
     in one update: there is no moment without a path. Clear them all to
     make the path direct.
   {% endblocktrans %}</p>
+  {% if path.source_host %}
+  <p>{% blocktrans trimmed with source=path.source_host %}
+    This path steers only the traffic that enters the domain at
+    <strong>{{ source }}</strong>.
+  {% endblocktrans %}</p>
+  {% endif %}
   <p>{% blocktrans trimmed %}
-    The domain and the destination cannot change; delete the path and
-    create another for that.
+    The domain, the destination and the source cannot change; delete the
+    path and create another for that.
   {% endblocktrans %}</p>
 {% endblock %}

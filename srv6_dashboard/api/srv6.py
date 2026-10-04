@@ -232,7 +232,8 @@ def locator_get(request, host):
 def te_path_list(request, **filters):
     """GET /v2.0/srv6_te_paths -- policy get_srv6_te_path (admin).
 
-    filters: domain_id, destination_host, destination_port_id. segments,
+    filters: domain_id, destination_host, destination_port_id, source_host
+    ('' for the paths without a source). segments,
     encoded_segments and status are resolved by the server on every read.
     """
     LOG.debug("te_path_list(): filters=%s", filters)
@@ -251,8 +252,8 @@ def te_path_create(request, **attrs):
     """POST /v2.0/srv6_te_paths -- policy create_srv6_te_path (admin).
 
     attrs: domain_id, exactly one of destination_host and
-    destination_port_id, and optionally via_hosts. The plugin forces the
-    path's project to the domain's.
+    destination_port_id, and optionally source_host and via_hosts. The
+    plugin forces the path's project to the domain's.
     """
     LOG.debug("te_path_create(): attrs=%s", attrs)
     path = networkclient(request)._create(resources.Srv6TePath, **attrs)

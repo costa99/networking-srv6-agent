@@ -58,8 +58,8 @@ class UpdateTePath(tables.LinkAction):
 
 
 class DeleteTePath(tables.DeleteAction):
-    help_text = _("The domain's traffic toward this destination goes "
-                  "direct again, on every node.")
+    help_text = _("The traffic this path steers then follows the next path "
+                  "that applies to it, or goes direct.")
 
     @staticmethod
     def action_present(count):
@@ -85,6 +85,13 @@ def destination(path):
     return '-'
 
 
+def source(path):
+    """The ingress the path is limited to, or "any" (every ingress)."""
+    if getattr(path, 'source_host', None):
+        return html.format_html('<code>{}</code>', path.source_host)
+    return _("any")
+
+
 def domain_link(path):
     return html.format_html(
         '<a href="{}">{}</a>',
@@ -98,6 +105,7 @@ class TePathsTable(tables.DataTable):
                        truncate=13)
     domain = tables.Column(domain_link, verbose_name=_("Domain"))
     destination = tables.Column(destination, verbose_name=_("Destination"))
+    source = tables.Column(source, verbose_name=_("Source"))
     via_hosts = tables.Column('via_hosts', verbose_name=_("Via"),
                               filters=(srv6_common.via_hosts,))
     segments = tables.Column('segments', verbose_name=_("Segments"),
@@ -116,7 +124,11 @@ class TePathsTable(tables.DataTable):
         hidden_title = False
 
     def get_object_display(self, path):
-        # What the delete confirmation names: where the path goes.
-        return '%s → %s' % (
+        # What the delete confirmation names: where the path goes, and
+        # from where when it is limited to one ingress.
+        text = '%s → %s' % (
             getattr(path, 'domain_name', None) or path.domain_id,
             path.destination_host or path.destination_port_id)
+        if getattr(path, 'source_host', None):
+            text += ' (%s)' % (_("from %s") % path.source_host)
+        return text

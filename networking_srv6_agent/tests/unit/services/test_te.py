@@ -301,6 +301,68 @@ class TestTePathTenantView(TeRestTestCase):
                                     as_admin=True)['via_hosts'])
 
 
+class TestTeSourceApi(TeRestTestCase):
+    """source_host over REST: stored, shown, validated, unique per source.
+
+    Listing is left to the unit cases: the list endpoint answers 500 in
+    this harness (a known, pre-existing failure of every REST list test).
+    """
+
+    def setUp(self):
+        super().setUp()
+        srv6_db.set_host_locator(self.admin_ctx, 'node3', LOC3,
+                                 datetime.datetime.now(datetime.timezone.utc))
+
+    def test_a_path_without_a_source_shows_none(self):
+        self.assertIsNone(self._host_path()['source_host'])
+
+    def test_a_source_path_shows_its_source(self):
+        path = self._host_path(source_host='node3', via_hosts=['node1'])
+        self.assertEqual('node3', path['source_host'])
+        self.assertEqual('node3', self._show(path['id'],
+                                             as_admin=True)['source_host'])
+
+    def test_its_own_leading_sid_is_not_shown(self):
+        # node1 is the ingress and its first waypoint: its agent drops the
+        # SID, so the list the API shows drops it too.
+        path = self._host_path(source_host='node1',
+                               via_hosts=['node1', 'node3'])
+        self.assertEqual(['fc00:0:3:fff0::', self._decap()],
+                         path['segments'])
+        self.assertEqual(path['segments'], path['encoded_segments'])
+
+    def test_a_source_path_next_to_an_any_source_path(self):
+        self._host_path()
+        self._host_path(source_host='node1', via_hosts=['node3'])
+        self._host_path(source_host='node3', via_hosts=[])
+
+    def test_the_same_source_twice_is_a_conflict(self):
+        self._host_path(source_host='node1', via_hosts=['node3'])
+        res = self._host_path(expected=409, source_host='node1')
+        self.assertIn('from node1', self._message(res))
+
+    def test_an_empty_source_is_any_source(self):
+        path = self._host_path(source_host='')
+        self.assertIsNone(path['source_host'])
+        self._host_path(expected=409)
+
+    def test_an_unregistered_source(self):
+        res = self._host_path(expected=400, source_host='node9')
+        self.assertIn('node9', self._message(res))
+
+    def test_the_destination_as_its_own_source(self):
+        res = self._host_path(expected=400, source_host='node2')
+        self.assertIn('never encapsulates', self._message(res))
+
+    def test_the_source_cannot_be_changed(self):
+        path = self._host_path(source_host='node1', via_hosts=['node3'])
+        self._update(path['id'], expected=400, source_host='node3')
+
+    def test_a_tenant_cannot_name_a_source(self):
+        self._path(expected=403, as_admin=False, destination_host='node2',
+                   source_host='node1')
+
+
 # ----------------------------------------------------------------------
 # unit
 # ----------------------------------------------------------------------
@@ -312,7 +374,8 @@ def _route(port_id, host='node2', prefix='10.0.0.5/32'):
 def _db_path(**kwargs):
     path = {'id': 'tp1', 'project_id': 'p1', 'domain_id': 'd1',
             'destination_host': None, 'destination_port_id': None,
-            'via_hosts': [], 'segments': [], 'status': None}
+            'source_host': None, 'via_hosts': [], 'segments': [],
+            'status': None}
     path.update(kwargs)
     return path
 
@@ -326,9 +389,14 @@ class TePluginTestCaseBase(test_plugin.PluginUnitTestCaseBase):
         self.srv6_db.get_host_locators.return_value = dict(self.locators)
         self.srv6_db.get_function_id.return_value = 7
 
-    def _paths(self, by_port=None, by_host=None):
+    def _paths(self, by_port=None, by_host=None, by_source=None):
+        """The te_db maps; by_source is {source: (by_port, by_host)}."""
         self.te_db.get_te_paths_for_domain.return_value = {
-            'by_port': by_port or {}, 'by_host': by_host or {}}
+            'by_port': by_port or {}, 'by_host': by_host or {},
+            'by_source': {source: {'by_port': ports or {},
+                                   'by_host': hosts or {}}
+                          for source, (ports, hosts)
+                          in (by_source or {}).items()}}
 
 
 class TestPrecedence(TePluginTestCaseBase):
@@ -376,6 +444,109 @@ class TestPrecedence(TePluginTestCaseBase):
         self.assertNotIn('segments', self._attach(_route('p1'))[0])
 
 
+E1, E2, E3 = 'fc00:0:1:fff0::', 'fc00:0:2:fff0::', 'fc00:0:3:fff0::'
+
+
+class TestSourcePrecedence(TePluginTestCaseBase):
+    """(port, src) > (host, src) > (port, any) > (host, any) > direct.
+
+    The routes go to every node. `segments` is what every ingress pushes;
+    `segments_by_source` holds the answer of each source whose paths
+    apply, and that node's agent uses it instead -- even when it is [].
+    """
+
+    def _attach(self, *routes):
+        return self.plugin._attach_segments(self.ctx, 'd1', list(routes),
+                                            self.locators)
+
+    def test_only_source_paths_still_steer(self):
+        # A domain whose only path names a source: no early return.
+        self._paths(by_source={'node1': (None, {'node2': ['node3']})})
+        route = self._attach(_route('p1'))[0]
+        self.assertNotIn('segments', route)
+        self.assertEqual({'node1': [E3]}, route['segments_by_source'])
+
+    def test_a_source_port_path_beats_a_source_host_path(self):
+        self._paths(by_source={'node1': ({'p1': []}, {'node2': ['node3']})})
+        steered, neighbour = self._attach(
+            _route('p1'), _route('p2', prefix='10.0.0.6/32'))
+        self.assertEqual({'node1': []}, steered['segments_by_source'])
+        self.assertEqual({'node1': [E3]}, neighbour['segments_by_source'])
+
+    def test_a_source_host_path_beats_an_any_source_port_path(self):
+        # U1: the source rank wins, at that ingress only.
+        self._paths(by_port={'p1': ['node1']},
+                    by_source={'node1': (None, {'node2': ['node3']})})
+        route = self._attach(_route('p1'))[0]
+        self.assertEqual([E1], route['segments'])
+        self.assertEqual({'node1': [E3]}, route['segments_by_source'])
+
+    def test_an_explicitly_direct_source_path_is_sent_empty(self):
+        # Left out, node1 would fall back to `segments`.
+        self._paths(by_host={'node2': ['node3']},
+                    by_source={'node1': (None, {'node2': []})})
+        route = self._attach(_route('p1'))[0]
+        self.assertEqual([E3], route['segments'])
+        self.assertEqual({'node1': []}, route['segments_by_source'])
+
+    def test_a_degraded_source_path_is_direct_for_its_source(self):
+        # Not "fall back to the any-source path" (U1).
+        self._paths(by_host={'node2': ['node3']},
+                    by_source={'node1': (None, {'node2': ['node9']})})
+        with mock.patch.object(plugin.LOG, 'warning') as warning:
+            route = self._attach(_route('p1'))[0]
+        self.assertEqual([E3], route['segments'])
+        self.assertEqual({'node1': []}, route['segments_by_source'])
+        self.assertTrue(warning.called)
+
+    def test_a_source_without_a_locator_is_direct(self):
+        self._paths(by_source={'node9': (None, {'node2': ['node3']})})
+        with mock.patch.object(plugin.LOG, 'warning'):
+            route = self._attach(_route('p1'))[0]
+        self.assertEqual({'node9': []}, route['segments_by_source'])
+
+    def test_a_direct_any_source_port_path_keeps_the_source_entry(self):
+        # The any-source answer is "nothing"; the loop must still reach
+        # the source pass.
+        self._paths(by_port={'p1': []},
+                    by_source={'node1': (None, {'node2': ['node3']})})
+        route = self._attach(_route('p1'))[0]
+        self.assertNotIn('segments', route)
+        self.assertEqual({'node1': [E3]}, route['segments_by_source'])
+
+    def test_no_applicable_source_path_adds_no_key(self):
+        # node1's path goes to node3; this route is on node2.
+        self._paths(by_host={'node2': ['node3']},
+                    by_source={'node1': (None, {'node3': ['node2']})})
+        route = self._attach(_route('p1'))[0]
+        self.assertEqual([E3], route['segments'])
+        self.assertNotIn('segments_by_source', route)
+
+    def test_the_routes_own_host_gets_no_entry(self):
+        # A port path whose VM has moved onto its source: that node never
+        # encapsulates traffic toward its own VMs.
+        self._paths(by_source={'node2': ({'p1': ['node3']}, None)})
+        self.assertNotIn('segments_by_source',
+                         self._attach(_route('p1'))[0])
+
+    def test_each_source_gets_its_own_entry(self):
+        self._paths(by_host={'node2': ['node1']},
+                    by_source={'node1': (None, {'node2': ['node3']}),
+                               'node3': (None, {'node2': []})})
+        route = self._attach(_route('p1'))[0]
+        self.assertEqual([E1], route['segments'])
+        self.assertEqual({'node1': [E3], 'node3': []},
+                         route['segments_by_source'])
+
+    def test_a_source_entry_keeps_the_sources_own_sid(self):
+        # The server sends the list as resolved; the source's agent drops
+        # its own leading SID, as it does for `segments`.
+        self._paths(by_source={'node1': (None, {'node2': ['node1',
+                                                          'node3']})})
+        self.assertEqual({'node1': [E1, E3]},
+                         self._attach(_route('p1'))[0]['segments_by_source'])
+
+
 class TestPayloadCarriesTe(TePluginTestCaseBase):
 
     def setUp(self):
@@ -400,6 +571,13 @@ class TestPayloadCarriesTe(TePluginTestCaseBase):
     def test_every_route_carries_its_network(self):
         self.assertEqual(['net1', 'net1'],
                          [r['network_id'] for r in self._routes()])
+
+    def test_a_source_path_reaches_the_payload(self):
+        self._paths(by_source={'node1': ({self.steered['id']: ['node3']},
+                                         None)})
+        steered, neighbour = self._routes()
+        self.assertEqual({'node1': [E3]}, steered['segments_by_source'])
+        self.assertNotIn('segments_by_source', neighbour)
 
     def test_paths_are_read_once_per_payload(self):
         self._routes()
@@ -428,6 +606,13 @@ class TestIncrementalPathCarriesTe(TePluginTestCaseBase):
         self.assertEqual([{'prefix': '10.0.0.5/32', 'host': 'node2',
                            'port_id': self.port['id'], 'network_id': 'net1',
                            'segments': ['fc00:0:2:fff0::']}], self._added())
+
+    def test_a_source_path_arrives_with_the_port(self):
+        self._paths(by_source={'node1': ({self.port['id']: ['node3']},
+                                         None)})
+        self.plugin._notify_port(self.ctx, self.port)
+        self.assertEqual({'node1': [E3]},
+                         self._added()[0]['segments_by_source'])
 
     def test_segments_are_per_domain(self):
         self.domain_db.get_domain_ids_for_network.return_value = ['d1', 'd2']
@@ -510,6 +695,40 @@ class TestResolveTePath(TePluginTestCaseBase):
         self.assertEqual('DEGRADED', self._resolve(
             _db_path(destination_host='node2'), function_id=None)['status'])
 
+    def test_a_source_path_drops_its_own_leading_sid(self):
+        # The source is the only ingress, and its agent drops the SID.
+        path = self._resolve(_db_path(destination_host='node2',
+                                      source_host='node1',
+                                      via_hosts=['node1', 'node3']))
+        self.assertEqual([E3, 'fc00:0:2:7::'], path['segments'])
+        self.assertEqual(path['segments'], path['encoded_segments'])
+        self.assertEqual('ACTIVE', path['status'])
+
+    def test_only_leading_source_sids_are_dropped(self):
+        path = self._resolve(_db_path(destination_host='node2',
+                                      source_host='node1',
+                                      via_hosts=['node3', 'node1']))
+        self.assertEqual([E3, E1, 'fc00:0:2:7::'], path['segments'])
+
+    def test_an_any_source_path_keeps_every_sid(self):
+        # Any node may be the ingress; each strips its own SID itself.
+        path = self._resolve(_db_path(destination_host='node2',
+                                      via_hosts=['node1', 'node3']))
+        self.assertEqual([E1, E3, 'fc00:0:2:7::'], path['segments'])
+
+    def test_a_source_without_a_locator_is_degraded(self):
+        self.assertEqual('DEGRADED', self._resolve(
+            _db_path(destination_host='node2', source_host='node9'))[
+                'status'])
+
+    def test_a_port_moved_onto_its_source_is_degraded(self):
+        self.core.get_port.return_value = {portbindings.HOST_ID: 'node1'}
+        path = self._resolve(_db_path(destination_port_id='p1',
+                                      source_host='node1',
+                                      via_hosts=['node3']))
+        self.assertEqual(([], 'DEGRADED'), (path['segments'],
+                                            path['status']))
+
     def test_the_db_dict_is_not_mutated(self):
         original = _db_path(destination_host='node2')
         self._resolve(original)
@@ -527,6 +746,7 @@ class TestCreate(TePluginTestCaseBase):
                 domain_id=domain_id, project_id=body['project_id'],
                 destination_host=body.get('destination_host'),
                 destination_port_id=body.get('destination_port_id'),
+                source_host=body.get('source_host'),
                 via_hosts=body['via_hosts'])
         push = mock.patch.object(self.plugin, '_push_domain')
         self.push = push.start()
@@ -596,3 +816,57 @@ class TestCreate(TePluginTestCaseBase):
         self.te_db.create_te_path.side_effect = db_exc.DBReferenceError(
             'srv6_te_paths', 'fk', 'destination_port_id', 'ports')
         self._refused(destination_port_id='p1')
+
+    def test_an_empty_source_is_stored_as_any_source(self):
+        self.assertIsNone(self._create(destination_host='node2',
+                                       source_host='')['source_host'])
+        self.assertIsNone(
+            self.te_db.create_te_path.call_args[0][2]['source_host'])
+
+    def test_a_source_is_stored(self):
+        path = self._create(destination_host='node2', source_host='node1',
+                            via_hosts=['node3'])
+        self.assertEqual('node1', path['source_host'])
+
+    def test_an_unregistered_source(self):
+        self._refused(destination_host='node2', source_host='node9')
+
+    def test_the_destination_host_as_its_own_source(self):
+        self._refused(destination_host='node2', source_host='node2')
+
+    def test_a_port_bound_on_the_source(self):
+        self.core.get_port.return_value = {'id': 'p1', 'network_id': 'net1',
+                                           portbindings.HOST_ID: 'node1'}
+        self._refused(destination_port_id='p1', source_host='node1')
+
+    def test_a_port_bound_elsewhere_may_name_a_source(self):
+        self.core.get_port.return_value = {'id': 'p1', 'network_id': 'net1',
+                                           portbindings.HOST_ID: 'node2'}
+        self.assertEqual('ACTIVE', self._create(
+            destination_port_id='p1', source_host='node1',
+            via_hosts=['node3'])['status'])
+
+    def test_a_duplicate_names_the_source(self):
+        self.te_db.create_te_path.side_effect = db_exc.DBDuplicateEntry()
+        exc = self.assertRaises(plugin.te_ext.Srv6TePathExists,
+                                self._create, destination_host='node2',
+                                source_host='node1')
+        self.assertIn('host node2 from node1', str(exc))
+
+
+class TestListBySource(TePluginTestCaseBase):
+    """The filter goes to the DB as given; [''] lists any-source paths.
+
+    Tested here, not over REST: neutron keeps an empty filter value only
+    with its empty-string-filtering extension, which ML2 loads and the
+    REST harness's core plugin does not.
+    """
+
+    def test_the_filter_reaches_the_db(self):
+        self.te_db.get_all_te_paths.return_value = []
+        for value in (['node1'], ['']):
+            self.plugin.get_srv6_te_paths(self.ctx,
+                                          filters={'source_host': value})
+            self.assertEqual(
+                value,
+                self.te_db.get_all_te_paths.call_args[0][1]['source_host'])

@@ -47,12 +47,14 @@ class Srv6TeDbTestCase(testlib_api.SqlTestCase):
                        'name': 'd', 'srv6_behavior': 'End.DT46'})['id']
 
     def _create_path(self, destination_host='cn3', via_hosts=None,
-                     domain_id=None, destination_port_id=None):
+                     domain_id=None, destination_port_id=None,
+                     source_host=None):
         return te_db.create_te_path(
             self.ctx, domain_id or self.domain_id,
             {'project_id': 'test-project',
              'destination_host': destination_host,
              'destination_port_id': destination_port_id,
+             'source_host': source_host,
              'via_hosts': via_hosts if via_hosts is not None else ['cn2']})
 
     def _create_port(self):
@@ -86,11 +88,12 @@ class Srv6TeDbTestCase(testlib_api.SqlTestCase):
             return port.id
 
     def _create_port_path(self, port_id=None, via_hosts=None,
-                          domain_id=None):
+                          domain_id=None, source_host=None):
         return self._create_path(destination_host=None,
                                  destination_port_id=(port_id or
                                                       self._create_port()),
-                                 via_hosts=via_hosts, domain_id=domain_id)
+                                 via_hosts=via_hosts, domain_id=domain_id,
+                                 source_host=source_host)
 
 
 class TestCrud(Srv6TeDbTestCase):
@@ -366,19 +369,20 @@ class TestPayloadHelpers(Srv6TeDbTestCase):
         self._create_port_path(port_id, via_hosts=['cn5'])
         self.assertEqual(
             {'by_port': {port_id: ['cn5']},
-             'by_host': {'cn3': ['cn2'], 'cn4': ['cn2', 'cn5']}},
+             'by_host': {'cn3': ['cn2'], 'cn4': ['cn2', 'cn5']},
+             'by_source': {}},
             te_db.get_te_paths_for_domain(self.ctx, self.domain_id))
 
     def test_paths_for_domain_is_empty_without_policy(self):
         self.assertEqual(
-            {'by_port': {}, 'by_host': {}},
+            {'by_port': {}, 'by_host': {}, 'by_source': {}},
             te_db.get_te_paths_for_domain(self.ctx, self.domain_id))
 
     def test_paths_for_domain_is_scoped_to_the_domain(self):
         other_domain = self._create_domain()
         self._create_path(destination_host='cn3', domain_id=other_domain)
         self.assertEqual(
-            {'by_port': {}, 'by_host': {}},
+            {'by_port': {}, 'by_host': {}, 'by_source': {}},
             te_db.get_te_paths_for_domain(self.ctx, self.domain_id))
 
     def test_an_explicitly_direct_path_is_still_listed(self):
@@ -389,19 +393,95 @@ class TestPayloadHelpers(Srv6TeDbTestCase):
         self.assertEqual({port_id: []}, te_db.get_te_paths_for_domain(
             self.ctx, self.domain_id)['by_port'])
 
-    def test_via_hosts_for_one_destination(self):
-        self._create_path(destination_host='cn3', via_hosts=['cn2', 'cn5'])
-        self.assertEqual(
-            ['cn2', 'cn5'],
-            te_db.get_via_hosts(self.ctx, self.domain_id, 'cn3'))
 
-    def test_via_hosts_is_empty_for_an_unsteered_destination(self):
-        self.assertEqual(
-            [], te_db.get_via_hosts(self.ctx, self.domain_id, 'cn3'))
+class TestSourceSelector(Srv6TeDbTestCase):
+    """A path may be limited to one ingress node (FEATURE-TE-SOURCE-HOST).
 
-    def test_no_path_and_an_empty_path_are_indistinguishable(self):
-        # Deliberate: both mean "no transit SIDs" to the dataplane.
-        self._create_path(destination_host='cn3', via_hosts=[])
+    '' is stored for "any ingress" so that the unique constraints, which
+    include the column, also hold between any-source paths; the dict says
+    None, like the API.
+    """
+
+    def test_any_source_is_none_in_the_dict_and_empty_in_the_row(self):
+        path = self._create_path()
+        self.assertIsNone(path['source_host'])
+        row = self.ctx.session.query(te_db.SRv6TePath).filter_by(
+            id=path['id']).one()
+        self.assertEqual('', row.source_host)
+
+    def test_a_source_round_trips(self):
+        path = self._create_path(source_host='cn1')
+        self.assertEqual('cn1', path['source_host'])
+        self.assertEqual(path, te_db.get_te_path(self.ctx, path['id']))
+
+    def test_a_source_path_next_to_an_any_source_path(self):
+        # The whole point: both to cn3, one for every ingress, one for cn1.
+        self._create_path(destination_host='cn3')
+        self._create_path(destination_host='cn3', source_host='cn1')
+        self._create_path(destination_host='cn3', source_host='cn2')
+        self.assertEqual(3, len(te_db.get_te_paths(self.ctx,
+                                                   self.domain_id)))
+
+    def test_one_host_path_per_source(self):
+        self._create_path(destination_host='cn3', source_host='cn1')
+        self.assertRaises(db_exc.DBDuplicateEntry, self._create_path,
+                          destination_host='cn3', source_host='cn1')
+
+    def test_any_source_still_collides_with_any_source(self):
+        # What a NULL would have let through.
+        self._create_path(destination_host='cn3', source_host=None)
+        self.assertRaises(db_exc.DBDuplicateEntry, self._create_path,
+                          destination_host='cn3', source_host='')
+
+    def test_port_paths_follow_the_same_rule(self):
+        port_id = self._create_port()
+        self._create_port_path(port_id)
+        self._create_port_path(port_id, source_host='cn1')
+        self.assertRaises(db_exc.DBDuplicateEntry, self._create_port_path,
+                          port_id, source_host='cn1')
+
+    def test_filter_by_source(self):
+        any_source = self._create_path(destination_host='cn3')
+        from_cn1 = self._create_path(destination_host='cn3',
+                                     source_host='cn1')
         self.assertEqual(
-            te_db.get_via_hosts(self.ctx, self.domain_id, 'cn3'),
-            te_db.get_via_hosts(self.ctx, self.domain_id, 'cn-unsteered'))
+            [from_cn1['id']],
+            [p['id'] for p in te_db.get_all_te_paths(
+                self.ctx, {'source_host': ['cn1']})])
+        # [''] is how a list asks for the any-source paths only.
+        self.assertEqual(
+            [any_source['id']],
+            [p['id'] for p in te_db.get_all_te_paths(
+                self.ctx, {'source_host': ['']})])
+
+    def test_paths_for_domain_files_source_paths_under_their_source(self):
+        port_id = self._create_port()
+        self._create_path(destination_host='cn3', via_hosts=['cn2'])
+        self._create_path(destination_host='cn3', via_hosts=['cn5'],
+                          source_host='cn1')
+        self._create_port_path(port_id, via_hosts=[], source_host='cn1')
+        self._create_path(destination_host='cn4', via_hosts=['cn2'],
+                          source_host='cn5')
+        self.assertEqual(
+            {'by_port': {},
+             'by_host': {'cn3': ['cn2']},
+             'by_source': {
+                 'cn1': {'by_port': {port_id: []},
+                         'by_host': {'cn3': ['cn5']}},
+                 'cn5': {'by_port': {}, 'by_host': {'cn4': ['cn2']}}}},
+            te_db.get_te_paths_for_domain(self.ctx, self.domain_id))
+
+    def test_paths_for_domain_does_not_depend_on_row_order(self):
+        # Same two paths, created in both orders in two domains: a map
+        # keyed on the destination alone would let the later row win.
+        other_domain = self._create_domain()
+        self._create_path(destination_host='cn3', via_hosts=['cn2'])
+        self._create_path(destination_host='cn3', via_hosts=['cn5'],
+                          source_host='cn1')
+        self._create_path(destination_host='cn3', via_hosts=['cn5'],
+                          source_host='cn1', domain_id=other_domain)
+        self._create_path(destination_host='cn3', via_hosts=['cn2'],
+                          domain_id=other_domain)
+        self.assertEqual(
+            te_db.get_te_paths_for_domain(self.ctx, self.domain_id),
+            te_db.get_te_paths_for_domain(self.ctx, other_domain))

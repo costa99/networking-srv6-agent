@@ -30,7 +30,8 @@ class TestTePathDefinition(base.BaseTestCase):
 
     def test_the_domain_and_the_selectors_are_create_only(self):
         # A path that changed what it selects is a different path.
-        for name in ('domain_id', 'destination_host', 'destination_port_id'):
+        for name in ('domain_id', 'destination_host', 'destination_port_id',
+                     'source_host'):
             self.assertTrue(ATTRS[name]['allow_post'], name)
             self.assertFalse(ATTRS[name]['allow_put'], name)
 
@@ -38,6 +39,14 @@ class TestTePathDefinition(base.BaseTestCase):
         # "Exactly one" is the plugin's check; here each may be absent.
         self.assertIsNone(ATTRS['destination_host']['default'])
         self.assertIsNone(ATTRS['destination_port_id']['default'])
+
+    def test_the_source_is_optional_and_a_filter(self):
+        # None: the path applies at every ingress, as before the attribute.
+        attr = ATTRS['source_host']
+        self.assertIsNone(attr['default'])
+        self.assertTrue(attr['is_filter'])
+        self.assertEqual(te_def.HOST_FIELD_SIZE,
+                         attr['validate']['type:string_or_none'])
 
     def test_via_hosts_is_put_able(self):
         # PUT replaces the list: re-steering with no delete/create window.
@@ -58,8 +67,8 @@ class TestTePathDefinition(base.BaseTestCase):
             self.assertFalse(ATTRS[name]['allow_put'], name)
 
     def test_the_topology_attributes_are_policy_enforced(self):
-        for name in ('destination_host', 'destination_port_id', 'via_hosts',
-                     'segments'):
+        for name in ('destination_host', 'destination_port_id', 'source_host',
+                     'via_hosts', 'segments'):
             self.assertTrue(ATTRS[name].get('enforce_policy'), name)
 
     def test_project_id_is_accepted_so_the_plugin_can_force_it(self):

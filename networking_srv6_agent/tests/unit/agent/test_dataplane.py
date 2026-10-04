@@ -1652,6 +1652,101 @@ class TestEndSidRules(DataplaneTestCaseBase):
         self.assertTrue(self.priv_seg6.replace_seg6_route.called)
 
 
+class TestSourceSegments(DataplaneTestCaseBase):
+    """A source-specific TE path: each ingress takes its own entry.
+
+    The payload is the same on every node; `segments_by_source` holds the
+    transit list of each ingress a source path names, and `segments` the
+    list for every other ingress. The server decides precedence; the
+    agent only picks the entry of its own host (_segments_for).
+    """
+
+    RED = 'sv6vrf-7'
+
+    def setUp(self):
+        super().setUp()
+        self._with_domain()
+        self.locators = {'node2': LOCATOR2, 'node3': LOCATOR3}
+
+    def _route(self, host='node2', segments=None, by_source=None):
+        route = {'prefix': '10.0.0.5/32', 'host': host, 'port_id': 'p'}
+        if segments is not None:
+            route['segments'] = segments
+        if by_source is not None:
+            route['segments_by_source'] = by_source
+        return route
+
+    def _segs(self, route, local_host='node1'):
+        self.dp.add_routes(self.domain_id, [route], self.locators,
+                           local_host)
+        return self.priv_seg6.replace_seg6_route.call_args[0][1]
+
+    def _rules(self):
+        return [c[0] for c in self.priv_seg6.add_sid_rule.call_args_list]
+
+    def test_the_own_entry_is_used(self):
+        # node1 is the source the path names: its list, not the default.
+        self.assertEqual(
+            ['fc00:0:3:fff0::', 'fc00:0:2:7::'],
+            self._segs(self._route(by_source={'node1': ['fc00:0:3:fff0::']})))
+
+    def test_without_an_own_entry_the_default_is_used(self):
+        # The path names node9 as its source; node1 is another ingress.
+        self.assertEqual(
+            ['fc00:0:2:fff0::', 'fc00:0:2:7::'],
+            self._segs(self._route(segments=['fc00:0:2:fff0::'],
+                                   by_source={'node9': ['fc00:0:3:fff0::']})))
+
+    def test_an_empty_own_entry_is_direct_over_the_default(self):
+        # An explicit "direct from node1": membership, not truth, decides.
+        self.assertEqual(
+            ['fc00:0:2:7::'],
+            self._segs(self._route(segments=['fc00:0:3:fff0::'],
+                                   by_source={'node1': []})))
+
+    def test_the_own_entry_wins_over_the_default(self):
+        self.assertEqual(
+            ['fc00:0:3:fff0::', 'fc00:0:2:7::'],
+            self._segs(self._route(segments=['fc00:0:2:fff0::'],
+                                   by_source={'node1': ['fc00:0:3:fff0::']})))
+
+    def test_a_leading_own_sid_in_the_own_entry_is_dropped(self):
+        # via == source: the same strip as for any-source segments.
+        self.assertEqual(
+            ['fc00:0:3:fff0::', 'fc00:0:2:7::'],
+            self._segs(self._route(by_source={
+                'node1': ['fc00:0:1:fff0::', 'fc00:0:3:fff0::']})))
+
+    def test_a_local_route_is_skipped_even_with_an_own_entry(self):
+        # The destination's own node never encapsulates its VMs.
+        self.dp.add_routes(
+            self.domain_id,
+            [self._route(host='node1',
+                         by_source={'node1': ['fc00:0:3:fff0::']})],
+            dict(self.locators, node1=LOCATOR), 'node1')
+        self.priv_seg6.replace_seg6_route.assert_not_called()
+
+    def test_the_rule_follows_the_chosen_first_segment(self):
+        self.dp.ensure_edge_filter([LOCATOR2, LOCATOR3])
+        self._segs(self._route(segments=['fc00:0:2:fff0::'],
+                               by_source={'node1': ['fc00:0:3:fff0::']}))
+        self.assertEqual([(self.RED, 'fc00:0:3:fff0::')], self._rules())
+
+    def test_a_full_sync_prunes_the_rule_of_the_old_list(self):
+        # The source path appeared: the any-source End SID rule is no
+        # longer used by this node, and the next full sync removes it.
+        self.dp.ensure_edge_filter([LOCATOR2, LOCATOR3])
+        self.priv_seg6.list_sid_rules.return_value = [
+            (self.RED, 'fc00:0:2:fff0::')]
+        self.dp.sync_routes(
+            self.domain_id,
+            [self._route(segments=['fc00:0:2:fff0::'],
+                         by_source={'node1': ['fc00:0:3:fff0::']})],
+            self.locators, 'node1')
+        self.priv_seg6.delete_sid_rule.assert_called_once_with(
+            self.RED, 'fc00:0:2:fff0::')
+
+
 class TestRouteMtu(DataplaneTestCaseBase):
     """A steered route's MTU, from its network, warned once."""
 
@@ -1845,6 +1940,16 @@ class TestUsidRoutes(DataplaneTestCaseBase):
         self._route(['fc00:0:2::'])
         self.priv_seg6.add_sid_rule.assert_called_once_with(
             'sv6vrf-57349', 'fc00:0:2:3:e005::')
+
+    def test_a_source_entry_is_packed_too(self):
+        self.dp.add_routes(
+            self.domain_id,
+            [{'prefix': '10.0.0.5/32', 'host': 'node3', 'port_id': 'p1',
+              'segments_by_source': {'node1': ['fc00:0:2::']}}],
+            self.LOCATORS, 'node1')
+        args, kwargs = self.priv_seg6.replace_seg6_route.call_args
+        self.assertEqual((['fc00:0:2:3:e005::'], 'encap.red'),
+                         (args[1], kwargs.get('mode')))
 
     def test_a_leading_own_un_is_dropped(self):
         self.assertEqual((['fc00:0:2:3:e005::'], 'encap.red'),

@@ -31,7 +31,11 @@ handler return without a word. P5's contract test binds every cast below to
 the agent's named parameters.
 
 Payload shape. Each route is {prefix, host, port_id} and may carry an
-optional `segments` list of transit SIDs (filled by P6). PAYLOAD_VERSION is
+optional `segments` list of transit SIDs (filled by P6), and an optional
+`segments_by_source` map {ingress host: transit SIDs} for the TE paths
+limited to one ingress (FEATURE-TE-SOURCE-HOST): each agent uses its own
+entry, even an empty one, in place of `segments`. An agent older than that
+key ignores it and pushes `segments` for every route. PAYLOAD_VERSION is
 an equality check on both sides, so adding an optional key the agent already
 reads is the way to extend it: bumping the version would make every older
 agent ignore every update.
