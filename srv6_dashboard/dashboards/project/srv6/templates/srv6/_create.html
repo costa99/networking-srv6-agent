@@ -1,0 +1,16 @@
+{% extends "horizon/common/_modal_form.html" %}
+{% load i18n %}
+
+{% block modal-body-right %}
+  <h3>{% trans "Description:" %}</h3>
+  <p>{% blocktrans trimmed %}
+    An SRv6 domain is a routed overlay for your networks. Every network you
+    associate with it is reachable from the others, on any compute node:
+    each node holds a VRF for the domain, and traffic between nodes travels
+    in IPv6 packets addressed to the destination node's SRv6 SID.
+  {% endblocktrans %}</p>
+  <p>{% blocktrans trimmed %}
+    The domain is empty when created. Associate networks with it from its
+    row or detail page.
+  {% endblocktrans %}</p>
+{% endblock %}

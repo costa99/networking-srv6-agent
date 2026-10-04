@@ -65,6 +65,26 @@ def _dict(res, **extra):
     return d
 
 
+# --- core networks, as the SRv6 pages need them ----------------------------
+
+def network_list(request, **filters):
+    """GET /v2.0/networks -- core Neutron, policy get_network.
+
+    One request answers every network name a page shows (FEATURE D15),
+    where bgpvpn's panel makes one network_get per associated network.
+    Horizon's own api.neutron.network_list is not used: it also lists
+    every subnet, a second request these pages do not need.
+    """
+    LOG.debug("network_list(): filters=%s", filters)
+    networks = networkclient(request).networks(**filters)
+    return [neutron.Network(_dict(n)) for n in networks]
+
+
+def network_names(networks):
+    """{id: name or '(id)'} for a network_list() answer."""
+    return {n.id: n.name_or_id for n in networks}
+
+
 # --- domains -------------------------------------------------------------
 
 def domain_list(request, **filters):

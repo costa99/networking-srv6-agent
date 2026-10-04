@@ -1,0 +1,16 @@
+{% extends "horizon/common/_modal_form.html" %}
+{% load i18n %}
+
+{% block modal-body-right %}
+  <h3>{% trans "Description:" %}</h3>
+  <p>{% blocktrans trimmed with name=domain.name_or_id %}
+    Attach a network to the domain <strong>{{ name }}</strong>. Its ports
+    can then reach every other network of the domain.
+  {% endblocktrans %}</p>
+  <p>{% blocktrans trimmed %}
+    Only your own internal networks that are in no SRv6 domain yet are
+    listed: a network belongs to at most one domain. The network must not
+    be attached to a router, and its subnets must not overlap those already
+    in the domain; if it is, the error says so.
+  {% endblocktrans %}</p>
+{% endblock %}

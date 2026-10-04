@@ -1,0 +1,17 @@
+{% load i18n %}
+
+<div class="detail">
+  <dl class="dl-horizontal">
+    <dt>{% trans "Name" %}</dt>
+    <dd>{{ domain.name|default:_("None") }}</dd>
+    <dt>{% trans "ID" %}</dt>
+    <dd>{{ domain.id }}</dd>
+    <dt>{% trans "Project ID" %}</dt>
+    <dd>{{ domain.project_id }}</dd>
+    <dt>{% trans "Behavior" %}</dt>
+    <dd>{{ domain.srv6_behavior }}</dd>
+    {% block extra_fields %}{% endblock %}
+    <dt>{% trans "Networks" %}</dt>
+    <dd>{{ networks }}</dd>
+  </dl>
+</div>
