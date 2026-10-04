@@ -903,6 +903,12 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         network_id = port.get('network_id')
         if not network_id:
             return
+        # The full payload's rule (_routes_for_domain): a DHCP or router
+        # port is never advertised. Without it an incremental add put a
+        # route on every node that the next full sync took away again.
+        # Removals pass: withdrawing a route nobody holds is harmless.
+        if not removed and not self._port_is_relevant(port):
+            return
         # Runs on every port update in the cloud: one indexed query, and an
         # early return for the common case of a network in no domain.
         domain_ids = domain_db.get_domain_ids_for_network(
@@ -939,6 +945,35 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                         context.elevated(), domain_id,
                         [dict(r) for r in routes], locators))
 
+    @staticmethod
+    def _addresses(port):
+        return {fixed_ip['ip_address']
+                for fixed_ip in (port or {}).get('fixed_ips') or []
+                if fixed_ip.get('ip_address')}
+
+    def _notify_fixed_ip_change(self, context, original, port):
+        """A live port that kept its host but changed addresses (F14).
+
+        None of the status or host branches matches this case, so until the
+        next periodic resync (300 s) other nodes had no route to an added
+        address and kept one to a removed address. Only the difference is
+        sent, removals first, as for a move: an address that stayed is not
+        touched, and between the two messages no node routes an address that
+        has left the port.
+        """
+        old, new = self._addresses(original), self._addresses(port)
+        if old == new:
+            return
+        left = [f for f in original.get('fixed_ips') or []
+                if f.get('ip_address') in old - new]
+        added = [f for f in port.get('fixed_ips') or []
+                 if f.get('ip_address') in new - old]
+        if left:
+            self._notify_port(context, dict(original, fixed_ips=left),
+                              removed=True)
+        if added:
+            self._notify_port(context, dict(port, fixed_ips=added))
+
     @registry.receives(resources.PORT, [events.AFTER_UPDATE])
     def registry_port_updated(self, resource, event, trigger, payload=None):
         context = payload.context
@@ -960,6 +995,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 if old_host and new_host and old_host != new_host:
                     self._notify_port(context, original, removed=True)
                     self._notify_port(context, port)
+                else:
+                    self._notify_fixed_ip_change(context, original, port)
         except Exception:
             LOG.exception("SRv6: failed to process port update for %s",
                           port.get('id'))

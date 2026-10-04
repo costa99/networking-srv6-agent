@@ -648,7 +648,7 @@ class TestSyncState(PluginUnitTestCaseBase):
             self.ctx, 'node1', 'fc00:0:1::/48'))
 
 
-class TestPortEvents(PluginUnitTestCaseBase):
+class PortEventsTestCaseBase(PluginUnitTestCaseBase):
 
     def setUp(self):
         super().setUp()
@@ -660,6 +660,9 @@ class TestPortEvents(PluginUnitTestCaseBase):
     def _payload(self, port, original=None):
         return mock.Mock(context=self.ctx, latest_state=port,
                          states=[original if original is not None else {}])
+
+
+class TestPortEvents(PortEventsTestCaseBase):
 
     def test_a_network_in_no_domain_costs_one_query_and_nothing_else(self):
         self.domain_db.get_domain_ids_for_network.return_value = []
@@ -704,6 +707,80 @@ class TestPortEvents(PluginUnitTestCaseBase):
             RuntimeError('boom')
         self.plugin.registry_port_deleted(None, None, None,
                                           self._payload(_port()))
+
+
+class TestFixedIpChange(PortEventsTestCaseBase):
+    """F14: a live port that keeps its host but changes its addresses.
+
+    Before the fix none of registry_port_updated's branches matched, so the
+    change reached other nodes only with the next periodic resync.
+    """
+
+    @staticmethod
+    def _ips(*addresses):
+        return [{'ip_address': a} for a in addresses]
+
+    def _update(self, old, new, **kwargs):
+        port = _port(fixed_ips=self._ips(*new), **kwargs)
+        original = dict(port, fixed_ips=self._ips(*old))
+        self.plugin.registry_port_updated(None, None, None,
+                                          self._payload(port, original))
+        return port
+
+    def _sent(self):
+        return [(sorted(c[1])[0],
+                 [r['prefix'] for r in list(c[1].values())[0]])
+                for c in self.agent_rpc.routes_updated.call_args_list]
+
+    def test_an_added_address_is_advertised(self):
+        port = self._update(['10.0.0.5'], ['10.0.0.5', '10.0.0.21'])
+        self.agent_rpc.routes_updated.assert_called_once_with(
+            self.ctx, 'd1', add=[{'prefix': '10.0.0.21/32', 'host': 'node1',
+                                  'port_id': port['id'],
+                                  'network_id': 'net1'}])
+
+    def test_a_removed_address_is_withdrawn(self):
+        self._update(['10.0.0.5', '10.0.0.21'], ['10.0.0.5'])
+        self.assertEqual([('remove', ['10.0.0.21/32'])], self._sent())
+
+    def test_a_replaced_address_is_withdrawn_before_the_new_one(self):
+        self._update(['10.0.0.5'], ['10.0.0.6'])
+        self.assertEqual([('remove', ['10.0.0.5/32']),
+                          ('add', ['10.0.0.6/32'])], self._sent())
+
+    def test_an_unchanged_port_sends_nothing(self):
+        self._update(['10.0.0.5'], ['10.0.0.5'])
+        self.agent_rpc.routes_updated.assert_not_called()
+
+    def test_reordered_addresses_send_nothing(self):
+        self._update(['10.0.0.5', '10.0.0.21'], ['10.0.0.21', '10.0.0.5'])
+        self.agent_rpc.routes_updated.assert_not_called()
+
+    def test_a_port_that_is_not_active_sends_nothing(self):
+        port = _port(status=n_const.PORT_STATUS_DOWN,
+                     fixed_ips=self._ips('10.0.0.6'))
+        original = dict(port, fixed_ips=self._ips('10.0.0.5'))
+        self.plugin.registry_port_updated(None, None, None,
+                                          self._payload(port, original))
+        self.agent_rpc.routes_updated.assert_not_called()
+
+    def test_an_added_ipv6_address_is_a_128(self):
+        self._update(['10.0.0.5'], ['10.0.0.5', 'fd98:1::21'])
+        self.assertEqual([('add', ['fd98:1::21/128'])], self._sent())
+
+    def test_a_dhcp_port_is_never_advertised(self):
+        # The full payload leaves infrastructure ports out
+        # (_routes_for_domain); the incremental path now agrees.
+        self._update(['10.0.0.2'], ['10.0.0.2', '10.0.0.3'],
+                     device_owner='network:dhcp')
+        self.agent_rpc.routes_updated.assert_not_called()
+
+    def test_a_dhcp_port_going_active_is_not_advertised(self):
+        port = _port(device_owner='network:dhcp')
+        self.plugin.registry_port_updated(
+            None, None, None,
+            self._payload(port, dict(port, status=n_const.PORT_STATUS_DOWN)))
+        self.agent_rpc.routes_updated.assert_not_called()
 
 
 class TestSubnetGuard(PluginUnitTestCaseBase):
