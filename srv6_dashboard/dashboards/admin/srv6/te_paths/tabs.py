@@ -26,15 +26,19 @@ from srv6_dashboard.dashboards.admin.srv6.te_paths import tables as te_tables
 def segment_roles(path):
     """[(SID, what it does)] for an ACTIVE path's segments.
 
-    The server builds segments as [End SID of each via host..., the
+    The server builds segments as [transit SID of each via host..., the
     destination's End.DT46 SID] (services/plugin.py _resolve_te_path), so
-    the list lines up with via_hosts plus the destination.
+    the list lines up with via_hosts plus the destination. A transit SID
+    is the host's End SID (<locator>:fff0::) in encap mode and its uN SID
+    (the locator's own address) in usid mode; the dashboard cannot see
+    the mode, so the role is worded for both.
     """
     segments = path.segments or []
     via = path.via_hosts or []
     if len(segments) != len(via) + 1:
         return [(s, '') for s in segments]
-    roles = [_("End on %s: forward to the next segment") % h for h in via]
+    roles = [_("Waypoint %s: forward to the next segment") % h
+             for h in via]
     roles.append(_("End.DT46 on the destination: decapsulate into the "
                    "domain's VRF"))
     return list(zip(segments, roles))

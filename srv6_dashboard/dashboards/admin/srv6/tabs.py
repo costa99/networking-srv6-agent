@@ -28,6 +28,8 @@ from openstack_dashboard.api import keystone
 from networking_srv6_agent.common import constants
 from srv6_dashboard.api import srv6 as srv6_api
 from srv6_dashboard.common import srv6 as srv6_common
+from srv6_dashboard.dashboards.admin.srv6.locators import (
+    tables as locator_tables)
 from srv6_dashboard.dashboards.admin.srv6 import tables as admin_tables
 from srv6_dashboard.dashboards.admin.srv6.te_paths import tables as te_tables
 from srv6_dashboard.dashboards.project.srv6 import tabs as project_tabs
@@ -83,9 +85,26 @@ class TePathsTab(tabs.TableTab):
         return paths
 
 
+class LocatorsTab(tabs.TableTab):
+    name = _("Locators")
+    slug = 'locators'
+    table_classes = (locator_tables.LocatorsTable,)
+    template_name = 'horizon/common/_detail_table.html'
+    preload = False
+
+    def get_srv6_locators_data(self):
+        try:
+            return sorted(srv6_api.locator_list(self.request),
+                          key=lambda loc: loc.host)
+        except Exception:
+            exceptions.handle(self.request,
+                              _('Unable to retrieve SRv6 locators.'))
+            return []
+
+
 class AdminSrv6Tabs(tabs.TabGroup):
     slug = 'srv6'
-    tabs = (DomainsTab, TePathsTab)
+    tabs = (DomainsTab, TePathsTab, LocatorsTab)
     sticky = True
 
     @memoized.memoized_method

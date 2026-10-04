@@ -57,7 +57,7 @@ class TePathsTabTests(helpers.BaseAdminViewTests):
         self.assertEqual('red', table.data[0].domain_name)
         self.mock_domain_list.assert_called_once_with(test.IsHttpRequest())
         # Segments as code, status as a label, waypoints in order.
-        self.assertContains(res, '<code>fc00:0:2:fff0::</code>')
+        self.assertContains(res, '<code>fc00:0:2::</code>')
         self.assertContains(res, '<span class="label label-warning">'
                                  'DEGRADED</span>')
         self.assertContains(res, 'ale-XPS-15-9570')
@@ -359,10 +359,10 @@ class TePathDetailTests(helpers.BaseAdminViewTests):
         res = self.client.get(self._url(path))
 
         self.assertTemplateUsed(res, 'admin/srv6/_te_path_overview.html')
-        self.assertContains(res, 'End on ale-XPS-15-9570')
+        self.assertContains(res, 'Waypoint ale-XPS-15-9570')
         self.assertContains(res, 'End.DT46 on the destination')
         # The pushed form: one microSID container here.
-        self.assertContains(res, '<code>fc00:0:2:fff0:3:1000::</code>')
+        self.assertContains(res, '<code>fc00:0:2:3:e000::</code>')
         self.assertContains(res, '>red</a>')
         self.mock_domain_get.assert_called_once_with(test.IsHttpRequest(),
                                                      path.domain_id)

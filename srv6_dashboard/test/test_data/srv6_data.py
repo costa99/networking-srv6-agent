@@ -19,9 +19,15 @@ Each object exists twice, as Horizon's own test data does:
                  mocked proxy method hands back;
   TEST.<x>       the wrappers api/srv6.py makes of them -- what a test
                  expects to come out.
-The values are realistic so a failing test reads like a real answer:
-locators are the testbed's fc00:0:N::/48, the End.DT46 SID is the
-locator plus the domain's function, a via SID is <locator>:fff0::.
+The values are realistic so a failing test reads like a real answer.
+They are what the plugin computes in usid mode, the testbed's mode,
+taken from networking_srv6_agent.common.sid (LOG Op 3c.1):
+  - locators are the testbed's fc00:0:N::/48;
+  - SID functions are in the LIB range, 0xe000 and up;
+  - a waypoint is named by its uN SID, the locator's own address
+    (fc00:0:2::);
+  - the destination by its End.DT46 SID (fc00:0:3:e000::);
+  - pushed, they pack into one container (fc00:0:2:3:e000::).
 """
 
 import copy
@@ -54,7 +60,7 @@ def data(TEST):
         'project_id': project_id,
         'tenant_id': project_id,
         'srv6_behavior': 'End.DT46',
-        'sid_function': 4096,
+        'sid_function': 0xe000,
         'networks': [net1.id],
     }
     domain_blue = {
@@ -63,7 +69,7 @@ def data(TEST):
         'project_id': project_id,
         'tenant_id': project_id,
         'srv6_behavior': 'End.DT46',
-        'sid_function': 4097,
+        'sid_function': 0xe001,
         'networks': [],
     }
     for d in (domain_red, domain_blue):
@@ -104,8 +110,8 @@ def data(TEST):
         'destination_host': 'ale-node3',
         'destination_port_id': None,
         'via_hosts': ['ale-XPS-15-9570'],
-        'segments': ['fc00:0:2:fff0::', 'fc00:0:3:1000::'],
-        'encoded_segments': ['fc00:0:2:fff0:3:1000::'],
+        'segments': ['fc00:0:2::', 'fc00:0:3:e000::'],
+        'encoded_segments': ['fc00:0:2:3:e000::'],
         'status': 'ACTIVE',
     }
     path_degraded = {

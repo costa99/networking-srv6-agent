@@ -60,7 +60,7 @@ class IndexDomainsTabTests(helpers.BaseAdminViewTests):
         self.mock_tenant_list.assert_called_once_with(test.IsHttpRequest())
         # The project by name; the SID function as decimal and hex.
         self.assertEqual(self.tenant.name, table.data[0].project_name)
-        self.assertContains(res, '4096 (0x1000)')
+        self.assertContains(res, '57344 (0xe000)')
         # Network links lead to the admin's network page.
         self.assertContains(res, reverse('horizon:admin:networks:detail',
                                          args=[self.networks.first().id]))
@@ -143,9 +143,9 @@ class DetailTests(helpers.BaseAdminViewTests):
         res = self.client.get(_detail_url(domain.id))
 
         self.assertTemplateUsed(res, 'admin/srv6/_detail_overview.html')
-        self.assertContains(res, '4096 (0x1000)')
+        self.assertContains(res, '57344 (0xe000)')
         # The VRF device name, as `ip vrf` on a node shows it.
-        self.assertContains(res, '<code>sv6vrf-4096</code>')
+        self.assertContains(res, '<code>sv6vrf-57344</code>')
         self.assertContains(res, self.tenant.name)
         self.mock_tenant_get.assert_called_once_with(test.IsHttpRequest(),
                                                      domain.project_id)
@@ -214,3 +214,48 @@ class NonAdminTests(helpers.TestCase):
 
         self.assertEqual(403, res.status_code)
         self.mock_domain_list.assert_not_called()
+
+
+class LocatorsTabTests(helpers.BaseAdminViewTests):
+
+    @test.create_mocks({srv6_api: ('domain_list', 'network_list',
+                                   'locator_list'),
+                        keystone: ('tenant_list',)})
+    def test_locators_tab(self):
+        self.mock_domain_list.return_value = []
+        self.mock_locator_list.return_value = list(
+            reversed(self.srv6_locators.list()))
+
+        res = self.client.get(INDEX_URL + '?tab=srv6__locators')
+
+        self.mock_locator_list.assert_called_once_with(test.IsHttpRequest())
+        table = res.context['srv6_locators_table']
+        # Sorted by host whatever the API's order, as the TE forms are.
+        self.assertEqual(['ale', 'ale-XPS-15-9570', 'ale-node3'],
+                         [loc.host for loc in table.data])
+        self.assertContains(res, '<code>fc00:0:3::/48</code>')
+        # Read-only: an agent writes locators, nobody else can.
+        self.assertEqual((), tuple(table.get_table_actions()))
+        self.assertEqual([], table.get_row_actions(table.data[0]))
+
+    @test.create_mocks({srv6_api: ('domain_list', 'network_list',
+                                   'locator_list'),
+                        keystone: ('tenant_list',)})
+    def test_default_tab_does_not_fetch_locators(self):
+        self.mock_domain_list.return_value = []
+
+        self.client.get(INDEX_URL)
+
+        self.mock_locator_list.assert_not_called()
+
+    @test.create_mocks({srv6_api: ('domain_list', 'network_list',
+                                   'locator_list'),
+                        keystone: ('tenant_list',)})
+    def test_locators_error(self):
+        self.mock_domain_list.return_value = []
+        self.mock_locator_list.side_effect = self.exceptions.neutron
+
+        res = self.client.get(INDEX_URL + '?tab=srv6__locators')
+
+        self.assertEqual(0, len(res.context['srv6_locators_table'].data))
+        self.assertMessageCount(res, error=1)
