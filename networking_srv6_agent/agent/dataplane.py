@@ -101,6 +101,13 @@ LOG = logging.getLogger(__name__)
 #                 against is registered at VRF creation time.
 #   rp_filter     at the default, decapsulated packets vanish with no
 #                 counter moving anywhere.
+#   tcp_/udp_l3mdev_accept
+#                 0, the kernel default, asserted (F7): at 1 a socket bound
+#                 in the default VRF answers connections that arrive through
+#                 any VRF, so every service of the host would be open to
+#                 every tenant. With the local rule after l3mdev a VRF's
+#                 packet is not delivered locally anyway; this is the second
+#                 lock on the same door.
 GLOBAL_SYSCTLS = [
     ('net.ipv6.conf.all.forwarding', '1'),
     ('net.ipv4.ip_forward', '1'),
@@ -110,6 +117,8 @@ GLOBAL_SYSCTLS = [
     ('net.vrf.strict_mode', '1'),
     ('net.ipv4.conf.all.rp_filter', '0'),
     ('net.ipv4.conf.default.rp_filter', '0'),
+    ('net.ipv4.tcp_l3mdev_accept', '0'),
+    ('net.ipv4.udp_l3mdev_accept', '0'),
 ]
 
 
@@ -269,6 +278,7 @@ class Srv6LinuxDataplane:
         """Sysctls, the vrf module, and this node's locator route."""
         self._ensure_module_vrf()
         self._apply_global_sysctls()
+        self._ensure_local_rule_after_l3mdev()
         if self.underlay_interface:
             self._set_sysctl(
                 'net.ipv6.conf.%s.seg6_enabled' % self.underlay_interface, '1')
@@ -514,6 +524,41 @@ class Srv6LinuxDataplane:
             return
         LOG.info("SRv6: sysctl %(k)s %(cur)s -> %(v)s",
                  {'k': key, 'cur': current, 'v': value})
+
+    def _ensure_local_rule_after_l3mdev(self):
+        """Move the `local` FIB rule from 0 to after l3mdev (1000), F7.
+
+        At 0 a lookup from inside a VRF consults the host's local table
+        before the l3mdev rule sends it to the VRF's table, so every
+        address of the host -- management, underlay, any other -- answered
+        a tenant: ICMP, and anything a raw socket takes. The new rule goes
+        in before the old one is deleted, so the host is never without a
+        local rule. Every agent start re-asserts it: a reboot restores the
+        kernel default.
+
+        A failure is logged, not raised: refusing to start would take every
+        domain on this node down to close a hole that only exposes the
+        host itself, and the next start tries again.
+        """
+        for family_v6 in (False, True):
+            name = 'IPv6' if family_v6 else 'IPv4'
+            try:
+                prefs = priv_seg6.local_rule_prefs(family_v6=family_v6)
+                if constants.LOCAL_RULE_PRIORITY not in prefs:
+                    priv_seg6.add_local_rule(constants.LOCAL_RULE_PRIORITY,
+                                             family_v6=family_v6)
+                for pref in prefs:
+                    if pref < constants.LOCAL_RULE_PRIORITY:
+                        priv_seg6.delete_local_rule(pref, family_v6=family_v6)
+                        LOG.info("SRv6: %(f)s local rule moved from pref "
+                                 "%(old)d to %(new)d, after l3mdev",
+                                 {'f': name, 'old': pref,
+                                  'new': constants.LOCAL_RULE_PRIORITY})
+            except Exception as e:
+                LOG.error("SRv6: could not move the %(f)s local rule after "
+                          "l3mdev: %(e)s. Tenants can reach this host's own "
+                          "addresses from inside their VRF.",
+                          {'f': name, 'e': e})
 
     def _apply_global_sysctls(self):
         for key, value in GLOBAL_SYSCTLS:

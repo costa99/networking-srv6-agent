@@ -66,6 +66,8 @@ class DataplaneTestCaseBase(base.BaseTestCase):
 
         self.priv_seg6.list_sid_rules.return_value = []
         self.priv_seg6.list_vrf_names.return_value = []
+        # The kernel's default rule order, which F7 changes.
+        self.priv_seg6.local_rule_prefs.return_value = [0]
         # A node fresh from a full-SID build: the `local` locator route.
         self.priv_seg6.show_main_route.return_value = [
             'local %s dev lo metric 1024 pref medium' % LOCATOR]
@@ -110,6 +112,60 @@ class TestNodeInitialisation(DataplaneTestCaseBase):
         self.priv_seg6.modprobe_vrf.side_effect = RuntimeError('no module')
         self.dp.initialize_node()
         self.assertTrue(self.priv_seg6.replace_locator_route.called)
+
+
+class TestLocalRuleOrder(DataplaneTestCaseBase):
+    """F7: the local rule goes after l3mdev, so a VRF cannot reach the host.
+
+    t9 and t10 (2026-10-03): from inside a VRF the management address
+    answered ping and a forged ICMPv6 to the underlay address was
+    delivered, because `0: lookup local` precedes `1000: l3mdev`.
+    """
+
+    def _calls(self):
+        return [(c[0], c[1], c[2]) for c in self.priv_seg6.method_calls
+                if c[0] in ('add_local_rule', 'delete_local_rule')]
+
+    def test_both_families_are_moved_add_before_delete(self):
+        # Added first: the host is never without a local rule.
+        self.dp.initialize_node()
+        self.assertEqual(
+            [('add_local_rule', (32765,), {'family_v6': False}),
+             ('delete_local_rule', (0,), {'family_v6': False}),
+             ('add_local_rule', (32765,), {'family_v6': True}),
+             ('delete_local_rule', (0,), {'family_v6': True})],
+            self._calls())
+
+    def test_the_new_place_is_after_l3mdev_and_before_main(self):
+        self.assertGreater(dataplane.constants.LOCAL_RULE_PRIORITY, 1000)
+        self.assertLess(dataplane.constants.LOCAL_RULE_PRIORITY, 32766)
+
+    def test_an_already_moved_rule_is_left_alone(self):
+        self.priv_seg6.local_rule_prefs.return_value = [32765]
+        self.dp.initialize_node()
+        self.priv_seg6.add_local_rule.assert_not_called()
+        self.priv_seg6.delete_local_rule.assert_not_called()
+
+    def test_a_half_done_move_is_finished(self):
+        # Both present: a crash between the add and the delete.
+        self.priv_seg6.local_rule_prefs.return_value = [0, 32765]
+        self.dp.initialize_node()
+        self.priv_seg6.add_local_rule.assert_not_called()
+        self.assertEqual(
+            [mock.call(0, family_v6=False), mock.call(0, family_v6=True)],
+            self.priv_seg6.delete_local_rule.call_args_list)
+
+    def test_a_failure_does_not_stop_the_node(self):
+        self.priv_seg6.local_rule_prefs.side_effect = RuntimeError('boom')
+        self.dp.initialize_node()
+        self.priv_seg6.replace_locator_route.assert_called_once_with(LOCATOR)
+
+    def test_l3mdev_accept_stays_off(self):
+        # At 1 a socket of the host answers connections from every VRF.
+        self.assertIn(('net.ipv4.tcp_l3mdev_accept', '0'),
+                      dataplane.GLOBAL_SYSCTLS)
+        self.assertIn(('net.ipv4.udp_l3mdev_accept', '0'),
+                      dataplane.GLOBAL_SYSCTLS)
 
 
 class TestNodeEndSid(DataplaneTestCaseBase):

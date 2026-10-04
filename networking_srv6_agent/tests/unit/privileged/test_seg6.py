@@ -252,6 +252,49 @@ class TestSidRules(Seg6ArgvTestCase):
         self.assertRaises(RuntimeError, seg6.list_sid_rules)
 
 
+class TestLocalRule(Seg6ArgvTestCase):
+    """F7: moving the kernel's `local` rule after l3mdev."""
+
+    def test_prefs_of_the_plain_local_rule_only(self):
+        self.ip_route_cmd.return_value = (
+            '0:\tfrom all lookup local\n'
+            '999:\tfrom all to fc00:0:2:95a:: iif sv6vrf-1 lookup main\n'
+            '1000:\tfrom all lookup [l3mdev-table]\n'
+            '2000:\tfrom all iif eth1 lookup local\n'
+            '32765:\tfrom all lookup local\n'
+            '32766:\tfrom all lookup main\n')
+        self.assertEqual([0, 32765], seg6.local_rule_prefs(family_v6=True))
+        self.assertEqual(['-6', 'rule', 'show'], self.argv)
+
+    def test_ipv4_has_no_family_flag(self):
+        self.ip_route_cmd.return_value = '0:\tfrom all lookup local\n'
+        self.assertEqual([0], seg6.local_rule_prefs())
+        self.assertEqual(['rule', 'show'], self.argv)
+
+    def test_add(self):
+        seg6.add_local_rule(32765, family_v6=True)
+        self.assertEqual(['-6', 'rule', 'add', 'pref', '32765', 'lookup',
+                          'local'], self.argv)
+
+    def test_delete_names_the_table_too(self):
+        # `del pref 0` alone would delete whatever rule sits at 0.
+        seg6.delete_local_rule(0)
+        self.assertEqual(['rule', 'del', 'pref', '0', 'lookup', 'local'],
+                         self.argv)
+
+    def test_add_of_an_existing_rule_is_success(self):
+        self.ip_route_cmd.side_effect = \
+            seg6.processutils.ProcessExecutionError(
+                stderr='RTNETLINK answers: File exists')
+        self.assertIsNone(seg6.add_local_rule(32765))
+
+    def test_delete_of_a_missing_rule_is_success(self):
+        self.ip_route_cmd.side_effect = \
+            seg6.processutils.ProcessExecutionError(
+                stderr='RTNETLINK answers: No such file or directory')
+        self.assertIsNone(seg6.delete_local_rule(0))
+
+
 class TestLocatorRoute(Seg6ArgvTestCase):
 
     def test_locator_route_lands_in_table_main(self):

@@ -125,6 +125,16 @@ VRF_UNREACHABLE_METRIC = 4278198272
 # hop to the underlay however many hops away it is.
 SID_RULE_PRIORITY = 999
 
+# Where the `local` FIB rule goes (F7). The kernel puts it at 0, ahead of
+# the l3mdev rule at 1000, so a lookup from inside a VRF found every host
+# address first: t9 saw a tenant ping the management address and deliver a
+# forged ICMPv6 to the underlay address. After l3mdev, a VRF's lookup ends
+# at its own table (sealed, so it never falls through), and everything else
+# still finds `local` before `main` -- the order Documentation/networking/
+# vrf.rst recommends:
+#     ip [-6] rule add pref 32765 lookup local; ip [-6] rule del pref 0
+LOCAL_RULE_PRIORITY = 32765
+
 # The nftables table of the SRv6 edge filter: on the
 # gateway ports, drop tenant packets addressed into the SID space or carrying
 # any SRH at all. Its own table in the inet family, so neutron's iptables-nft

@@ -377,6 +377,51 @@ def list_vrf_names():
     return names
 
 
+def local_rule_prefs(family_v6=False):
+    """Priorities of the `from all lookup local` rules, in order.
+
+    Only the plain rule counts: one with a selector (`iif`, `to`, ...) is
+    not the kernel's default and not ours to move. Raises on failure.
+    """
+    out = ip_route_cmd((['-6'] if family_v6 else []) + ['rule', 'show'])
+    prefs = []
+    for line in out.splitlines():
+        fields = line.split()
+        if fields[1:] != ['from', 'all', 'lookup', 'local']:
+            continue
+        try:
+            prefs.append(int(fields[0].rstrip(':')))
+        except ValueError:
+            continue
+    return prefs
+
+
+def _local_rule_args(verb, pref, family_v6):
+    return ((['-6'] if family_v6 else []) +
+            ['rule', verb, 'pref', str(pref), 'lookup', 'local'])
+
+
+def add_local_rule(pref, family_v6=False):
+    """`ip [-6] rule add pref <pref> lookup local`; existing is success."""
+    try:
+        return ip_route_cmd(_local_rule_args('add', pref, family_v6))
+    except processutils.ProcessExecutionError as e:
+        if 'File exists' in str(e):
+            return None
+        raise
+
+
+def delete_local_rule(pref, family_v6=False):
+    """`ip [-6] rule del pref <pref> lookup local`; absent is success."""
+    try:
+        return ip_route_cmd(_local_rule_args('del', pref, family_v6))
+    except processutils.ProcessExecutionError as e:
+        if ('No such file' in str(e) or 'No such process' in str(e) or
+                'Cannot find' in str(e)):
+            return None
+        raise
+
+
 def _sid_rule_args(verb, vrf_name, sid_address):
     return ['-6', 'rule', verb, 'pref', str(constants.SID_RULE_PRIORITY),
             'iif', vrf_name, 'to', '%s/128' % sid_address, 'lookup', 'main']
