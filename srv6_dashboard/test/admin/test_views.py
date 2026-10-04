@@ -20,7 +20,10 @@ domains, the project and SID function, creating for a project, admin
 URLs -- and that a non-admin cannot get in at all.
 """
 
+from django.test.utils import override_settings
 from django.urls import reverse
+import horizon
+from openstack_auth import policy
 from openstack_dashboard.api import keystone
 from openstack_dashboard.test import helpers as test
 
@@ -259,3 +262,55 @@ class LocatorsTabTests(helpers.BaseAdminViewTests):
 
         self.assertEqual(0, len(res.context['srv6_locators_table'].data))
         self.assertMessageCount(res, error=1)
+
+
+# Production's policy settings (openstack_dashboard/defaults.py): the
+# check function, and a policy file for 'network', where context_is_admin
+# is "role:admin". Horizon's test settings have neither, and with no file
+# for a service openstack_auth.policy.check allows everything.
+POLICY_ON = override_settings(
+    POLICY_CHECK_FUNCTION='openstack_auth.policy.check',
+    POLICY_FILES={'identity': 'keystone_policy.json',
+                  'compute': 'nova_policy.json',
+                  'network': 'neutron_policy.yaml'})
+ADMIN_PANELS = ('srv6', 'srv6_topology')
+
+
+def _can_access(request, slug):
+    panel = horizon.get_dashboard('admin').get_panel(slug)
+    return panel.can_access({'request': request})
+
+
+class PanelPolicyTests(helpers.TestCase):
+    """The admin panels' own gate, with policy checks on (FEATURE D23).
+
+    Horizon's test settings set POLICY_CHECK_FUNCTION = None, so every
+    other test here goes through the Admin dashboard's `permissions` gate.
+    A real Horizon runs openstack_auth.policy.check, where that gate is
+    absent and each panel's policy_rules decides. These tests ask each
+    panel directly, under the production settings.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # The enforcers are cached per process; build them from POLICY_ON.
+        policy.reset()
+        self.addCleanup(policy.reset)
+
+    @POLICY_ON
+    def test_tenant_is_refused_by_each_panel(self):
+        for slug in ADMIN_PANELS:
+            self.assertFalse(_can_access(self.request, slug), slug)
+
+
+class PanelPolicyAdminTests(helpers.BaseAdminViewTests):
+
+    def setUp(self):
+        super().setUp()
+        policy.reset()
+        self.addCleanup(policy.reset)
+
+    @POLICY_ON
+    def test_admin_is_let_in_by_each_panel(self):
+        for slug in ADMIN_PANELS:
+            self.assertTrue(_can_access(self.request, slug), slug)

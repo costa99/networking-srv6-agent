@@ -20,10 +20,14 @@ import horizon
 class Srv6(horizon.Panel):
     """Admin > Network > SRv6, at /admin/srv6/.
 
-    No permissions of its own: the Admin dashboard already requires the
-    admin role (openstack_dashboard/dashboards/admin/dashboard.py), and
-    Neutron's policy makes TE paths and locators admin-only regardless.
+    policy_rules is what makes the panel admin-only. Being in the Admin
+    dashboard is not enough: with policy checks on (Horizon's default,
+    POLICY_CHECK_FUNCTION = openstack_auth.policy.check) the dashboard
+    gates its URLs only through `permissions`, which it then does not set,
+    and each panel must declare its own rule -- as every core admin panel
+    does. Found live: without it a tenant opened this page (FEATURE D23).
     """
 
     name = _("SRv6")
     slug = 'srv6'
+    policy_rules = (('network', 'context_is_admin'),)

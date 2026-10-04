@@ -21,7 +21,10 @@ class Srv6Topology(horizon.Panel):
     """Admin > Network > SRv6 Topology, at /admin/srv6_topology/.
 
     Read-only (D8): changes go through the SRv6 panel's tested forms.
+    policy_rules makes it admin-only, page and data/ alike (see the SRv6
+    panel, FEATURE D23).
     """
 
     name = _("SRv6 Topology")
     slug = 'srv6_topology'
+    policy_rules = (('network', 'context_is_admin'),)
