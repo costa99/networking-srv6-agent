@@ -1,0 +1,50 @@
+{% load i18n %}
+
+<div class="detail">
+  <dl class="dl-horizontal">
+    <dt>{% trans "ID" %}</dt>
+    <dd>{{ path.id }}</dd>
+    <dt>{% trans "Domain" %}</dt>
+    <dd>{{ domain }}</dd>
+    <dt>{% trans "Project ID" %}</dt>
+    <dd>{{ path.project_id }}</dd>
+    <dt>{% trans "Destination" %}</dt>
+    <dd>{{ destination }}</dd>
+    <dt>{% trans "Via" %}</dt>
+    <dd>{{ via }}</dd>
+    <dt>{% trans "Status" %}</dt>
+    <dd>{{ status }}
+      {% if path.status == 'DEGRADED' %}
+      <p class="help-block">{% blocktrans trimmed %}
+        A waypoint or the destination has no registered SRv6 locator, or the
+        destination port is unbound. Until that is fixed the domain's
+        traffic toward this destination goes direct.
+      {% endblocktrans %}</p>
+      {% endif %}
+    </dd>
+  </dl>
+
+  <h4>{% trans "Segments" %}</h4>
+  <p class="help-block">{% blocktrans trimmed %}
+    What the server resolved, in traversal order. This is what the nodes are
+    told to push; it is not an acknowledgement from their kernels.
+  {% endblocktrans %}</p>
+  {% if segments %}
+  <dl class="dl-horizontal">
+    {% for sid, role in segments %}
+    <dt><code>{{ sid }}</code></dt>
+    <dd>{{ role }}</dd>
+    {% endfor %}
+  </dl>
+  {% else %}
+  <p>-</p>
+  {% endif %}
+
+  <h4>{% trans "Pushed SIDs" %}</h4>
+  <p class="help-block">{% blocktrans trimmed %}
+    The same list as it goes into the packet. With microSID encoding several
+    segments share one 128-bit container; otherwise this equals the
+    segments.
+  {% endblocktrans %}</p>
+  <p>{{ encoded }}</p>
+</div>

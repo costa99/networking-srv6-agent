@@ -1,0 +1,15 @@
+{% extends "horizon/common/_modal_form.html" %}
+{% load i18n %}
+
+{% block modal-body-right %}
+  <h3>{% trans "Description:" %}</h3>
+  <p>{% blocktrans trimmed with dest=path.destination_host|default:path.destination_port_id %}
+    The waypoints toward <strong>{{ dest }}</strong> are replaced as a whole,
+    in one update: there is no moment without a path. Clear them all to
+    make the path direct.
+  {% endblocktrans %}</p>
+  <p>{% blocktrans trimmed %}
+    The domain and the destination cannot change; delete the path and
+    create another for that.
+  {% endblocktrans %}</p>
+{% endblock %}

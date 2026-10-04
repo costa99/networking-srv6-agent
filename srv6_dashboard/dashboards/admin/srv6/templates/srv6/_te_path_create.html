@@ -1,0 +1,21 @@
+{% extends "horizon/common/_modal_form.html" %}
+{% load i18n %}
+
+{% block modal-body-right %}
+  <h3>{% trans "Description:" %}</h3>
+  <p>{% blocktrans trimmed %}
+    A TE path steers a domain's traffic toward one destination through
+    waypoints, in order. Every node then encapsulates that traffic with a
+    segment list: the End SID of each waypoint, then the destination's
+    End.DT46 SID.
+  {% endblocktrans %}</p>
+  <p>{% blocktrans trimmed %}
+    The destination is either a host (all of the domain's ports on it) or a
+    single VM port; a port path wins over a host path for that port. Only
+    hosts with a registered SRv6 locator are offered.
+  {% endblocktrans %}</p>
+  <p>{% blocktrans trimmed %}
+    Without waypoints the path is direct, as if there were none: useful to
+    pin a VM's traffic to the direct route while a host path exists.
+  {% endblocktrans %}</p>
+{% endblock %}

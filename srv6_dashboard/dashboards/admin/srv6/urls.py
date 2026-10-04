@@ -14,9 +14,11 @@
 
 from django.urls import re_path
 
+from srv6_dashboard.dashboards.admin.srv6.te_paths import views as te_views
 from srv6_dashboard.dashboards.admin.srv6 import views
 
 DOMAIN = r'^(?P<domain_id>[^/]+)/%s$'
+TE_PATH = r'^te_paths/(?P<path_id>[^/]+)/%s$'
 
 urlpatterns = [
     re_path(r'^$', views.IndexView.as_view(), name='index'),
@@ -25,4 +27,10 @@ urlpatterns = [
     re_path(DOMAIN % 'update/', views.UpdateView.as_view(), name='update'),
     re_path(DOMAIN % 'associate/', views.AssociateNetworkView.as_view(),
             name='associate'),
+    re_path(r'^te_paths/create/$', te_views.CreateView.as_view(),
+            name='te_path_create'),
+    re_path(TE_PATH % 'detail/', te_views.DetailView.as_view(),
+            name='te_path_detail'),
+    re_path(TE_PATH % 'update/', te_views.UpdateView.as_view(),
+            name='te_path_update'),
 ]

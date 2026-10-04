@@ -51,6 +51,35 @@ def sid_function(value):
     return '%d (0x%x)' % (value, value)
 
 
+def sid_list(sids):
+    """A segment list, one SID per line, in traversal order."""
+    if not sids:
+        return '-'
+    return html.format_html_join(html.mark_safe('<br>'), '<code>{}</code>',
+                                 ((s,) for s in sids))
+
+
+def via_hosts(hosts):
+    """Waypoints in order, or 'direct' when the path has none."""
+    if not hosts:
+        return _("direct")
+    return ' → '.join(hosts)
+
+
+#: Status as a Bootstrap label (services/plugin.py _resolve_te_path).
+#: DEGRADED: a via host or the destination has no registered locator, or
+#: the destination port is unbound, so segments is [] and the domain's
+#: routes go direct -- traffic flows, but not through the waypoints.
+#: ACTIVE is the server's resolution, not an agent's acknowledgement.
+_STATUS_LABEL = {'ACTIVE': 'label-success', 'DEGRADED': 'label-warning'}
+
+
+def te_status(status):
+    return html.format_html('<span class="label {}">{}</span>',
+                            _STATUS_LABEL.get(status, 'label-default'),
+                            status or '-')
+
+
 BEHAVIOR_HELP = _(
     "End.DT46 is the only behavior the plugin implements: each node "
     "decapsulates the domain's traffic into the domain's VRF, for IPv4 "

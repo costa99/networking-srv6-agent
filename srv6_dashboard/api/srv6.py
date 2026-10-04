@@ -85,6 +85,18 @@ def network_names(networks):
     return {n.id: n.name_or_id for n in networks}
 
 
+def port_list(request, **filters):
+    """GET /v2.0/ports -- core Neutron, policy get_port.
+
+    The TE path form's destination ports: network_id may be a list, sent
+    as a repeated query parameter, so one request covers the networks of
+    every domain.
+    """
+    LOG.debug("port_list(): filters=%s", filters)
+    ports = networkclient(request).ports(**filters)
+    return [neutron.Port(_dict(p)) for p in ports]
+
+
 # --- domains -------------------------------------------------------------
 
 def domain_list(request, **filters):
