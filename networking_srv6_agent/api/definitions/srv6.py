@@ -20,8 +20,9 @@ build needed `neutron_lib.api.definitions.bgpvpn_srv6`, which exists only in
 the fork, while APIExtensionDescriptor accepts any module-like object that
 carries these names.
 
-URLs have no path prefix and every collection is prefixed `srv6_`: neutron derives the policy rule names from the
-collection name, so a bare `domains` would register a global `create_domain` rule.
+URLs have no path prefix and every collection is prefixed `srv6_`: neutron
+derives the policy rule names from the collection name, so a bare `domains`
+would register a global `create_domain` rule.
 """
 
 from neutron_lib.db import constants as db_const

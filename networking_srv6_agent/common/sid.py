@@ -50,11 +50,13 @@ def parse_locator(locator):
     :raises InvalidLocator: on anything that is not a usable IPv6 locator
     """
     try:
-        net = ipaddress.IPv6Network(locator, strict=True) #checks that the host bits are zero for a valid locator
+        # strict: the host bits must be zero for a valid locator
+        net = ipaddress.IPv6Network(locator, strict=True)
     except ValueError as e:
         raise InvalidLocator(_("%s is not a valid IPv6 prefix: %s")
                              % (locator, e))
-    if net.prefixlen + constants.FUNCTION_BITS > 128: #checks that the function field fits in the remaining bits of the address
+    # the function field must fit in the remaining bits of the address
+    if net.prefixlen + constants.FUNCTION_BITS > 128:
         raise InvalidLocator(
             _("locator %s is too long: a %d-bit function field does not "
               "fit")

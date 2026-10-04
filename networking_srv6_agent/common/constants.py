@@ -87,8 +87,9 @@ NODE_END_FUNCTION_ID = 0xfff0
 BEHAVIOR_END = 'End'
 
 # The decapsulation behaviors a domain may choose. Exactly one today: the
-# API offers no choice it cannot honour. The attribute stays in the API anyway, so adding End.DT4 / End.DT6 later is a
-# new value here rather than a new attribute.
+# API offers no choice it cannot honour. The attribute stays in the API
+# anyway, so adding End.DT4 / End.DT6 later is a new value here rather than
+# a new attribute.
 BEHAVIOR_END_DT46 = 'End.DT46'
 VALID_BEHAVIORS = [BEHAVIOR_END_DT46]
 DEFAULT_BEHAVIOR = BEHAVIOR_END_DT46
@@ -118,7 +119,8 @@ VRF_UNREACHABLE_METRIC = 4278198272
 # after seg6 encapsulates a packet that arrived on a gateway port, the
 # kernel routes the new OUTER IPv6 header in the same VRF, hit the IPv6
 # unreachable default, and dropped every packet (at the two-node
-# gate, Ip6InNoRoutes one per echo request). One rule per (domain, remote node):
+# gate, Ip6InNoRoutes one per echo request). One rule per (domain, remote
+# node):
 #     ip -6 rule add pref 999 iif sv6vrf-<fid> to <remote sid>/128 lookup main
 # `iif <vrf master>` matches traffic arriving on the VRF's enslaved ports,
 # so another domain's VRF gains nothing, and `lookup main` leaves the next
