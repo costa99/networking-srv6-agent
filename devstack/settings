@@ -24,3 +24,7 @@ SRV6_DATAPLANE_ENCODING=${SRV6_DATAPLANE_ENCODING:-encap}
 SRV6_VRF_TABLE_BASE=${SRV6_VRF_TABLE_BASE:-10000}
 
 SRV6_RESYNC_INTERVAL=${SRV6_RESYNC_INTERVAL:-300}
+
+# The Horizon panels (srv6_dashboard): the enabled files plugin.sh copies into
+# Horizon when the horizon service is enabled.
+SRV6_DASHBOARD_ENABLE=${SRV6_DASHBOARD_ENABLE:-$NETWORKING_SRV6_AGENT_DIR/srv6_dashboard/enabled/_[0-9]*_srv6_*panel.py}

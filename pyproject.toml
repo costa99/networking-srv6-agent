@@ -26,8 +26,17 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
 ]
 
+# Horizon is optional: only the node serving the dashboard needs it, and
+# neutron-server never imports srv6_dashboard (FEATURE-HORIZON-DASHBOARD D2).
+# `pip install networking-srv6-agent[horizon]` on that node; devstack's
+# Horizon already has it.
+[project.optional-dependencies]
+horizon = ["horizon>=25.0.0"]
+
 [tool.setuptools]
-packages = ["networking_srv6_agent"]
+# srv6_dashboard: the Horizon plugin, a package of its own so that the
+# server side never imports Django and the dashboard never imports neutron.
+packages = ["networking_srv6_agent", "srv6_dashboard"]
 
 # --- Entry points --------------------------------------------------------
 #

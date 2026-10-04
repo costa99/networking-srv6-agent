@@ -55,6 +55,22 @@ elif [[ "$1" == "stack" && "$2" == "post-config" ]]; then
         iniset /$NEUTRON_CORE_PLUGIN_CONF srv6_agent resync_interval \
             $SRV6_RESYNC_INTERVAL
     fi
+
+    # The Horizon panels, on the node serving the dashboard. post-config
+    # runs before devstack's init_horizon, whose collectstatic and
+    # compress must already see them. Nothing to install: setup_develop
+    # above put srv6_dashboard in the same venv as Horizon. No
+    # POLICY_FILES entry, unlike networking-bgpvpn: Neutron enforces the
+    # policy and the admin panels sit behind the Admin dashboard's gate
+    # (FEATURE-HORIZON-DASHBOARD D9).
+    if is_service_enabled horizon; then
+        cp $SRV6_DASHBOARD_ENABLE \
+            $HORIZON_DIR/openstack_dashboard/local/enabled/
+    fi
+
+elif [[ "$1" == "clean" ]]; then
+    # Undo the copy above; Horizon then starts without the SRv6 panels.
+    rm -f $HORIZON_DIR/openstack_dashboard/local/enabled/_*_srv6_*panel.py
 fi
 
 $_XTRACE_NETWORKING_SRV6_AGENT
