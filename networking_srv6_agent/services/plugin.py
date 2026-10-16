@@ -35,6 +35,7 @@ that later rolls back.
 import datetime
 import ipaddress
 
+from neutron import worker as neutron_worker
 from neutron_lib.api.definitions import portbindings
 from neutron_lib.callbacks import events
 from neutron_lib.callbacks import registry
@@ -62,6 +63,7 @@ from networking_srv6_agent.db import te_db
 from networking_srv6_agent.extensions import srv6 as srv6_ext
 from networking_srv6_agent.extensions import srv6_te as te_ext
 from networking_srv6_agent.services import rpc
+from networking_srv6_agent.services import te_liveness
 
 
 LOG = logging.getLogger(__name__)
@@ -274,13 +276,18 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             return False
         return port.get('status') == n_const.PORT_STATUS_ACTIVE
 
-    def _build_domain_payload(self, context, domain, locators=None):
+    def _build_domain_payload(self, context, domain, locators=None,
+                              dead_hosts=None):
         """Full desired state of one domain, as agents consume it.
 
         Built with an ELEVATED context whoever triggered it. A shared network
         is allowed in a domain, and the instances on it may
         belong to other projects: under the owner's own context their ports
         are invisible, so their routes would silently be missing.
+
+        dead_hosts only steers TE paths around dead waypoints; the payload's
+        `locators` stay complete, because a dead node's VMs keep their
+        routes and decap SIDs on every other node.
         """
         admin_context = context.elevated()
         if locators is None:
@@ -303,7 +310,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 admin_context, domain['id'],
                 self._routes_for_domain(admin_context, network_ids,
                                         locators),
-                locators),
+                locators, dead_hosts),
             'locators': locators,
             # Additive, so PAYLOAD_VERSION stays 1: an older agent ignores
             # it, and a missing key means full SIDs to a newer one.
@@ -651,8 +658,43 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
     # ------------------------------------------------------------------
     # traffic engineering (P6, admin-only)
     # ------------------------------------------------------------------
-    def _transit_sids(self, via_hosts, locators):
-        """The transit SIDs of via_hosts in order, or None if one is unknown.
+    def _dead_hosts(self, admin_context):
+        """The hosts whose node is down, judged by Neutron's agent liveness.
+
+        A node is dead when its Open vSwitch agent -- the process that hosts
+        the SRv6 extension -- has missed its heartbeats for agent_down_time.
+        The locator registry cannot say this: its rows are never expired.
+
+        Computed from the database each time, never cached in the process:
+        API workers resolve paths too, and one worker's memory would
+        disagree with another's. A host with no agent row is not dead, and
+        so is every host when the check is off (te_liveness_interval = 0)
+        or the question cannot be answered: an unanswerable query leaves the
+        paths steered, as before this check existed, instead of rerouting
+        every one of them on a database hiccup.
+        """
+        if not self.conf.te_liveness_interval:
+            return frozenset()
+        get_agents = getattr(self._core_plugin(), 'get_agents', None)
+        if get_agents is None:
+            return frozenset()
+        try:
+            agents = get_agents(
+                admin_context,
+                filters={'agent_type': [n_const.AGENT_TYPE_OVS]})
+            return frozenset(agent['host'] for agent in agents
+                             if not agent['alive'])
+        except Exception:
+            LOG.exception("SRv6: cannot read agent liveness; treating "
+                          "every TE waypoint as alive")
+            return frozenset()
+
+    def _transit_sids(self, via_hosts, locators, dead_hosts=()):
+        """The transit SIDs of via_hosts in order, or None if one is unusable.
+
+        A host is unusable when it has no registered locator or when its
+        node is dead (dead_hosts, see _dead_hosts): a dead waypoint
+        blackholes the path exactly as a missing one cannot be encoded.
 
         Each host's End SID, <locator>:fff0::, or in usid mode its uN, the
         locator's own address -- the agent packs those into containers.
@@ -663,7 +705,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         falls back to the direct route instead, and the path reports
         DEGRADED.
         """
-        if any(not locators.get(host) for host in via_hosts):
+        if any(not locators.get(host) or host in dead_hosts
+               for host in via_hosts):
             return None
         if self.usid:
             try:
@@ -677,7 +720,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 for host in via_hosts]
 
     def _route_transit(self, domain_id, route, by_port, by_host, locators,
-                       source=None):
+                       source=None, dead_hosts=()):
         """The transit SIDs one set of paths gives a route, or None.
 
         by_port and by_host are the paths of one rank pair: the any-source
@@ -687,7 +730,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
 
             None   no path of this set applies to the route
             []     a path applies and says direct: no vias, or DEGRADED (a
-                   via host, or the source, has no registered locator).
+                   via host has no registered locator or its node is dead,
+                   or the source has no registered locator).
                    Degraded is direct, not "fall through to the next path
                    down", which the admin did not ask for either.
             [...]  the transit SIDs, in traversal order
@@ -701,18 +745,21 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             return []
         transit = None
         if source is None or locators.get(source):
-            transit = self._transit_sids(via_hosts, locators)
+            transit = self._transit_sids(via_hosts, locators, dead_hosts)
         if transit is None:
             LOG.warning("SRv6 domain %(d)s: the TE path toward %(p)s%(s)s "
-                        "names a host with no registered locator (via "
-                        "%(v)s); routing it directly",
+                        "names a host with no registered locator or a dead "
+                        "node (via %(v)s, dead: %(x)s); routing it directly",
                         {'d': domain_id, 'p': route['prefix'],
                          's': ' from %s' % source if source else '',
-                         'v': ', '.join(via_hosts)})
+                         'v': ', '.join(via_hosts),
+                         'x': ', '.join(sorted(
+                             set(via_hosts) & set(dead_hosts))) or 'none'})
             return []
         return transit
 
-    def _attach_segments(self, admin_context, domain_id, routes, locators):
+    def _attach_segments(self, admin_context, domain_id, routes, locators,
+                         dead_hosts=None):
         """Give each steered route its transit SIDs. Mutates `routes`.
 
         One payload goes to every node, so a route carries the answer for
@@ -744,6 +791,11 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
 
         Transit SIDs only: the agent appends the decap SID, from the locator
         of the route's host, as it always has.
+
+        dead_hosts is what _dead_hosts returned; None asks it here, after the
+        no-paths return, so a domain with no TE path costs no agent query.
+        A path through a dead host is direct, like one through an unknown
+        host: [] for every route it covers.
         """
         paths = te_db.get_te_paths_for_domain(admin_context, domain_id)
         by_port, by_host = paths['by_port'], paths['by_host']
@@ -752,9 +804,11 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         # leave here unsteered.
         if not by_port and not by_host and not by_source:
             return routes
+        if dead_hosts is None:
+            dead_hosts = self._dead_hosts(admin_context)
         for route in routes:
             transit = self._route_transit(domain_id, route, by_port, by_host,
-                                          locators)
+                                          locators, dead_hosts=dead_hosts)
             if transit:
                 route['segments'] = transit
             per_source = {}
@@ -763,7 +817,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                     continue
                 transit = self._route_transit(
                     domain_id, route, by_source[source]['by_port'],
-                    by_source[source]['by_host'], locators, source=source)
+                    by_source[source]['by_host'], locators, source=source,
+                    dead_hosts=dead_hosts)
                 if transit is not None:
                     per_source[source] = transit
             if per_source:
@@ -795,12 +850,14 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             transit.pop(0)
         return transit
 
-    def _resolve_te_path(self, context, path, locators, function_id):
+    def _resolve_te_path(self, context, path, locators, function_id,
+                         dead_hosts=()):
         """Attach `segments` and `status` -- what the server resolved.
 
         ACTIVE:   [<via End SIDs>..., <destination decap SID>]
         DEGRADED: [], because a via host or the destination has no locator,
-                  or the port is unbound; the routes go direct meanwhile.
+                  a via host's node is dead (dead_hosts), or the port is
+                  unbound; the routes go direct meanwhile.
                   For a path with a source_host, also when the source has
                   no locator, or the destination is the source itself (a
                   port path whose VM has moved onto it): its agent never
@@ -822,7 +879,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         path = dict(path)
         source = path.get(te_def.SOURCE_HOST)
         destination = self._destination_of(context.elevated(), path)
-        transit = self._transit_sids(path[te_def.VIA_HOSTS], locators)
+        transit = self._transit_sids(path[te_def.VIA_HOSTS], locators,
+                                     dead_hosts)
         active = bool(destination and locators.get(destination) and
                       transit is not None and function_id is not None)
         if active and source:
@@ -839,11 +897,11 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             return path
         LOG.warning("SRv6 TE path %(id)s is DEGRADED: destination %(dst)s, "
                     "source %(src)s, via %(via)s; not every host on it has "
-                    "a registered locator, the port is unbound, or the "
-                    "destination is the source itself, so its routes go "
-                    "direct", {'id': path['id'], 'dst': destination,
-                               'src': source or 'any',
-                               'via': path[te_def.VIA_HOSTS]})
+                    "a registered locator or is dead, the port is unbound, "
+                    "or the destination is the source itself, so its "
+                    "routes go direct", {'id': path['id'], 'dst': destination,
+                                         'src': source or 'any',
+                                         'via': path[te_def.VIA_HOSTS]})
         path[te_def.SEGMENTS] = []
         path[te_def.ENCODED_SEGMENTS] = []
         path[te_def.STATUS] = te_def.STATUS_DEGRADED
@@ -864,7 +922,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             locators = srv6_db.get_host_locators(admin_context)
         return self._resolve_te_path(
             context, path, locators,
-            srv6_db.get_function_id(admin_context, path['domain_id']))
+            srv6_db.get_function_id(admin_context, path['domain_id']),
+            self._dead_hosts(admin_context))
 
     @staticmethod
     def _validate_via_hosts(via_hosts, locators):
@@ -990,6 +1049,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             return []
         admin_context = context.elevated()
         locators = srv6_db.get_host_locators(admin_context)
+        dead_hosts = self._dead_hosts(admin_context)
         function_ids = {}
         res = []
         for path in paths:
@@ -998,7 +1058,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 function_ids[domain_id] = srv6_db.get_function_id(
                     admin_context, domain_id)
             res.append(_only(self._resolve_te_path(
-                context, path, locators, function_ids[domain_id]), fields))
+                context, path, locators, function_ids[domain_id],
+                dead_hosts), fields))
         return res
 
     def update_srv6_te_path(self, context, id, srv6_te_path):
@@ -1145,6 +1206,25 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
     # ------------------------------------------------------------------
     # agent -> server
     # ------------------------------------------------------------------
+    def get_workers(self):
+        """The TE liveness monitor, one instance for the whole server.
+
+        Neutron starts every worker with worker_process_count 0 as a thread
+        of one extra process, so a node that dies is noticed and pushed once,
+        not once per API worker. Nothing to start when the check is off.
+
+        The first pass waits half of agent_down_time, like Neutron's own
+        agent status check: right after a server restart the agents have not
+        yet reported, and a late heartbeat must not read as a death.
+        """
+        interval = self.conf.te_liveness_interval
+        if not interval:
+            return []
+        monitor = te_liveness.TeLivenessMonitor(self)
+        return [neutron_worker.PeriodicWorker(
+            monitor.check, interval, max(cfg.CONF.agent_down_time // 2, 1),
+            desc='srv6-te-liveness')]
+
     def start_rpc_listeners(self):
         """Serve sync_state. Called by neutron's RPC worker at startup.
 
@@ -1195,6 +1275,10 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         else:
             locator_changed = False
         locators = srv6_db.get_host_locators(admin_context)
+        # Once per sync, not once per domain. The node that is syncing may
+        # still count as dead for a moment (its first heartbeat can follow
+        # this call); the liveness monitor re-pushes when it turns alive.
+        dead_hosts = self._dead_hosts(admin_context)
         payloads = []
         for domain in domain_db.get_domains(admin_context):
             # F11: a domain with no network has no state on any node. It
@@ -1205,7 +1289,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             if not domain.get(srv6_def.NETWORKS):
                 continue
             payload = self._build_domain_payload(admin_context, domain,
-                                                 locators)
+                                                 locators, dead_hosts)
             if payload is not None:
                 payloads.append(payload)
         if locator_changed:

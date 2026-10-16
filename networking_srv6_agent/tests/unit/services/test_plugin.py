@@ -445,6 +445,7 @@ class PluginUnitTestCaseBase(base.BaseTestCase):
         get_plugin.start()
         self.addCleanup(get_plugin.stop)
         self.srv6_db.get_host_locators.return_value = {}
+        self.core.get_agents.return_value = []
         self.te_db.get_te_paths_for_domain.return_value = {'by_port': {},
                                                            'by_host': {}}
         self.plugin = plugin.Srv6Plugin()

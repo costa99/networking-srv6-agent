@@ -61,6 +61,19 @@ srv6_server_opts = [
                "function id. Derived, never allocated. Must be high enough "
                "to avoid the well-known tables (main=254, local=255) and any "
                "table another agent on the node uses.")),
+    cfg.IntOpt(
+        'te_liveness_interval',
+        default=15,
+        min=0,
+        help=_("Seconds between checks for a TE waypoint whose node has "
+               "died. A path through a node whose Open vSwitch agent is "
+               "down is reported DEGRADED and its routes go direct until "
+               "the agent is alive again. A node is judged dead by "
+               "Neutron's own agent_down_time, so the failover time is "
+               "about agent_down_time plus this interval; lower "
+               "agent_down_time to fail over faster. 0 turns the check "
+               "off: a dead waypoint then blackholes its paths until an "
+               "admin re-steers them.")),
 ]
 
 srv6_agent_opts = [

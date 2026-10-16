@@ -30,6 +30,7 @@ from oslo_db import exception as db_exc
 from oslo_utils import uuidutils
 
 from networking_srv6_agent.api.definitions import srv6_te as te_def
+from networking_srv6_agent.common import config
 from networking_srv6_agent.db import srv6_db
 from networking_srv6_agent.services import plugin
 from networking_srv6_agent.tests.unit.services import test_plugin
@@ -870,3 +871,174 @@ class TestListBySource(TePluginTestCaseBase):
             self.assertEqual(
                 value,
                 self.te_db.get_all_te_paths.call_args[0][1]['source_host'])
+
+
+class TestDeadWaypoint(TePluginTestCaseBase):
+    """A path through a node whose agent is down goes direct.
+
+    The feature is FEATURE-TE-FAILOVER. Direct, not "skip the dead hop" and
+    not "fall to the host path": the same answer as an unknown locator
+    (decision 9). The registry keeps the dead
+    node's locator -- its VMs' routes and decap SIDs must stay on every
+    other node -- so the death is a separate input, dead_hosts.
+    """
+
+    def _agents(self, *dead, hosts=('node1', 'node2', 'node3')):
+        self.core.get_agents.return_value = [
+            {'host': host, 'alive': host not in dead} for host in hosts]
+
+    def _attach(self, *routes):
+        return self.plugin._attach_segments(self.ctx, 'd1', list(routes),
+                                            self.locators)
+
+    # --- which hosts are dead --------------------------------------------
+    def test_only_the_open_vswitch_agents_are_asked(self):
+        self._agents('node1')
+        self.assertEqual(frozenset({'node1'}),
+                         self.plugin._dead_hosts(self.ctx))
+        self.core.get_agents.assert_called_once_with(
+            self.ctx, filters={'agent_type': ['Open vSwitch agent']})
+
+    def test_a_host_with_no_agent_is_alive(self):
+        self._agents('node2', hosts=('node2',))
+        self.assertEqual(frozenset({'node2'}),
+                         self.plugin._dead_hosts(self.ctx))
+
+    def test_the_check_off_asks_nobody(self):
+        self.config(group=config.SRV6_SERVER_GROUP, te_liveness_interval=0)
+        self._agents('node1')
+        self.assertEqual(frozenset(), self.plugin._dead_hosts(self.ctx))
+        self.assertFalse(self.core.get_agents.called)
+
+    def test_an_unanswerable_query_leaves_every_host_alive(self):
+        self.core.get_agents.side_effect = RuntimeError('db gone')
+        self.assertEqual(frozenset(), self.plugin._dead_hosts(self.ctx))
+
+    def test_a_core_plugin_without_agents_leaves_every_host_alive(self):
+        del self.core.get_agents
+        self.assertEqual(frozenset(), self.plugin._dead_hosts(self.ctx))
+
+    # --- the routes ---------------------------------------------------------
+    def test_a_host_path_through_a_dead_node_goes_direct(self):
+        self._paths(by_host={'node2': ['node1']})
+        self._agents('node1')
+        with mock.patch.object(plugin.LOG, 'warning') as warning:
+            route = self._attach(_route('p1'))[0]
+        self.assertNotIn('segments', route)
+        self.assertTrue(warning.called)
+
+    def test_the_same_path_is_steered_while_the_node_lives(self):
+        self._paths(by_host={'node2': ['node1']})
+        self._agents()
+        self.assertEqual([E1], self._attach(_route('p1'))[0]['segments'])
+
+    def test_a_dead_node_off_the_path_changes_nothing(self):
+        self._paths(by_host={'node2': ['node1']})
+        self._agents('node3')
+        self.assertEqual([E1], self._attach(_route('p1'))[0]['segments'])
+
+    def test_one_dead_hop_sends_the_whole_path_direct(self):
+        # Not a shorter list: that is the partial steering decision 9 refuses.
+        self._paths(by_host={'node2': ['node3', 'node1']})
+        self._agents('node1')
+        self.assertNotIn('segments', self._attach(_route('p1'))[0])
+
+    def test_a_dead_port_path_goes_direct_not_to_the_host_path(self):
+        self._paths(by_port={'p1': ['node1']}, by_host={'node2': ['node3']})
+        self._agents('node1')
+        route = self._attach(_route('p1'), _route('p2', prefix='10.0.0.6/32'))
+        self.assertNotIn('segments', route[0])
+        self.assertEqual([E3], route[1]['segments'])
+
+    def test_a_dead_node_off_a_source_path_leaves_it(self):
+        self._paths(by_source={'node1': (None, {'node2': ['node3']})})
+        self._agents('node2')
+        route = self._attach(_route('p1'))[0]
+        self.assertEqual({'node1': [E3]}, route['segments_by_source'])
+
+    def test_a_source_path_through_a_dead_node_is_direct_for_its_source(self):
+        self._paths(by_host={'node2': ['node3']},
+                    by_source={'node1': (None, {'node2': ['node1']})})
+        self._agents('node1')
+        route = self._attach(_route('p1'))[0]
+        self.assertEqual([E3], route['segments'])
+        self.assertEqual({'node1': []}, route['segments_by_source'])
+
+    def test_a_dead_destination_does_not_unsteer_its_path(self):
+        # Its VMs are gone with it; nothing to reroute.
+        self._paths(by_host={'node2': ['node3']})
+        self._agents('node2')
+        self.assertEqual([E3], self._attach(_route('p1'))[0]['segments'])
+
+    def test_a_domain_with_no_path_costs_no_agent_query(self):
+        self._agents('node1')
+        self._attach(_route('p1'))
+        self.assertFalse(self.core.get_agents.called)
+
+    def test_the_caller_can_hand_in_the_dead_set(self):
+        self._paths(by_host={'node2': ['node1']})
+        route = self.plugin._attach_segments(
+            self.ctx, 'd1', [_route('p1')], self.locators,
+            dead_hosts=frozenset({'node1'}))[0]
+        self.assertNotIn('segments', route)
+        self.assertFalse(self.core.get_agents.called)
+
+    def test_the_payload_keeps_the_dead_nodes_locator(self):
+        self.core.get_network.return_value = {'subnets': [], 'mtu': 1450}
+        port = test_plugin._port(**{portbindings.HOST_ID: 'node2'})
+        self.core.get_ports.return_value = [port]
+        self._paths(by_port={port['id']: ['node1']})
+        self._agents('node1')
+        payload = self.plugin._build_domain_payload(
+            self.ctx, test_plugin._domain(networks=['net1']))
+        self.assertEqual(self.locators, payload['locators'])
+        self.assertNotIn('segments', payload['routes'][0])
+
+    # --- what the API reports -----------------------------------------------
+    def _path(self, **kwargs):
+        return _db_path(destination_host='node2', via_hosts=['node1'],
+                        **kwargs)
+
+    def test_the_path_reports_degraded(self):
+        path = self.plugin._resolve_te_path(
+            self.ctx, self._path(), self.locators, 7, frozenset({'node1'}))
+        self.assertEqual('DEGRADED', path['status'])
+        self.assertEqual([], path['segments'])
+        self.assertEqual([], path['encoded_segments'])
+
+    def test_the_path_reports_active_once_the_node_is_back(self):
+        path = self.plugin._resolve_te_path(
+            self.ctx, self._path(), self.locators, 7, frozenset())
+        self.assertEqual('ACTIVE', path['status'])
+
+    def test_a_dead_destination_or_source_does_not_degrade_the_path(self):
+        path = self.plugin._resolve_te_path(
+            self.ctx, self._path(source_host='node3'), self.locators, 7,
+            frozenset({'node2', 'node3'}))
+        self.assertEqual('ACTIVE', path['status'])
+
+    def test_listing_resolves_against_one_liveness_query(self):
+        self.te_db.get_all_te_paths.return_value = [
+            self._path(id='a'), self._path(id='b')]
+        self._agents('node1')
+        paths = self.plugin.get_srv6_te_paths(self.ctx)
+        self.assertEqual(['DEGRADED', 'DEGRADED'],
+                         [p['status'] for p in paths])
+        self.assertEqual(1, self.core.get_agents.call_count)
+
+
+class TestLivenessWorker(TePluginTestCaseBase):
+
+    def test_the_monitor_runs_as_one_periodic_worker(self):
+        with mock.patch.object(plugin.neutron_worker,
+                               'PeriodicWorker') as worker:
+            workers = self.plugin.get_workers()
+        self.assertEqual([worker.return_value], workers)
+        func, interval, delay = worker.call_args[0]
+        self.assertEqual(15, interval)
+        self.assertEqual('check', func.__name__)
+        self.assertGreaterEqual(delay, 1)
+
+    def test_no_worker_when_the_check_is_off(self):
+        self.config(group=config.SRV6_SERVER_GROUP, te_liveness_interval=0)
+        self.assertEqual([], self.plugin.get_workers())
