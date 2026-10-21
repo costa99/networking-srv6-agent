@@ -94,10 +94,13 @@ BEHAVIOR_END_DT46 = 'End.DT46'
 VALID_BEHAVIORS = [BEHAVIOR_END_DT46]
 DEFAULT_BEHAVIOR = BEHAVIOR_END_DT46
 
-# Cap on the transit nodes in one operator-defined TE path. Arithmetic, not
-# taste: encap_overhead(6 transits + 1 terminal) = 48 + 16*7 = 160 bytes,
-# which leaves 1340 tenant bytes on a 1500-byte underlay -- the point where
-# this project's own "--mtu 1400" guidance stops being satisfiable.
+# Cap on the transit nodes in one operator-defined TE path. A chosen bound,
+# not a derived one: it keeps the encap overhead with full SIDs at
+# 48 + 16*(6 transits + 1 terminal) = 160 bytes, which leaves 1340 tenant
+# bytes on a 1500-byte underlay. The agent only warns when a route's tenant
+# MTU plus its overhead exceeds the underlay MTU (dataplane.check_mtu); with
+# the --mtu 1400 guidance on a 1500-byte underlay that happens above 2
+# transits.
 MAX_TE_VIA_HOSTS = 6
 # (In usid mode the cap no longer binds on overhead -- six vias plus the
 # decap pair is two containers, 64 bytes -- but `encap` still exists and the
