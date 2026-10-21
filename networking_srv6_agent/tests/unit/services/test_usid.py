@@ -23,6 +23,7 @@ the capabilities it checks agents for (D3).
 from unittest import mock
 
 from neutron_lib import exceptions as n_exc
+from oslo_config import cfg
 from oslo_db import exception as db_exc
 
 from networking_srv6_agent.common import config
@@ -74,11 +75,22 @@ class TestConfigValidation(UsidPluginTestCaseBase):
         self.assertRaises(n_exc.InvalidConfigurationOption,
                           plugin.Srv6Plugin)
 
-    def test_full_sids_keep_the_default_range(self):
+    def test_full_sids_accept_a_range_outside_the_lib(self):
         self.config(group=config.SRV6_SERVER_GROUP,
                     dataplane_encoding='encap',
                     function_id_ranges=['1:4095'])
         self.assertFalse(plugin.Srv6Plugin().usid)
+
+    def test_the_default_range_works_with_both_encodings(self):
+        # Switching the encoding must not need a range change too.
+        cfg.CONF.clear_override('function_id_ranges',
+                                group=config.SRV6_SERVER_GROUP)
+        self.assertEqual(['0xe000:0xefff'],
+                         cfg.CONF.srv6.function_id_ranges)
+        for encoding in ('usid', 'encap'):
+            self.config(group=config.SRV6_SERVER_GROUP,
+                        dataplane_encoding=encoding)
+            self.assertEqual(encoding == 'usid', plugin.Srv6Plugin().usid)
 
 
 class TestPayloadAndPaths(UsidPluginTestCaseBase):

@@ -24,16 +24,20 @@ SRV6_AGENT_GROUP = 'srv6_agent'
 srv6_server_opts = [
     cfg.ListOpt(
         'function_id_ranges',
-        default=['1:4095'],
+        # The microSID Local ID Block, valid under both encodings: one
+        # default, so switching dataplane_encoding needs no change here.
+        default=['0xe000:0xefff'],
         help=_("Comma-separated list of <start>:<end> tuples enumerating the "
                "SID function ids available for allocation to SRv6 "
                "domains. Plays the role vni_ranges plays for VXLAN. Ids "
                "are pre-populated "
                "into a pool table at startup and handed out round-robin. "
                "Must not overlap 0xf000-0xffff, which is reserved for "
-               "per-node topology SIDs. Values may be written in hex "
-               "(0xe000:0xefff). With dataplane_encoding = usid every range "
-               "must lie inside the microSID Local ID Block 0xe000-0xefff.")),
+               "per-node topology SIDs. Values may be written in hex. The "
+               "default, 0xe000:0xefff, is the microSID Local ID Block "
+               "(4096 ids) and works with either dataplane_encoding. With "
+               "usid every range must lie inside it; with encap any range "
+               "from 1 to 0xefff may be used.")),
     cfg.StrOpt(
         'dataplane_encoding',
         default=constants.DEFAULT_ENCODING,

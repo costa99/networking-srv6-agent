@@ -12,10 +12,10 @@ SRV6_LOCATOR=${SRV6_LOCATOR:-}
 SRV6_UNDERLAY_INTERFACE=${SRV6_UNDERLAY_INTERFACE:-}
 
 # Server side.
-SRV6_FUNCTION_ID_RANGES=${SRV6_FUNCTION_ID_RANGES:-1:4095}
-# encap (full SIDs) or usid (RFC 9800 microSID, USID-PLAN.md). usid also needs
-# SRV6_FUNCTION_ID_RANGES=0xe000:0xefff, the Local ID Block; the server
-# refuses to start otherwise.
+# The microSID Local ID Block, valid under both encodings. A custom range
+# must stay inside it with usid; the server refuses to start otherwise.
+SRV6_FUNCTION_ID_RANGES=${SRV6_FUNCTION_ID_RANGES:-0xe000:0xefff}
+# encap (full SIDs) or usid (RFC 9800 microSID, USID-PLAN.md).
 SRV6_DATAPLANE_ENCODING=${SRV6_DATAPLANE_ENCODING:-encap}
 
 # EVERY node: the agent derives a domain's table from the same base as the

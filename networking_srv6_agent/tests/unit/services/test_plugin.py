@@ -137,7 +137,8 @@ class TestDomainApi(Srv6RestTestCase):
         # rather than refusing the request.
         self.assertNotIn('sid_function', domain)
         shown = self._show_domain(domain['id'], as_admin=True)
-        self.assertIn(shown['sid_function'], range(1, 4096))
+        # The default pool: the microSID Local ID Block, 0xe000-0xefff.
+        self.assertIn(shown['sid_function'], range(0xe000, 0xf000))
 
     def test_the_owner_reads_it_without_the_sid(self):
         domain = self._domain()
