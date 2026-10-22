@@ -22,6 +22,7 @@ tests/unit/agent/test_agent_extension.py (TestRpcContract).
 from unittest import mock
 
 from neutron.tests import base
+import oslo_messaging
 
 from networking_srv6_agent.services import rpc
 
@@ -87,8 +88,19 @@ class TestServerRpcCallback(base.BaseTestCase):
 
     def test_refuses_an_unknown_payload_version(self):
         # Half-applying a message whose shape cannot be relied on is worse
-        # than refusing it.
-        self.assertEqual([], self.callback.sync_state(
+        # than refusing it. Raised, not [], which the agent would take for
+        # "no domains" and remove everything (N1).
+        e = self.assertRaises(
+            oslo_messaging.ExpectedException, self.callback.sync_state,
             mock.sentinel.ctx, host='node1', locator='fc00:0:1::/48',
-            payload_version=99))
+            payload_version=99)
+        self.assertIs(rpc.Srv6SyncRefused, e.exc_info[0])
         self.plugin.handle_sync_state.assert_not_called()
+
+    def test_a_refusal_from_the_plugin_is_expected_too(self):
+        self.plugin.handle_sync_state.side_effect = rpc.Srv6SyncRefused('no')
+        e = self.assertRaises(
+            oslo_messaging.ExpectedException, self.callback.sync_state,
+            mock.sentinel.ctx, host='node1', locator='fc01:0:1::/48',
+            payload_version=1)
+        self.assertIs(rpc.Srv6SyncRefused, e.exc_info[0])

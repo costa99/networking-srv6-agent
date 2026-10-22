@@ -181,10 +181,6 @@ def lib_prefix(locator):
     return '%s/%d' % (ipaddress.IPv6Address(lib), constants.USID_LIB_PREFIXLEN)
 
 
-def is_lib_function_id(function_id):
-    return constants.USID_LIB_MIN <= function_id <= constants.USID_LIB_MAX
-
-
 def _csids_of(address, block_bits, csid_bits):
     """The C-SIDs a SID contributes: its non-zero fields after the block.
 
@@ -273,9 +269,3 @@ def pack_next_csid(sids, block_bits=constants.USID_BLOCK_BITS,
             value |= csid << (128 - block_bits - csid_bits * (i + 1))
         result.append(str(ipaddress.IPv6Address(value)))
     return result
-
-
-def is_topology_function_id(function_id):
-    """True for ids reserved for per-node SIDs (End, End.X)."""
-    return (constants.MIN_TOPOLOGY_FUNCTION_ID <= function_id <=
-            constants.MAX_TOPOLOGY_FUNCTION_ID)

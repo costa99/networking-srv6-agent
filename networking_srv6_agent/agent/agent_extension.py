@@ -243,13 +243,24 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         # applied, so the End-SID rules see the current filter.
         self.dataplane.ensure_edge_filter(sorted(self.locators.values()))
         # Domains this process applied that the server no longer has.
+        # One domain that fails, here or below, must not stop the others:
+        # at start the error would also leave initialize() before the
+        # resync loop exists, so nothing would ever retry it.
         for stale_id in set(self.domains) - set(wanted):
             LOG.info("SRv6: domain %s no longer present; removing", stale_id)
-            self.dataplane.delete_domain(stale_id)
+            try:
+                self.dataplane.delete_domain(stale_id)
+            except Exception:
+                LOG.exception("SRv6: could not remove domain %s; the kernel "
+                              "garbage collector retries it", stale_id)
             self.domains.pop(stale_id, None)
         self._collect_kernel_orphans(wanted)
         for payload in wanted.values():
-            self._apply_domain(payload)
+            try:
+                self._apply_domain(payload)
+            except Exception:
+                LOG.exception("SRv6: could not apply domain %s; the next "
+                              "resync retries it", payload['id'])
 
     def _is_tombstoned(self, domain_id):
         return domain_id in self.tombstones

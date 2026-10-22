@@ -24,20 +24,16 @@ SRV6_AGENT_GROUP = 'srv6_agent'
 srv6_server_opts = [
     cfg.ListOpt(
         'function_id_ranges',
-        # The microSID Local ID Block, valid under both encodings: one
-        # default, so switching dataplane_encoding needs no change here.
+        # The microSID Local ID Block, the only ids allowed under either
+        # encoding, so switching dataplane_encoding needs no change here.
         default=['0xe000:0xefff'],
         help=_("Comma-separated list of <start>:<end> tuples enumerating the "
                "SID function ids available for allocation to SRv6 "
                "domains. Plays the role vni_ranges plays for VXLAN. Ids "
-               "are pre-populated "
-               "into a pool table at startup and handed out round-robin. "
-               "Must not overlap 0xf000-0xffff, which is reserved for "
-               "per-node topology SIDs. Values may be written in hex. The "
-               "default, 0xe000:0xefff, is the microSID Local ID Block "
-               "(4096 ids) and works with either dataplane_encoding. With "
-               "usid every range must lie inside it; with encap any range "
-               "from 1 to 0xefff may be used.")),
+               "are pre-populated into a pool table and handed out at "
+               "random. Values may be written in hex. Every range must lie "
+               "inside the microSID Local ID Block 0xe000:0xefff (4096 "
+               "ids), the default, with either dataplane_encoding.")),
     cfg.StrOpt(
         'dataplane_encoding',
         default=constants.DEFAULT_ENCODING,
@@ -52,7 +48,7 @@ srv6_server_opts = [
                "and one that fits in a single container (up to four TE "
                "waypoints) costs 40 bytes with no SRH. Needs kernel >= 6.1 "
                "and iproute2 >= 6.1 on every node, /48 locators in one /32 "
-               "block, and function_id_ranges inside 0xe000-0xefff.")),
+               "block.")),
         ],
         help=_("How every node encodes a domain's segment lists. One value "
                "for the whole deployment, sent to the agents in each domain "

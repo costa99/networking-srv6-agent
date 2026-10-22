@@ -32,6 +32,7 @@ from neutron.plugins.ml2.drivers.openvswitch.agent import vlanmanager
 from neutron.tests import base
 from neutron_lib.plugins.ml2 import ovs_constants as ovs_const
 from oslo_config import cfg
+import oslo_messaging
 from oslo_utils import uuidutils
 
 from networking_srv6_agent.agent import agent_extension
@@ -204,11 +205,57 @@ class TestSyncState(AgentExtensionTestCaseBase):
         self.ext.dataplane.delete_domain.assert_not_called()
         self.assertIn(self.domain_id, self.ext.domains)
 
+    def test_a_refused_sync_leaves_every_domain_and_the_kernel_alone(self):
+        # How the server's Srv6SyncRefused arrives here (N1). It used to
+        # arrive as [], and the agent removed every domain it held.
+        self.ext.domains[self.domain_id] = _payload(self.domain_id)
+        self.cctxt.call.side_effect = oslo_messaging.RemoteError(
+            'Srv6SyncRefused', 'unusable locator')
+        self.ext._sync_state()
+        self.ext.dataplane.delete_domain.assert_not_called()
+        self.ext.dataplane.present_function_ids.assert_not_called()
+        self.assertIn(self.domain_id, self.ext.domains)
+
     def test_locator_is_reported(self):
         self.ext._sync_state()
         kwargs = self.cctxt.call.call_args[1]
         self.assertEqual(HOST, kwargs['host'])
         self.assertEqual(LOCATOR, kwargs['locator'])
+
+
+class TestSyncOneBadDomain(AgentExtensionTestCaseBase):
+    """A domain that fails is logged and skipped, never the whole sync."""
+
+    def setUp(self):
+        super().setUp()
+        self.bad = uuidutils.generate_uuid()
+        self.cctxt.call.return_value = [
+            _attached(self.bad, function_id=7),
+            _attached(self.domain_id, function_id=8)]
+
+        def ensure_domain(domain_id, function_id, behavior):
+            if domain_id == self.bad:
+                raise RuntimeError('could not seal table')
+        self.ext.dataplane.ensure_domain.side_effect = ensure_domain
+
+    def test_the_other_domains_are_applied(self):
+        # Raised out of _sync_state before: at start, out of initialize().
+        self.ext._sync_state()
+        self.assertEqual([self.domain_id], list(self.ext.domains))
+
+    def test_the_bad_domain_is_retried_at_the_next_sync(self):
+        self.ext._sync_state()
+        self.ext.dataplane.ensure_domain.side_effect = None
+        self.ext._sync_state()
+        self.assertEqual({self.bad, self.domain_id}, set(self.ext.domains))
+
+    def test_a_failed_stale_delete_does_not_stop_the_sync(self):
+        stale = uuidutils.generate_uuid()
+        self.ext.domains[stale] = _attached(stale, function_id=9)
+        self.ext.dataplane.delete_domain.side_effect = RuntimeError('boom')
+        self.ext._sync_state()
+        self.assertNotIn(stale, self.ext.domains)
+        self.assertIn(self.domain_id, self.ext.domains)
 
 
 class TestApplyDomain(AgentExtensionTestCaseBase):

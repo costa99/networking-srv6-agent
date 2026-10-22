@@ -23,6 +23,7 @@ Directions:
   server -> agents   fanout casts: domain_updated, routes_updated,
                      domain_deleted
   agent  -> server   call:         sync_state(host, locator) -> [domain, ...]
+                                   or Srv6SyncRefused, never [] for "no"
 
 The kwargs are part of the contract, not only the method names. The
 agent's handlers end in **kwargs, so a server sending `vpn=` to a
@@ -50,6 +51,16 @@ from networking_srv6_agent.common import constants
 
 
 LOG = logging.getLogger(__name__)
+
+
+class Srv6SyncRefused(Exception):
+    """sync_state cannot serve this agent.
+
+    Raised, never answered with []: [] means "no domains", and the agent
+    converges to it by removing every domain it holds. An exception reaches
+    it as a failed call, so it keeps its state and retries at the next
+    resync.
+    """
 
 
 class Srv6AgentNotifyAPI:
@@ -137,6 +148,9 @@ class Srv6ServerRpcCallback:
         # and does the real work.
         self.plugin = plugin
 
+    # Expected: the refusal is logged above it, and oslo.messaging then
+    # sends it back without logging a traceback on every resync.
+    @oslo_messaging.expected_exceptions(Srv6SyncRefused)
     def sync_state(self, rpc_context, **kwargs):
         """Register the caller's locator and return every domain's state.
 
@@ -152,14 +166,16 @@ class Srv6ServerRpcCallback:
         # Which message format the agent speaks. Older agents may not send
         # it, so assume version 1.
         version = kwargs.get('payload_version', 1)
-        # If the agent and server disagree on the format, return nothing
-        # rather than send data the agent could misread.
+        # If the agent and server disagree on the format, refuse rather
+        # than send data the agent could misread.
         if version != constants.PAYLOAD_VERSION:
             LOG.warning("SRv6 agent on %(host)s speaks payload version "
                         "%(got)s, server speaks %(want)s; refusing sync",
                         {'host': host, 'got': version,
                          'want': constants.PAYLOAD_VERSION})
-            return []
+            raise Srv6SyncRefused(
+                "payload version %s, server speaks %s"
+                % (version, constants.PAYLOAD_VERSION))
         LOG.info("SRv6 sync_state from %(host)s (locator %(loc)s)",
                  {'host': host, 'loc': locator})
         # Hand off to the plugin: it saves the locator, builds the list of

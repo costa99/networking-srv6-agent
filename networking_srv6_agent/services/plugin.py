@@ -112,7 +112,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         self.agent_rpc = rpc.Srv6AgentNotifyAPI()
         self._pool_synced = False
         self.encoding = self.conf.dataplane_encoding
-        self._validate_encoding_config()
+        self._validate_function_id_ranges()
         LOG.info("SRv6 service plugin initialised (vrf_table_base=%(base)s, "
                  "function_id_ranges=%(ranges)s, dataplane_encoding=%(enc)s)",
                  {'base': self.conf.vrf_table_base,
@@ -123,35 +123,18 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
     def usid(self):
         return self.encoding == constants.ENCODING_USID
 
-    def _validate_encoding_config(self):
-        """Refuse to start in usid mode with function ids outside the LIB.
+    def _validate_function_id_ranges(self):
+        """Refuse to start with function ids outside the LIB.
 
-        Under a uN a function id is read as the next node when it has no
-        decap route of its own, so ids that are also node ids would turn a
-        deleted domain's traffic into traffic for another node
-        (USID-PLAN.md D2). Ids already allocated outside the range are
-        kept and warned about by sync_allocation_pool, as for any range
-        change.
+        At startup rather than on the first API call. Ids already
+        allocated outside the range are kept and warned about by
+        sync_allocation_pool, as for any range change.
         """
-        if not self.usid:
-            return
         try:
-            ranges = srv6_db.parse_function_id_ranges(
-                self.conf.function_id_ranges)
+            srv6_db.parse_function_id_ranges(self.conf.function_id_ranges)
         except ValueError as e:
             raise n_exc.InvalidConfigurationOption(
                 opt_name='[srv6] function_id_ranges', opt_value=str(e))
-        for start, end in ranges:
-            if not (sid.is_lib_function_id(start) and
-                    sid.is_lib_function_id(end)):
-                raise n_exc.InvalidConfigurationOption(
-                    opt_name='[srv6] function_id_ranges',
-                    opt_value=_("%(s)#x:%(e)#x -- with dataplane_encoding = "
-                                "usid every range must lie inside the "
-                                "microSID Local ID Block %(lo)#x:%(hi)#x")
-                    % {'s': start, 'e': end,
-                       'lo': constants.USID_LIB_MIN,
-                       'hi': constants.USID_LIB_MAX})
 
     # ------------------------------------------------------------------
     # helpers
@@ -1268,7 +1251,9 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 LOG.error("SRv6 agent on %(host)s reported an unusable "
                           "locator %(loc)s: %(err)s",
                           {'host': host, 'loc': locator, 'err': e})
-                return []
+                # Not []: the agent would remove every domain it holds.
+                raise rpc.Srv6SyncRefused(
+                    "unusable locator %s: %s" % (locator, e))
             locator_changed = srv6_db.set_host_locator(
                 admin_context, host, locator,
                 datetime.datetime.now(datetime.timezone.utc))

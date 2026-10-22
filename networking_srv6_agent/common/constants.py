@@ -51,11 +51,13 @@ GW_PORT_PREFIX = 'svp-'         # svp-<function_id>-<local_vlan>
 # The function id field is 16 bits wide, immediately after the locator.
 FUNCTION_BITS = 16
 
-# Per-domain function ids come from the low part of the field; topology SIDs
-# (End, End.X) are reserved in the high part so a domain can never be
-# allocated an id that collides with a node's own transit SID.
-MIN_DOMAIN_FUNCTION_ID = 1
-MAX_DOMAIN_FUNCTION_ID = 0x0fff
+# Per-domain function ids are the microSID Local ID Block under both
+# encodings, so switching encoding never strands a domain. They lie below the
+# topology SIDs (End, End.X), which are reserved in the high part so a domain
+# can never be allocated an id that collides with a node's own transit SID.
+# parse_function_id_ranges refuses any range outside MIN..MAX.
+MIN_DOMAIN_FUNCTION_ID = 0xe000
+MAX_DOMAIN_FUNCTION_ID = 0xefff
 MIN_TOPOLOGY_FUNCTION_ID = 0xf000
 MAX_TOPOLOGY_FUNCTION_ID = 0xffff
 
@@ -201,11 +203,10 @@ USID_FUNCTION_PREFIXLEN = USID_LOCATOR_PREFIXLEN + USID_CSID_BITS
 # (end of container).
 USID_GIB_MIN = 0x0001
 USID_GIB_MAX = 0xdfff
-# The domain function ids in usid mode. 4096 of them, the size of the
-# default range, and a single /52 under each node -- so one unreachable
-# route drops every LIB function that has no decap route.
-USID_LIB_MIN = 0xe000
-USID_LIB_MAX = 0xefff
+# The domain function ids. 4096 of them and a single /52 under each node --
+# so one unreachable route drops every LIB function that has no decap route.
+USID_LIB_MIN = MIN_DOMAIN_FUNCTION_ID
+USID_LIB_MAX = MAX_DOMAIN_FUNCTION_ID
 USID_LIB_PREFIXLEN = USID_LOCATOR_PREFIXLEN + 4                 # /52
 
 # What an agent reports in sync_state that its kernel and iproute2 can do,

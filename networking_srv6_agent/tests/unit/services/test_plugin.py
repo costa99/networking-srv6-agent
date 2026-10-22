@@ -45,6 +45,7 @@ from networking_srv6_agent.db import srv6_db
 from networking_srv6_agent.db import te_db
 from networking_srv6_agent import extensions as srv6_extensions
 from networking_srv6_agent.services import plugin
+from networking_srv6_agent.services import rpc
 
 
 CORE_PLUGIN = 'neutron.tests.unit.extensions.test_l3.TestNoL3NatPlugin'
@@ -199,7 +200,8 @@ class TestDomainApi(Srv6RestTestCase):
         Otherwise a failed allocation leaves a committed domain holding no
         function id.
         """
-        cfg.CONF.set_override('function_id_ranges', ['1:1'], group='srv6')
+        cfg.CONF.set_override('function_id_ranges', ['0xe000:0xe000'],
+                              group='srv6')
         self._domain()
         self._domain(expected=409)
         req = self.new_list_request(DOMAINS, as_admin=True)
@@ -619,8 +621,10 @@ class TestSyncState(PluginUnitTestCaseBase):
         self.core.get_ports.return_value = []
 
     def test_unusable_locator_is_not_registered(self):
-        self.assertEqual([], self.plugin.handle_sync_state(
-            self.ctx, 'node1', 'not-a-locator'))
+        # Refused with an exception: [] would make the agent remove every
+        # domain it holds.
+        self.assertRaises(rpc.Srv6SyncRefused, self.plugin.handle_sync_state,
+                          self.ctx, 'node1', 'not-a-locator')
         self.srv6_db.set_host_locator.assert_not_called()
 
     def test_locator_is_registered(self):

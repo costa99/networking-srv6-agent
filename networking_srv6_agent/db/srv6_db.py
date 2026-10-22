@@ -30,7 +30,7 @@ import sqlalchemy as sa
 from sqlalchemy import orm
 
 from networking_srv6_agent._i18n import _
-from networking_srv6_agent.common import sid
+from networking_srv6_agent.common import constants
 
 
 LOG = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ def _parse_function_id(text):
 
 
 def parse_function_id_ranges(range_strings):
-    """['1:4095'] -> [(1, 4095)], validated against the reserved range."""
+    """['0xe000:0xefff'] -> [(0xe000, 0xefff)], validated against the LIB."""
     ranges = []
     for entry in range_strings:
         try:
@@ -98,17 +98,17 @@ def parse_function_id_ranges(range_strings):
         if start > end:
             raise ValueError(_("invalid function_id_ranges entry %r: "
                                "start is greater than end") % entry)
-        if start < 1:
-            raise ValueError(_("invalid function_id_ranges entry %r: "
-                               "function id 0 is not allocatable") % entry)
-        if sid.is_topology_function_id(start) or \
-                sid.is_topology_function_id(end):
+        # Both ends inside the LIB, so the range is too: it never spans
+        # 0xf000-0xffff (the nodes' End SIDs), never reaches past the 16-bit
+        # function field, and under usid no id is also a node id (D2).
+        if (start < constants.MIN_DOMAIN_FUNCTION_ID or
+                end > constants.MAX_DOMAIN_FUNCTION_ID):
             raise ValueError(
-                _("function_id_ranges entry %r overlaps the range reserved "
-                  "for per-node topology SIDs (0xf000-0xffff). A domain "
-                  "allocated an id in that range would collide with a "
-                  "node's "
-                  "own End SID.") % entry)
+                _("function_id_ranges entry %(e)r is outside the microSID "
+                  "Local ID Block %(lo)#x:%(hi)#x, the only ids a domain "
+                  "may use under either encoding")
+                % {'e': entry, 'lo': constants.MIN_DOMAIN_FUNCTION_ID,
+                   'hi': constants.MAX_DOMAIN_FUNCTION_ID})
         ranges.append((start, end))
     return ranges
 
@@ -153,7 +153,7 @@ def sync_allocation_pool(context, ranges):
 def allocate_function_id(context, domain_id):
     """Claim a free function id for a domain. Returns the id.
 
-    Round-robin rather than lowest-free: reusing a just-released id
+    Random rather than lowest-free: reusing a just-released id
     immediately would risk colliding with a node that has not yet processed
     the domain_deleted message and still holds the old VRF.
     """

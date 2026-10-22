@@ -149,20 +149,6 @@ class TestEncapOverhead(base.BaseTestCase):
 
 class TestTopologyFunctionIds(base.BaseTestCase):
 
-    def test_vpn_range_is_not_topology(self):
-        self.assertFalse(sid.is_topology_function_id(
-            constants.MIN_DOMAIN_FUNCTION_ID))
-        self.assertFalse(sid.is_topology_function_id(
-            constants.MAX_DOMAIN_FUNCTION_ID))
-
-    def test_boundaries(self):
-        self.assertFalse(sid.is_topology_function_id(
-            constants.MIN_TOPOLOGY_FUNCTION_ID - 1))
-        self.assertTrue(sid.is_topology_function_id(
-            constants.MIN_TOPOLOGY_FUNCTION_ID))
-        self.assertTrue(sid.is_topology_function_id(
-            constants.MAX_TOPOLOGY_FUNCTION_ID))
-
     def test_ranges_do_not_overlap(self):
         self.assertLess(constants.MAX_DOMAIN_FUNCTION_ID,
                         constants.MIN_TOPOLOGY_FUNCTION_ID)

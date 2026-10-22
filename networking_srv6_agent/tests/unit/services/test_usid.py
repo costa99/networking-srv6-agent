@@ -29,6 +29,7 @@ from oslo_db import exception as db_exc
 from networking_srv6_agent.common import config
 from networking_srv6_agent.db import srv6_db
 from networking_srv6_agent.services import plugin
+from networking_srv6_agent.services import rpc
 from networking_srv6_agent.tests.unit.services import test_plugin
 from networking_srv6_agent.tests.unit.services import test_te
 
@@ -75,11 +76,12 @@ class TestConfigValidation(UsidPluginTestCaseBase):
         self.assertRaises(n_exc.InvalidConfigurationOption,
                           plugin.Srv6Plugin)
 
-    def test_full_sids_accept_a_range_outside_the_lib(self):
+    def test_full_sids_refuse_a_range_outside_the_lib_too(self):
         self.config(group=config.SRV6_SERVER_GROUP,
                     dataplane_encoding='encap',
                     function_id_ranges=['1:4095'])
-        self.assertFalse(plugin.Srv6Plugin().usid)
+        self.assertRaises(n_exc.InvalidConfigurationOption,
+                          plugin.Srv6Plugin)
 
     def test_the_default_range_works_with_both_encodings(self):
         # Switching the encoding must not need a range change too.
@@ -146,14 +148,13 @@ class TestPayloadAndPaths(UsidPluginTestCaseBase):
 class TestFullSidPaths(UsidPluginTestCaseBase):
 
     encoding = 'encap'
-    ranges = ['1:4095']
 
     def test_encoded_is_the_same_list(self):
         path = self.plugin._resolve_te_path(
             self.ctx, test_te._db_path(destination_host='node2',
                                        via_hosts=['node1']),
-            LOCATORS, 7)
-        self.assertEqual(['fc00:0:1:fff0::', 'fc00:0:2:7::'],
+            LOCATORS, 0xe007)
+        self.assertEqual(['fc00:0:1:fff0::', 'fc00:0:2:e007::'],
                          path['encoded_segments'])
         self.assertEqual(path['segments'], path['encoded_segments'])
 
@@ -186,15 +187,16 @@ class TestSyncState(UsidPluginTestCaseBase):
         self.srv6_db.set_host_locator.assert_called_once()
 
     def test_a_64_is_refused(self):
-        self.assertEqual([], self._sync('fc00:0:4:1::/64'))
+        self.assertRaises(rpc.Srv6SyncRefused, self._sync, 'fc00:0:4:1::/64')
         self.srv6_db.set_host_locator.assert_not_called()
 
     def test_another_block_is_refused(self):
-        self._sync('fc01:0:4::/48')
+        self.assertRaises(rpc.Srv6SyncRefused, self._sync, 'fc01:0:4::/48')
         self.srv6_db.set_host_locator.assert_not_called()
 
     def test_a_node_id_in_the_lib_is_refused(self):
-        self._sync('fc00:0:e001::/48')
+        self.assertRaises(rpc.Srv6SyncRefused, self._sync,
+                          'fc00:0:e001::/48')
         self.srv6_db.set_host_locator.assert_not_called()
 
     def test_re_registering_ones_own_locator_is_fine(self):

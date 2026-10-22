@@ -57,17 +57,19 @@ class Srv6DbTestCase(testlib_api.SqlTestCase):
 
 class TestParseFunctionIdRanges(base.BaseTestCase):
 
-    def test_single_range(self):
-        self.assertEqual([(1, 4095)],
-                         srv6_db.parse_function_id_ranges(['1:4095']))
+    def test_single_range_in_decimal(self):
+        self.assertEqual([(0xe000, 0xefff)],
+                         srv6_db.parse_function_id_ranges(['57344:61439']))
 
     def test_several_ranges_and_whitespace(self):
         self.assertEqual(
-            [(1, 10), (100, 200)],
-            srv6_db.parse_function_id_ranges(['1:10', ' 100 : 200 ']))
+            [(0xe000, 0xe00a), (0xe100, 0xe1ff)],
+            srv6_db.parse_function_id_ranges(['0xe000:0xe00a',
+                                              ' 0xe100 : 0xe1ff ']))
 
     def test_single_id_range(self):
-        self.assertEqual([(5, 5)], srv6_db.parse_function_id_ranges(['5:5']))
+        self.assertEqual([(0xe005, 0xe005)],
+                         srv6_db.parse_function_id_ranges(['0xe005:0xe005']))
 
     def test_malformed_entry(self):
         self.assertRaises(ValueError,
@@ -79,7 +81,18 @@ class TestParseFunctionIdRanges(base.BaseTestCase):
 
     def test_reversed_range(self):
         self.assertRaises(ValueError,
-                          srv6_db.parse_function_id_ranges, ['10:1'])
+                          srv6_db.parse_function_id_ranges,
+                          ['0xe00a:0xe001'])
+
+    def test_a_range_below_the_lib_is_refused(self):
+        # Under either encoding: full SIDs may no longer use 1:4095.
+        self.assertRaises(ValueError,
+                          srv6_db.parse_function_id_ranges, ['1:4095'])
+
+    def test_a_range_starting_below_the_lib_is_refused(self):
+        self.assertRaises(ValueError,
+                          srv6_db.parse_function_id_ranges,
+                          ['0xdfff:0xefff'])
 
     def test_zero_is_not_allocatable(self):
         # Function id 0 makes the SID equal to the bare locator, which is
@@ -310,9 +323,25 @@ class TestParseHexRanges(base.BaseTestCase):
                          srv6_db.parse_function_id_ranges(['0xe000:0xEFFF']))
 
     def test_a_leading_zero_decimal_still_parses(self):
-        self.assertEqual([(10, 20)],
-                         srv6_db.parse_function_id_ranges(['010:020']))
+        self.assertEqual([(57344, 57354)],
+                         srv6_db.parse_function_id_ranges(['057344:057354']))
 
     def test_hex_into_the_topology_range_is_still_refused(self):
         self.assertRaises(ValueError, srv6_db.parse_function_id_ranges,
                           ['0xe000:0xf000'])
+
+    def test_a_range_spanning_the_topology_range_is_refused(self):
+        # Neither end is in 0xf000-0xffff, but 0xfff0 (the End SID) is
+        # inside. Accepted before the 2026-10-21 audit (finding 3).
+        self.assertRaises(ValueError, srv6_db.parse_function_id_ranges,
+                          ['1:0x1ffff'])
+
+    def test_ids_past_16_bits_are_refused(self):
+        # 0x10000 does not fit the function field: sid_for raises on it,
+        # on the agent too.
+        self.assertRaises(ValueError, srv6_db.parse_function_id_ranges,
+                          ['0xe000:0x10000'])
+
+    def test_the_last_domain_id_is_allocatable(self):
+        self.assertEqual([(0xef00, 0xefff)],
+                         srv6_db.parse_function_id_ranges(['0xef00:0xefff']))
