@@ -191,9 +191,9 @@ class TestNodeEndSid(DataplaneTestCaseBase):
         self.assertLess(names.index('replace_locator_route'),
                         names.index('replace_seg6local_route'))
 
-    def test_end_sid_falls_back_to_lo_without_an_underlay(self):
-        # An unset underlay_interface is only a warning at config
-        # validation, so it must not stop this node being a transit node.
+    def test_end_sid_starts_on_lo_without_an_underlay(self):
+        # Before the first sync no peer is known; refresh_underlay moves it
+        # to a real device (TestUnderlayAutodetect).
         dp = dataplane.Srv6LinuxDataplane(
             locator=LOCATOR, underlay_interface=None,
             vrf_table_base=10000, bridge=self.bridge)
@@ -1775,12 +1775,14 @@ class TestRouteMtu(DataplaneTestCaseBase):
         for _ in range(3):
             self._sync(self._route(['fc00:0:2:fff0::']), 1436)
         self.check_mtu.assert_called_once_with(1436, segment_count=2,
-                                               prefix='10.0.0.5/32')
+                                               prefix='10.0.0.5/32',
+                                               dev=UNDERLAY)
 
     def test_a_steered_route_that_fits_is_checked_and_quiet(self):
         self._sync(self._route(['fc00:0:2:fff0::']), 1400)
         self.check_mtu.assert_called_once_with(1400, segment_count=2,
-                                               prefix='10.0.0.5/32')
+                                               prefix='10.0.0.5/32',
+                                               dev=UNDERLAY)
         self.assertEqual(set(), self.dp._mtu_warned)
 
     def test_a_deeper_path_warns_again(self):
@@ -1963,3 +1965,89 @@ class TestUsidRoutes(DataplaneTestCaseBase):
         self.ip_lib.IPDevice.return_value.link.mtu = 1500
         self.assertTrue(self.dp.check_mtu(1460))
         self.assertFalse(self.dp.check_mtu(1461))
+
+
+class TestUnderlayAutodetect(DataplaneTestCaseBase):
+    """underlay_interface unset: the device comes from `ip route get`."""
+
+    DEVS = {'fc00:0:2::': 'wlan0', 'fc00:0:3::': 'eth1'}
+    LOCATORS = {'node2': LOCATOR2, 'node3': LOCATOR3}
+
+    def setUp(self):
+        super().setUp()
+        self.priv_seg6.route_get_dev.side_effect = self.DEVS.get
+        self.dp = dataplane.Srv6LinuxDataplane(
+            locator=LOCATOR, underlay_interface=None,
+            vrf_table_base=10000, bridge=self.bridge)
+
+    def _route_devs(self, routes):
+        self.dp.refresh_underlay([LOCATOR, LOCATOR2, LOCATOR3])
+        self.priv_seg6.replace_seg6_route.reset_mock()
+        self.dp.add_routes(self.domain_id, routes, self.LOCATORS, 'node1')
+        return {c[0][0]: c[0][2] for c in
+                self.priv_seg6.replace_seg6_route.call_args_list}
+
+    def test_the_override_skips_detection(self):
+        dp = dataplane.Srv6LinuxDataplane(
+            locator=LOCATOR, underlay_interface=UNDERLAY,
+            vrf_table_base=10000, bridge=self.bridge)
+        dp.refresh_underlay([LOCATOR2])
+        self.priv_seg6.route_get_dev.assert_not_called()
+
+    def test_peers_are_resolved_but_not_this_node(self):
+        self.dp.refresh_underlay([LOCATOR, LOCATOR2])
+        self.priv_seg6.route_get_dev.assert_called_once_with('fc00:0:2::')
+        self.assertEqual({LOCATOR2: 'wlan0'}, self.dp.underlay_devs)
+
+    def test_every_device_gets_the_sysctls(self):
+        self.dp.refresh_underlay([LOCATOR2, LOCATOR3])
+        keys = [c[0][0] for c in self.set_sysctl.call_args_list]
+        for dev in ('wlan0', 'eth1'):
+            self.assertIn('net.ipv6.conf.%s.seg6_enabled' % dev, keys)
+            self.assertIn('net.ipv4.conf.%s.rp_filter' % dev, keys)
+
+    def test_each_route_leaves_by_its_peers_device(self):
+        self._with_domain()
+        self.assertEqual(
+            {'10.0.0.2/32': 'wlan0', '10.0.0.3/32': 'eth1'},
+            self._route_devs([
+                {'prefix': '10.0.0.2/32', 'host': 'node2', 'port_id': 'p2'},
+                {'prefix': '10.0.0.3/32', 'host': 'node3', 'port_id': 'p3'},
+            ]))
+
+    def test_a_usid_te_path_leaves_towards_its_first_waypoint(self):
+        self.dp.ensure_encoding('usid')
+        self._with_domain()
+        self.assertEqual({'10.0.0.3/32': 'wlan0'}, self._route_devs([
+            {'prefix': '10.0.0.3/32', 'host': 'node3', 'port_id': 'p3',
+             'segments': ['fc00:0:2::']}]))
+
+    def test_a_peer_without_a_route_is_skipped_alone(self):
+        self.priv_seg6.route_get_dev.side_effect = {
+            'fc00:0:2::': 'wlan0'}.get
+        self._with_domain()
+        self.assertEqual({'10.0.0.2/32': 'wlan0'}, self._route_devs([
+            {'prefix': '10.0.0.2/32', 'host': 'node2', 'port_id': 'p2'},
+            {'prefix': '10.0.0.3/32', 'host': 'node3', 'port_id': 'p3'},
+        ]))
+
+    def test_the_sids_move_off_lo_once_a_device_is_known(self):
+        # A seg6local route via lo is a reject route: the SID would drop
+        # everything (measured, kernel 6.8).
+        self.dp.initialize_node()
+        self.priv_seg6.replace_seg6local_route.reset_mock()
+        self.dp.refresh_underlay([LOCATOR2, LOCATOR3])
+        self.priv_seg6.replace_seg6local_route.assert_called_once_with(
+            'fc00:0:1:fff0::', 'End', 'eth1')
+        # Unchanged on the next resync: not reinstalled.
+        self.priv_seg6.replace_seg6local_route.reset_mock()
+        self.dp.refresh_underlay([LOCATOR2, LOCATOR3])
+        self.priv_seg6.replace_seg6local_route.assert_not_called()
+
+    def test_mtu_is_the_smallest_over_the_devices(self):
+        mtus = {'wlan0': 1500, 'eth1': 9000}
+        self.ip_lib.IPDevice.side_effect = \
+            lambda d: mock.Mock(**{'link.mtu': mtus[d]})
+        self.dp.refresh_underlay([LOCATOR2, LOCATOR3])
+        self.assertFalse(self.dp.check_mtu(1450))
+        self.assertTrue(self.dp.check_mtu(1450, dev='eth1'))

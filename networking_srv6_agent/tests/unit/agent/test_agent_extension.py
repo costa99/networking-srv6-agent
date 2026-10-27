@@ -626,7 +626,7 @@ class TestConfigValidation(AgentExtensionTestCaseBase):
                                   underlay_interface='eth0')
         self.assertRaises(SystemExit, self.ext._validate_config)
 
-    def test_missing_underlay_interface_is_only_a_warning(self):
+    def test_missing_underlay_interface_is_accepted(self):
         self.ext.conf = mock.Mock(locator=LOCATOR, underlay_interface=None)
         self.ext._validate_config()
 

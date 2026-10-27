@@ -8,7 +8,8 @@ NETWORKING_SRV6_AGENT_DIR=${NETWORKING_SRV6_AGENT_DIR:-$DEST/networking-srv6-age
 SRV6_LOCATOR=${SRV6_LOCATOR:-}
 
 # The NIC holding this node's IPv6 underlay: the nexthop device of every
-# encap route, and where seg6_enabled is asserted.
+# encap route, and where seg6_enabled is asserted. Optional: unset, the
+# agent finds it from the route to each other node's locator.
 SRV6_UNDERLAY_INTERFACE=${SRV6_UNDERLAY_INTERFACE:-}
 
 # Server side.

@@ -85,9 +85,11 @@ srv6_agent_opts = [
                "to start without it.")),
     cfg.StrOpt(
         'underlay_interface',
-        help=_("Interface the encapsulated packets leave by. Used as the "
-               "nexthop device for seg6 encap routes and as the interface "
-               "on which seg6_enabled is asserted.")),
+        help=_("Optional override of the interface the encapsulated "
+               "packets leave by: the nexthop device of the seg6 encap "
+               "routes and the interface on which seg6_enabled is "
+               "asserted. Unset, the device is found per node from the "
+               "route to its locator.")),
     cfg.IntOpt(
         'resync_interval',
         default=300,

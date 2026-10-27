@@ -172,6 +172,26 @@ class TestFlushTable(Seg6ArgvTestCase):
         self.assertIsNone(seg6.flush_table(10007))
 
 
+class TestRouteGetDev(Seg6ArgvTestCase):
+
+    def test_argv_and_device(self):
+        self.ip_route_cmd.return_value = (
+            'fc00:0:2:: from :: via fd00:aa::2 dev wlp59s0 proto kernel '
+            'src fd00:aa::1 metric 256 pref medium\n')
+        self.assertEqual('wlp59s0', seg6.route_get_dev('fc00:0:2::'))
+        self.assertEqual(['-6', '-o', 'route', 'get', 'fc00:0:2::'],
+                         self.argv)
+
+    def test_unreachable_is_none(self):
+        self.ip_route_cmd.side_effect = processutils.ProcessExecutionError(
+            stderr='RTNETLINK answers: Network is unreachable')
+        self.assertIsNone(seg6.route_get_dev('fc00:0:2::'))
+
+    def test_no_device_is_none(self):
+        self.ip_route_cmd.return_value = 'unreachable fc00:0:2:: dev\n'
+        self.assertIsNone(seg6.route_get_dev('fc00:0:2::'))
+
+
 class TestListVrfNames(Seg6ArgvTestCase):
 
     def test_parses_one_line_per_device(self):

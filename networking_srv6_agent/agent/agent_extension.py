@@ -183,10 +183,6 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         except sid.InvalidLocator as e:
             raise SystemExit(_("[%(g)s] locator: %(e)s")
                              % {'g': config.SRV6_AGENT_GROUP, 'e': e})
-        if not self.conf.underlay_interface:
-            LOG.warning("[%s] underlay_interface is unset; encap routes will "
-                        "be installed without a nexthop device and may fail",
-                        config.SRV6_AGENT_GROUP)
 
     def _setup_rpc(self, connection):
         """Join the server's fanout topic.
@@ -242,6 +238,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         # restores a table somebody deleted by hand. Before any domain is
         # applied, so the End-SID rules see the current filter.
         self.dataplane.ensure_edge_filter(sorted(self.locators.values()))
+        self.dataplane.refresh_underlay(sorted(self.locators.values()))
         # Domains this process applied that the server no longer has.
         # One domain that fails, here or below, must not stop the others:
         # at start the error would also leave initialize() before the
@@ -450,6 +447,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             # A new node's SID space is filtered before any route of this
             # payload can lead a rule toward its End SID.
             self.dataplane.ensure_edge_filter(sorted(self.locators.values()))
+            self.dataplane.refresh_underlay(sorted(self.locators.values()))
         networks = payload.get('networks') or []
         if not networks:
             self._retire_domain(payload)

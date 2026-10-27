@@ -207,6 +207,23 @@ def show_main_route(prefix):
     return lines
 
 
+def route_get_dev(address):
+    """The device the kernel would send a packet to this address out of.
+
+    None when there is no route (`Network is unreachable`, an unreachable
+    or prohibit route) or the answer names no device.
+    """
+    try:
+        out = ip_route_cmd(['-6', '-o', 'route', 'get', address])
+    except processutils.ProcessExecutionError as e:
+        LOG.debug("route get %(a)s: %(e)s", {'a': address, 'e': e})
+        return None
+    fields = out.split()
+    if 'dev' in fields[:-1]:
+        return fields[fields.index('dev') + 1]
+    return None
+
+
 def delete_main_route(prefix, route_type=None):
     """Remove one route from main, tolerating its absence.
 

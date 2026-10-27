@@ -230,6 +230,9 @@ class Srv6LinuxDataplane:
                  tunnel_patch_port=None):
         self.locator = locator
         self.underlay_interface = underlay_interface
+        # peer locator -> the device the kernel routes it by, None without
+        # a route; only when underlay_interface is unset (refresh_underlay)
+        self.underlay_devs = {}
         self.vrf_table_base = vrf_table_base
         self.bridge = bridge
         self.apply_sysctls = apply_sysctls
@@ -293,10 +296,7 @@ class Srv6LinuxDataplane:
         self._apply_global_sysctls()
         self._ensure_local_rule_after_l3mdev()
         if self.underlay_interface:
-            self._set_sysctl(
-                'net.ipv6.conf.%s.seg6_enabled' % self.underlay_interface, '1')
-            self._set_sysctl(
-                'net.ipv4.conf.%s.rp_filter' % self.underlay_interface, '0')
+            self._assert_underlay_sysctls(self.underlay_interface)
         self._probe_capabilities()
         # Whatever encoding the kernel shows from before a restart is kept
         # until the server says otherwise: in a usid deployment, putting
@@ -439,7 +439,7 @@ class Srv6LinuxDataplane:
         (RFC 9800 s4.1.1). Same placement rules as the End SID: main, and
         `dev` is syntax, not the forwarding decision.
         """
-        dev = self.underlay_interface or 'lo'
+        dev = self._sid_dev
         try:
             priv_seg6.replace_seg6local_route(
                 sid.node_sid(self.locator), constants.BEHAVIOR_END, dev,
@@ -481,13 +481,7 @@ class Srv6LinuxDataplane:
         32766, and shadow this route wholesale.
         """
         end_sid = self.own_end_sid
-        # `dev` is required syntax for a seg6local route, not a forwarding
-        # decision: End rewrites the destination to the next segment and
-        # re-runs the FIB lookup, which is what actually picks the output
-        # interface. lo as a fallback so an unset underlay_interface --
-        # already only a warning at _validate_config -- cannot stop this
-        # node being usable as a transit.
-        dev = self.underlay_interface or 'lo'
+        dev = self._sid_dev
         try:
             priv_seg6.replace_seg6local_route(end_sid, constants.BEHAVIOR_END,
                                               dev)
@@ -623,6 +617,69 @@ class Srv6LinuxDataplane:
         except ValueError:
             return False
         return any(address in network for network in self._edge_filtered)
+
+    def refresh_underlay(self, locators):
+        """Find the device towards every other node, unless one is set.
+
+        The kernel's own answer, `ip -6 route get` on each peer locator --
+        as ML2/OVS takes local_ip and leaves the device to the FIB. Run on
+        every resync, so an underlay that moves is followed.
+        """
+        if self.underlay_interface:
+            return
+        own = ipaddress.IPv6Network(self.locator, strict=False)
+        devs = {str(network): priv_seg6.route_get_dev(
+                    str(network.network_address))
+                for network in _locator_networks(locators)
+                if network != own}
+        # Every time, not only on a change: an interface the underlay
+        # rebuilt comes back with its sysctls reset.
+        for dev in sorted({d for d in devs.values() if d}):
+            self._assert_underlay_sysctls(dev)
+        if devs == self.underlay_devs:
+            return
+        old_sid_dev = self._sid_dev
+        self.underlay_devs = devs
+        LOG.info("SRv6: underlay devices: %s", devs)
+        for locator in sorted(loc for loc, d in devs.items() if not d):
+            LOG.error("SRv6: no route to locator %s; routes towards it are "
+                      "not installed until there is one", locator)
+        if self._sid_dev != old_sid_dev:
+            self._ensure_node_end_sid()
+            if self.usid:
+                self._ensure_node_usid()
+
+    @property
+    def _sid_dev(self):
+        """`dev` for this node's End SID and uN: any real device will do.
+
+        End re-runs the FIB lookup, so the device does not pick the way
+        out. But it must not be lo: the kernel turns an IPv6 route via a
+        loopback into a reject route, and the SID drops everything
+        (measured on the testbed, kernel 6.8). lo only on a node with no
+        peer, which nothing transits.
+        """
+        resolved = sorted(d for d in self.underlay_devs.values() if d)
+        return self.underlay_interface or (resolved[0] if resolved else 'lo')
+
+    def _underlay_dev_for(self, address):
+        """The device a packet to this SID leaves by; None if unknown."""
+        if self.underlay_interface:
+            return self.underlay_interface
+        try:
+            address = ipaddress.IPv6Address(address)
+        except ValueError:
+            return None
+        for locator, dev in self.underlay_devs.items():
+            if address in ipaddress.IPv6Network(locator):
+                return dev
+        return None
+
+    def _assert_underlay_sysctls(self, dev):
+        # seg6_enabled counts per receiving device (min with `all`), and
+        # rp_filter per device too (max with `all`).
+        self._set_sysctl('net.ipv6.conf.%s.seg6_enabled' % dev, '1')
+        self._set_sysctl('net.ipv4.conf.%s.rp_filter' % dev, '0')
 
     # ------------------------------------------------------------------
     # per-domain
@@ -1346,13 +1403,21 @@ class Srv6LinuxDataplane:
                             "without it, so this "
                             "path is sealed",
                             {'d': domain_id, 'p': prefix, 's': first})
+            # The device towards the first pushed SID: an IPv6 route via lo
+            # would be a reject route, so it cannot be left to the lookup.
+            dev = self._underlay_dev_for(first)
+            if not dev:
+                LOG.error("SRv6: domain %(d)s route %(p)s: no underlay "
+                          "device towards %(s)s; not installed",
+                          {'d': domain_id, 'p': prefix, 's': first})
+                continue
             self._check_route_mtu(prefix,
                                   (mtus or {}).get(route.get('network_id')),
-                                  len(segments))
+                                  len(segments), dev=dev)
             extra = {'mode': mode} if self.usid else {}
             try:
                 priv_seg6.replace_seg6_route(
-                    prefix, segments, self.underlay_interface,
+                    prefix, segments, dev,
                     state.vrf_table, family_v6=':' in prefix.split('/')[0],
                     **extra)
             except Exception as e:
@@ -1504,7 +1569,7 @@ class Srv6LinuxDataplane:
                 LOG.debug("SRv6: removing %(p)s: %(e)s",
                           {'p': prefix, 'e': e})
 
-    def _check_route_mtu(self, prefix, network_mtu, depth):
+    def _check_route_mtu(self, prefix, network_mtu, depth, dev=None):
         """The MTU of one steered route, warned once per (prefix, depth).
 
         Depth 1 is the per-network check _apply_domain already makes. Each
@@ -1519,22 +1584,27 @@ class Srv6LinuxDataplane:
         if key in self._mtu_warned:
             return
         if not self.check_mtu(network_mtu, segment_count=depth,
-                              prefix=prefix):
+                              prefix=prefix, dev=dev):
             self._mtu_warned.add(key)
 
-    def check_mtu(self, network_mtu, segment_count=1, prefix=None):
+    def check_mtu(self, network_mtu, segment_count=1, prefix=None,
+                  dev=None):
         """Warn when the tenant MTU plus encapsulation exceeds the underlay.
 
         Not fatal: small packets still pass, so refusing to program the
         domain would be a worse outcome than a warning plus working
-        connectivity for everything under the limit.
+        connectivity for everything under the limit. Without `dev`, the
+        smallest MTU over every underlay device.
         """
-        if not network_mtu or not self.underlay_interface:
+        dev = dev or self.underlay_interface
+        devs = [dev] if dev else sorted(
+            {d for d in self.underlay_devs.values() if d})
+        if not network_mtu or not devs:
             return True
         overhead = sid.encap_overhead(segment_count, reduced=self.usid)
         try:
-            underlay_mtu = ip_lib.IPDevice(
-                self.underlay_interface).link.mtu
+            underlay_mtu, dev = min((ip_lib.IPDevice(d).link.mtu, d)
+                                    for d in devs)
         except Exception:
             return True
         if network_mtu + overhead > underlay_mtu:
@@ -1544,7 +1614,7 @@ class Srv6LinuxDataplane:
                 "frames will be dropped. Lower the network MTU to %(max)s "
                 "or raise the underlay MTU.",
                 {'n': network_mtu, 'o': overhead, 'u': underlay_mtu,
-                 'i': self.underlay_interface,
+                 'i': dev,
                  'max': underlay_mtu - overhead,
                  'r': (' (route %s, %d segments)' % (prefix, segment_count)
                        if prefix else '')})
