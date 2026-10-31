@@ -440,7 +440,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         domain after this one anyway.
         """
         domain_id = payload['id']
-        # Absent from an older server's payload, which only knew full SIDs.
+        # Every server sends it; the fallback only guards a malformed payload.
         encoding_changed = self.dataplane.ensure_encoding(
             payload.get('encoding') or constants.DEFAULT_ENCODING)
         if self._merge_locators(payload.get('locators')):

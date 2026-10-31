@@ -945,9 +945,9 @@ class TestEncoding(AgentExtensionTestCaseBase):
         self.ext._apply_domain(payload)
         self.assertEqual([('encoding', 'usid'), ('domain',)], order)
 
-    def test_an_older_server_means_full_sids(self):
+    def test_a_payload_without_encoding_means_the_default(self):
         self.ext._apply_domain(_payload(self.domain_id))
-        self.ext.dataplane.ensure_encoding.assert_called_once_with('encap')
+        self.ext.dataplane.ensure_encoding.assert_called_once_with('usid')
 
     def test_a_switch_in_a_fanout_re_encodes_every_domain(self):
         self.ext.dataplane.ensure_encoding.return_value = True

@@ -49,6 +49,8 @@ class TeRestTestCase(test_plugin.Srv6RestTestCase):
 
     def setUp(self):
         super().setUp()
+        # These cases pin full SIDs; microSID paths are in test_usid.py.
+        self.srv6.encoding = 'encap'
         now = datetime.datetime.now(datetime.timezone.utc)
         for host, locator in (('node1', LOC1), ('node2', LOC2)):
             srv6_db.set_host_locator(self.admin_ctx, host, locator, now)
@@ -387,6 +389,8 @@ class TePluginTestCaseBase(test_plugin.PluginUnitTestCaseBase):
 
     def setUp(self):
         super().setUp()
+        # These cases pin full SIDs; microSID paths are in test_usid.py.
+        self.plugin.encoding = 'encap'
         self.srv6_db.get_host_locators.return_value = dict(self.locators)
         self.srv6_db.get_function_id.return_value = 7
 

@@ -169,15 +169,15 @@ SRH_HEADER = 8
 # One deployment-wide value, carried to every agent in the domain payload
 # (USID-PLAN.md D3).
 #
-#   encap  full 128-bit SIDs, H.Encaps: outer IPv6 + SRH. What every build
-#          before this one did, so it stays the default.
+#   encap  full 128-bit SIDs, H.Encaps: outer IPv6 + SRH.
 #   usid   RFC 9800 NEXT-C-SID ("microSID") in the F3216 format, pushed
 #          with H.Encaps.Red: the whole path is packed into C-SID
-#          containers, and a path that fits in one carries no SRH.
+#          containers, and a path that fits in one carries no SRH. The
+#          default: 24 bytes less per packet on a direct path.
 ENCODING_ENCAP = 'encap'
 ENCODING_USID = 'usid'
 VALID_ENCODINGS = [ENCODING_ENCAP, ENCODING_USID]
-DEFAULT_ENCODING = ENCODING_ENCAP
+DEFAULT_ENCODING = ENCODING_USID
 
 # The `ip route ... encap seg6 mode <x>` each encoding pushes with.
 SEG6_MODE_ENCAP = 'encap'
