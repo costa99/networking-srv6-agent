@@ -22,8 +22,12 @@ neutron's context raises
     AssertionError: PrivContext(cfg_section=privsep) entrypoints must be
     below "neutron.privileged"
 
-The capabilities requested are the two the SRv6 dataplane actually needs:
-NET_ADMIN to program links and routes, SYS_ADMIN for modprobe.
+The capabilities bound only what the daemon does in its own process:
+enslaving a port to a VRF over netlink (pyroute2), which needs NET_ADMIN.
+The other operations run a command -- ip, modprobe, nft -- and the daemon
+stays uid 0, so an executed command regains every capability (checked on
+2026-10-31: CapEff of the child is the full bounding set). What confines
+them is that each entrypoint runs one fixed program on an argument list.
 """
 
 from oslo_privsep import capabilities as caps
@@ -34,6 +38,5 @@ default = priv_context.PrivContext(
     prefix=__name__,
     cfg_section='privsep',
     pypath=__name__ + '.default',
-    capabilities=[caps.CAP_SYS_ADMIN,   # pylint: disable=no-member
-                  caps.CAP_NET_ADMIN],  # pylint: disable=no-member
+    capabilities=[caps.CAP_NET_ADMIN],  # pylint: disable=no-member
 )
