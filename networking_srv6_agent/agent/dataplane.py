@@ -1323,7 +1323,11 @@ class Srv6LinuxDataplane:
         A route whose host is this node is skipped: the address is already
         reachable through the gateway port's connected route, and installing
         an encap route for it would send local traffic out to the underlay
-        and back.
+        and back. An encap route this node still holds for it goes: a guest
+        that live-migrated here arrives with no withdrawal of its old host
+        (the source's flap re-advertises it, then the port goes down and
+        changes host without a cast), so add(new) is the only message that
+        can clear it before the next full sync.
 
         A route may carry `segments` -- transit End SIDs the server resolved
         from an operator's TE path (P6) -- which go before the remote decap
@@ -1349,6 +1353,14 @@ class Srv6LinuxDataplane:
         wanted, rule_sids = self._install_routes(state, routes, locators,
                                                  local_host, mtus)
         self._ensure_sid_rules(state, rule_sids)
+        local = {_normalise_prefix(r['prefix']) for r in routes
+                 if r.get('host') == local_host}
+        if local:
+            self._remove_encap_routes(
+                state, local.__contains__,
+                "SRv6: domain %(d)s: %(p)s is local now; removing its encap "
+                "route from table %(t)s",
+                families={':' in p for p in local})
         return wanted
 
     def _install_routes(self, state, routes, locators, local_host,
@@ -1534,7 +1546,19 @@ class Srv6LinuxDataplane:
         state = self.domains.get(domain_id)
         if state is None:
             return
-        for family_v6 in (False, True):
+        self._remove_encap_routes(
+            state, lambda prefix: prefix not in wanted,
+            "SRv6: domain %(d)s no longer reaches %(p)s; removing its encap "
+            "route from table %(t)s")
+
+    def _remove_encap_routes(self, state, doomed, message,
+                             families=(False, True)):
+        """Delete the domain's seg6 encap routes that `doomed` names.
+
+        `doomed` is called with the normalised prefix. Other routes of the
+        table are never touched.
+        """
+        for family_v6 in families:
             try:
                 present = priv_seg6.list_seg6_routes(state.vrf_table,
                                                      family_v6=family_v6)
@@ -1543,11 +1567,10 @@ class Srv6LinuxDataplane:
                             {'t': state.vrf_table, 'e': e})
                 continue
             for prefix in present:
-                if _normalise_prefix(prefix) in wanted:
+                if not doomed(_normalise_prefix(prefix)):
                     continue
-                LOG.info("SRv6: domain %(d)s no longer reaches %(p)s; "
-                         "removing its encap route from table %(t)s",
-                         {'d': domain_id, 'p': prefix, 't': state.vrf_table})
+                LOG.info(message, {'d': state.domain_id, 'p': prefix,
+                                   't': state.vrf_table})
                 try:
                     priv_seg6.delete_route(prefix, state.vrf_table,
                                            family_v6=family_v6)

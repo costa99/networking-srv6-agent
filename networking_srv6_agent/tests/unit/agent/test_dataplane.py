@@ -1006,6 +1006,32 @@ class TestRouteReconciliation(DataplaneTestCaseBase):
         self.priv_seg6.delete_route.assert_called_once_with(
             '10.90.2.21', VRF_TABLE, family_v6=False)
 
+    def _add(self, routes):
+        self.dp.add_routes(self.domain_id, routes, self.locators, 'node1')
+
+    def test_an_incremental_add_for_this_node_removes_its_encap_route(self):
+        """A live migration to this node sends no withdrawal of the old host.
+
+        Seen live on 2026-10-31 (FIX-STALE-ROUTE-MIGRATION): the source's
+        flap re-advertised the guest on the old host, the port then went
+        down and changed host without a cast, and add(new) was skipped here
+        as local, so the destination kept an encap route to the old host
+        until the next full sync.
+        """
+        self._add([{'prefix': '10.90.2.21/32', 'host': 'node1'}])
+        self.priv_seg6.delete_route.assert_called_once_with(
+            '10.90.2.21', VRF_TABLE, family_v6=False)
+        self.priv_seg6.replace_seg6_route.assert_not_called()
+
+    def test_a_local_add_touches_only_its_own_prefix(self):
+        self._add([{'prefix': '10.90.9.9/32', 'host': 'node1'}])
+        self.priv_seg6.delete_route.assert_not_called()
+
+    def test_a_remote_add_reads_no_table(self):
+        self._add([{'prefix': '10.90.2.21/32', 'host': 'node2'}])
+        self.priv_seg6.list_seg6_routes.assert_not_called()
+        self.priv_seg6.delete_route.assert_not_called()
+
     def test_a_domain_with_no_routes_left_keeps_none(self):
         self._sync([])
         self.assertEqual(
