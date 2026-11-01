@@ -124,6 +124,8 @@ class Srv6TePath(resource.Resource):
     source_host = resource.Body('source_host')
     #: Traversal order. An update replaces the whole list.
     via_hosts = resource.Body('via_hosts', type=list)
+    # Mbit/s reserved on every link; the server then computes via_hosts.
+    bandwidth = resource.Body('bandwidth', type=int)
     #: What the server resolved on read: via End SIDs, then the decap SID.
     segments = resource.Body('segments', type=list)
     #: What the ingress pushes: the same SIDs, or microSID containers.

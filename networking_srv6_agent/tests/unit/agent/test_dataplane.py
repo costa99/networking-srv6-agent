@@ -167,6 +167,14 @@ class TestLocalRuleOrder(DataplaneTestCaseBase):
         self.assertIn(('net.ipv4.udp_l3mdev_accept', '0'),
                       dataplane.GLOBAL_SYSCTLS)
 
+    def test_flow_label_carries_entropy(self):
+        # At 0 every flow between two nodes has one outer header, and the
+        # underlay's ECMP puts them all on one path.
+        self.assertIn(('net.ipv6.seg6_flowlabel', '1'),
+                      dataplane.GLOBAL_SYSCTLS)
+        self.dp.initialize_node()
+        self.set_sysctl.assert_any_call('net.ipv6.seg6_flowlabel', '1')
+
 
 class TestNodeEndSid(DataplaneTestCaseBase):
     """The node's own transit SID, which makes traffic engineering possible.

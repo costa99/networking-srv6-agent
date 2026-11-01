@@ -81,6 +81,10 @@ class SRv6TePath(model_base.BASEV2, model_base.HasId):
     # symbolic here, resolved against the locator registry on every use.
     source_host = sa.Column(sa.String(255), nullable=False, default='',
                             server_default='')
+    # Mbit/s reserved on every link of the path; NULL for an operator-chosen
+    # path. When set, the plugin computed via_hosts itself (services/pce.py)
+    # and the hops pin every link, so the reservation is exact.
+    bandwidth = sa.Column(sa.Integer, nullable=True)
 
     # order_by is what makes a read return TRAVERSAL order rather than
     # whatever order the rows happen to come back in.
@@ -147,6 +151,7 @@ def _make_te_path_dict(path_db, fields=None):
         # The '' sentinel is a storage detail: the API says None.
         'source_host': path_db.source_host or None,
         'via_hosts': [hop.via_host for hop in path_db.hops],
+        'bandwidth': path_db.bandwidth,
         'segments': [],
         'encoded_segments': [],
         'status': None,
@@ -200,7 +205,8 @@ def create_te_path(context, domain_id, te_path):
         destination_port_id=te_path.get('destination_port_id'),
         # Set explicitly, not left to the column default: the dict below
         # reads it, and an unset attribute would be expired and re-read.
-        source_host=te_path.get('source_host') or '')
+        source_host=te_path.get('source_host') or '',
+        bandwidth=te_path.get('bandwidth'))
     context.session.add(path_db)
     context.session.flush()
     _set_hops(context, path_db, te_path.get('via_hosts'))
@@ -276,6 +282,22 @@ def delete_te_path(context, path_id, domain_id=None):
     res = _make_te_path_dict(path_db)
     context.session.delete(path_db)
     return res
+
+
+@db_api.CONTEXT_READER
+def get_bandwidth_paths(context):
+    """Every reservation, in every domain: the links are shared by all.
+
+    [{'source_host', 'via_hosts', 'destination_host', 'destination_port_id',
+      'bandwidth'}]
+    """
+    return [{'source_host': p.source_host,
+             'via_hosts': [hop.via_host for hop in p.hops],
+             'destination_host': p.destination_host,
+             'destination_port_id': p.destination_port_id,
+             'bandwidth': p.bandwidth}
+            for p in context.session.query(SRv6TePath).filter(
+                SRv6TePath.bandwidth.isnot(None)).all()]
 
 
 @db_api.CONTEXT_READER

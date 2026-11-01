@@ -74,6 +74,15 @@ srv6_server_opts = [
                "agent_down_time to fail over faster. 0 turns the check "
                "off: a dead waypoint then blackholes its paths until an "
                "admin re-steers them.")),
+    cfg.StrOpt(
+        'topology_file',
+        help=_("Optional underlay topology for bandwidth-reserved TE paths, "
+               "read once at server start. Lines 'node <name> <locator>' "
+               "(fabric nodes and hosts; a host's name is its Neutron host "
+               "name) and 'link <a> <b> <Mbit/s>' (capacity per direction). "
+               "With it, a TE path created with 'bandwidth' gets its hops "
+               "computed by the server, and fabric nodes may be named in "
+               "via_hosts. Unset: 'bandwidth' is refused.")),
 ]
 
 srv6_agent_opts = [

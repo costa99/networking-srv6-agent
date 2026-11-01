@@ -59,6 +59,9 @@ rules = [
            _POST),
     _admin('create_srv6_te_path:via_hosts',
            'Specify ``via_hosts`` when creating an SRv6 TE path', _POST),
+    _admin('create_srv6_te_path:bandwidth',
+           'Reserve ``bandwidth`` (the server computes the hops) when '
+           'creating an SRv6 TE path', _POST),
     _admin('get_srv6_te_path', 'Get SRv6 TE paths', _GET),
     _admin('get_srv6_te_path:destination_host',
            'Get ``destination_host`` of SRv6 TE paths', _GET),
@@ -68,6 +71,8 @@ rules = [
            'Get ``source_host`` of SRv6 TE paths', _GET),
     _admin('get_srv6_te_path:via_hosts',
            'Get ``via_hosts`` of SRv6 TE paths', _GET),
+    _admin('get_srv6_te_path:bandwidth',
+           'Get the ``bandwidth`` an SRv6 TE path reserves', _GET),
     _admin('get_srv6_te_path:segments',
            'Get the resolved ``segments`` of SRv6 TE paths', _GET),
     _admin('get_srv6_te_path:encoded_segments',

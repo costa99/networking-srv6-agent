@@ -62,6 +62,7 @@ from networking_srv6_agent.db import srv6_db
 from networking_srv6_agent.db import te_db
 from networking_srv6_agent.extensions import srv6 as srv6_ext
 from networking_srv6_agent.extensions import srv6_te as te_ext
+from networking_srv6_agent.services import pce
 from networking_srv6_agent.services import rpc
 from networking_srv6_agent.services import te_liveness
 
@@ -113,6 +114,16 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         self._pool_synced = False
         self.encoding = self.conf.dataplane_encoding
         self._validate_function_id_ranges()
+        # The underlay for bandwidth-reserved TE paths ([srv6] topology_file):
+        # {node: locator} and {(a, b): Mbit/s}, read once. Empty without it.
+        self.fabric_locators, self.capacity = {}, {}
+        if self.conf.topology_file:
+            try:
+                self.fabric_locators, self.capacity = pce.load(
+                    self.conf.topology_file)
+            except (OSError, pce.TopologyError) as e:
+                raise n_exc.InvalidConfigurationOption(
+                    opt_name='[srv6] topology_file', opt_value=str(e))
         LOG.info("SRv6 service plugin initialised (vrf_table_base=%(base)s, "
                  "function_id_ranges=%(ranges)s, dataplane_encoding=%(enc)s)",
                  {'base': self.conf.vrf_table_base,
@@ -294,7 +305,10 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 self._routes_for_domain(admin_context, network_ids,
                                         locators),
                 locators, dead_hosts),
-            'locators': locators,
+            # Fabric nodes too (topology_file): their uN may be the first
+            # segment of a computed path, and the agents' edge filter only
+            # admits SIDs inside a locator it knows. Registered hosts win.
+            'locators': {**self.fabric_locators, **locators},
             # Additive, so PAYLOAD_VERSION stays 1: an older agent ignores
             # it, and a missing key means full SIDs to a newer one.
             'encoding': self.encoding,
@@ -687,7 +701,12 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         partial steering the locator API exists to prevent. The caller
         falls back to the direct route instead, and the path reports
         DEGRADED.
+
+        A host with no registered locator may be a fabric node of the
+        topology file (a spine or leaf, which runs no agent): its locator
+        comes from there.
         """
+        locators = {**self.fabric_locators, **locators}
         if any(not locators.get(host) or host in dead_hosts
                for host in via_hosts):
             return None
@@ -963,6 +982,51 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                          "VMs, so the path would steer nothing")
                 % {'p': port['id'], 's': source})
 
+    def _compute_hops(self, context, body, source, host, port, via_hosts):
+        """via_hosts for a bandwidth reservation, or 400 / 409.
+
+        Online CSPF (services/pce.py) over the topology file, against what
+        every existing reservation already holds, in every domain: the
+        links are shared. The result pins every hop, leaves and spines
+        included, so the reservation sits on exactly the links the traffic
+        takes.
+        """
+        bandwidth = body[te_def.BANDWIDTH]
+        if not self.capacity:
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("bandwidth needs an underlay topology "
+                         "([srv6] topology_file)"))
+        if not source:
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("bandwidth needs source_host: a path is computed "
+                         "from the ingress it starts at"))
+        if via_hosts:
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("bandwidth and via_hosts exclude each other: with "
+                         "bandwidth the hops are computed"))
+        destination = host or (port or {}).get(portbindings.HOST_ID)
+        for end in (source, destination):
+            if not end or not any(end == a for a, _b in self.capacity):
+                raise te_ext.Srv6TePathInvalid(
+                    reason=_("%s is not a node of the underlay topology")
+                    % (end or 'the unbound port\'s host'))
+        held = []
+        for p in te_db.get_bandwidth_paths(context):
+            end = self._destination_of(context, p)
+            if end:
+                held.append(([p[te_def.SOURCE_HOST]] + p[te_def.VIA_HOSTS] +
+                             [end], p[te_def.BANDWIDTH]))
+        # The caller holds the admission lock (create_srv6_te_path).
+        path = pce.compute(self.capacity, pce.reserved(held), source,
+                           destination, bandwidth)
+        if path is None:
+            raise te_ext.Srv6TePathNoCapacity(
+                source=source, destination=destination, bandwidth=bandwidth)
+        LOG.info("SRv6 TE: %(bw)d Mbit/s %(s)s -> %(d)s computed as %(p)s",
+                 {'bw': bandwidth, 's': source, 'd': destination,
+                  'p': '-'.join(path)})
+        return path[1:-1]
+
     def create_srv6_te_path(self, context, srv6_te_path):
         body = srv6_te_path[te_def.RESOURCE_NAME]
         admin_context = context.elevated()
@@ -994,17 +1058,28 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         # via == destination is accepted on purpose: a harmless detour, and
         # on two nodes the only depth-2 SRH there is (TE-DEPTH2).
         via_hosts = body.get(te_def.VIA_HOSTS) or []
-        self._validate_via_hosts(via_hosts, locators)
-
-        # Forced, never the caller's, as for associations: the path belongs
-        # with the domain it steers.
-        body = dict(body, project_id=domain['project_id'],
-                    via_hosts=via_hosts, source_host=source)
+        self._validate_via_hosts(via_hosts,
+                                 {**self.fabric_locators, **locators})
         selector = ('port %s' % port_id) if port_id else ('host %s' % host)
         if source:
             selector += ' from %s' % source
         try:
-            path = te_db.create_te_path(context, domain_id, body)
+            with db_api.CONTEXT_WRITER.using(context):
+                if body.get(te_def.BANDWIDTH) is not None:
+                    # One admission at a time: reading what is reserved and
+                    # inserting the new reservation must be one step, or
+                    # concurrent creates all see the same free links and
+                    # over-commit them (Phase C, PLAN-PATH-COMPUTATION LOG
+                    # op 21). Every domain row is locked, in key order, for
+                    # the rest of this transaction.
+                    domain_db.lock_all_domains(context)
+                    via_hosts = self._compute_hops(context, body, source,
+                                                   host, port, via_hosts)
+                # Forced, never the caller's, as for associations: the path
+                # belongs with the domain it steers.
+                body = dict(body, project_id=domain['project_id'],
+                            via_hosts=via_hosts, source_host=source)
+                path = te_db.create_te_path(context, domain_id, body)
         except db_exc.DBDuplicateEntry:
             raise te_ext.Srv6TePathExists(domain_id=domain_id,
                                           selector=selector)
@@ -1052,7 +1127,16 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             # PUT replaces the list: re-steering with no delete/create
             # window. [] un-steers.
             body = dict(body, via_hosts=body[te_def.VIA_HOSTS] or [])
-            self._validate_via_hosts(body[te_def.VIA_HOSTS], locators)
+            self._validate_via_hosts(body[te_def.VIA_HOSTS],
+                                     {**self.fabric_locators, **locators})
+            old = te_db.get_te_path(context, id)
+            if old and old.get(te_def.BANDWIDTH) is not None:
+                # The reservation is accounted on the computed hops: other
+                # hops would hold capacity on links the traffic avoids.
+                raise te_ext.Srv6TePathInvalid(
+                    reason=_("via_hosts of a path with a bandwidth "
+                             "reservation are computed; delete and "
+                             "re-create the path to move it"))
         path = te_db.update_te_path(context, id, None, body)
         if path is None:
             raise te_ext.Srv6TePathNotFound(id=id)

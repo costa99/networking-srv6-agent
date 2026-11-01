@@ -116,6 +116,17 @@ LOG = logging.getLogger(__name__)
 #                 every tenant. With the local rule after l3mdev a VRF's
 #                 packet is not delivered locally anyway; this is the second
 #                 lock on the same door.
+#   seg6_flowlabel
+#                 1: the outer IPv6 flow label of an encapsulated packet is a
+#                 hash of the inner flow. At the default 0 it is copied from
+#                 an IPv6 inner packet and is 0 for an IPv4 one, and the
+#                 outer header has no ports: every flow between two nodes in
+#                 one domain then has the same outer header, so every ECMP
+#                 hop of the underlay sends them all down ONE path (measured
+#                 on the Clos test bed, PLAN-PATH-COMPUTATION LOG op 14). The
+#                 flow label is the entropy RFC 6437 provides for this; the
+#                 underlay must hash it (Linux: fib_multipath_hash_policy 0,
+#                 the default).
 GLOBAL_SYSCTLS = [
     ('net.ipv6.conf.all.forwarding', '1'),
     ('net.ipv4.ip_forward', '1'),
@@ -127,6 +138,7 @@ GLOBAL_SYSCTLS = [
     ('net.ipv4.conf.default.rp_filter', '0'),
     ('net.ipv4.tcp_l3mdev_accept', '0'),
     ('net.ipv4.udp_l3mdev_accept', '0'),
+    ('net.ipv6.seg6_flowlabel', '1'),
 ]
 
 

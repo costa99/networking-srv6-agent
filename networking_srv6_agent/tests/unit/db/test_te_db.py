@@ -485,3 +485,41 @@ class TestSourceSelector(Srv6TeDbTestCase):
         self.assertEqual(
             te_db.get_te_paths_for_domain(self.ctx, self.domain_id),
             te_db.get_te_paths_for_domain(self.ctx, other_domain))
+
+
+class TestBandwidth(Srv6TeDbTestCase):
+    """The reservation column (PLAN-PATH-COMPUTATION)."""
+
+    def test_an_operator_path_reserves_nothing(self):
+        path = self._create_path()
+        self.assertIsNone(path['bandwidth'])
+        self.assertEqual([], te_db.get_bandwidth_paths(self.ctx))
+
+    def test_a_reservation_round_trips(self):
+        path = te_db.create_te_path(
+            self.ctx, self.domain_id,
+            {'project_id': 'test-project', 'destination_host': 'ml5',
+             'source_host': 'ml1', 'via_hosts': ['l1', 's2', 'l3'],
+             'bandwidth': 60})
+        self.assertEqual(60, path['bandwidth'])
+        self.assertEqual(60, te_db.get_te_path(self.ctx, path['id'])[
+            'bandwidth'])
+
+    def test_reservations_of_every_domain_are_listed(self):
+        # the links are shared by all domains, so is the accounting
+        other = self._create_domain()
+        for domain, dest in ((self.domain_id, 'ml5'), (other, 'ml6')):
+            te_db.create_te_path(
+                self.ctx, domain,
+                {'project_id': 'test-project', 'destination_host': dest,
+                 'source_host': 'ml1', 'via_hosts': ['l1', 's1', 'l3'],
+                 'bandwidth': 40})
+        self._create_path()                         # no reservation
+        got = te_db.get_bandwidth_paths(self.ctx)
+        self.assertEqual(['ml5', 'ml6'],
+                         sorted(p['destination_host'] for p in got))
+        self.assertEqual({'source_host': 'ml1',
+                          'via_hosts': ['l1', 's1', 'l3'],
+                          'destination_host': 'ml5',
+                          'destination_port_id': None, 'bandwidth': 40},
+                         [p for p in got if p['destination_host'] == 'ml5'][0])

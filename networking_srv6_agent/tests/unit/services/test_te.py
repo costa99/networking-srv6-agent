@@ -31,7 +31,9 @@ from oslo_utils import uuidutils
 
 from networking_srv6_agent.api.definitions import srv6_te as te_def
 from networking_srv6_agent.common import config
+from networking_srv6_agent.db import domain_db
 from networking_srv6_agent.db import srv6_db
+from networking_srv6_agent.db import te_db
 from networking_srv6_agent.services import plugin
 from networking_srv6_agent.tests.unit.services import test_plugin
 
@@ -1046,3 +1048,131 @@ class TestLivenessWorker(TePluginTestCaseBase):
     def test_no_worker_when_the_check_is_off(self):
         self.config(group=config.SRV6_SERVER_GROUP, te_liveness_interval=0)
         self.assertEqual([], self.plugin.get_workers())
+
+
+# ----------------------------------------------------------------------
+# bandwidth-reserved paths (PLAN-PATH-COMPUTATION)
+# ----------------------------------------------------------------------
+# node1 -- la ==== s1, s2 ==== lb -- node2: two spines between two leaves,
+# 100 Mbit/s spine links, 1000 to the hosts. Set on the plugin instance, as
+# a topology_file would at start.
+FABRIC = {'la': 'fc00:0:a::/48', 'lb': 'fc00:0:b::/48',
+          's1': 'fc00:0:c1::/48', 's2': 'fc00:0:c2::/48'}
+CAPACITY = {}
+for _a, _b, _c in (('node1', 'la', 1000), ('node2', 'lb', 1000),
+                   ('la', 's1', 100), ('la', 's2', 100),
+                   ('s1', 'lb', 100), ('s2', 'lb', 100)):
+    CAPACITY[(_a, _b)] = CAPACITY[(_b, _a)] = _c
+
+
+class TestTeBandwidthApi(TeRestTestCase):
+    """POST with bandwidth: hops computed, reserved, refused when full."""
+
+    def setUp(self):
+        super().setUp()
+        self.srv6.fabric_locators = dict(FABRIC)
+        self.srv6.capacity = dict(CAPACITY)
+
+    def _reserve(self, expected=201, domain=None, **attrs):
+        body = dict({'destination_host': 'node2', 'source_host': 'node1',
+                     'bandwidth': 60}, **attrs)
+        if domain:
+            body['domain_id'] = domain
+        return self._path(expected, **body)
+
+    def test_the_hops_are_computed_and_pinned(self):
+        path = self._reserve()
+        self.assertEqual(['la', 's1', 'lb'], path['via_hosts'])
+        self.assertEqual(60, path['bandwidth'])
+        self.assertEqual('ACTIVE', path['status'])
+        self.assertEqual(['fc00:0:a:fff0::', 'fc00:0:c1:fff0::',
+                          'fc00:0:b:fff0::', self._decap()], path['segments'])
+
+    def test_the_second_reservation_takes_the_other_spine_then_409(self):
+        # one path per (domain, destination, source): one domain each
+        self._reserve()
+        second = self._reserve(domain=self._domain()['id'])
+        self.assertEqual(['la', 's2', 'lb'], second['via_hosts'])
+        res = self._reserve(expected=409, domain=self._domain()['id'])
+        self.assertIn('60 Mbit/s', self._message(res))
+        # what is left on each spine still fits a smaller one
+        self.assertEqual(40, self._reserve(domain=self._domain()['id'],
+                                           bandwidth=40)['bandwidth'])
+
+    def test_admission_reads_the_reservations_under_the_lock(self):
+        # Concurrent creates over-committed a link when the read and the
+        # insert were two steps (Phase C): the lock must come first.
+        order = []
+        lock, read = domain_db.lock_all_domains, te_db.get_bandwidth_paths
+        with mock.patch.object(domain_db, 'lock_all_domains',
+                               side_effect=lambda c: order.append('lock') or
+                               lock(c)), \
+                mock.patch.object(te_db, 'get_bandwidth_paths',
+                                  side_effect=lambda c: order.append('read') or
+                                  read(c)):
+            self._reserve()
+            self._host_path()                     # no bandwidth: no lock
+        self.assertEqual(['lock', 'read'], order)
+
+    def test_a_deleted_reservation_frees_its_links(self):
+        first = self._reserve()
+        self._reserve(domain=self._domain()['id'])
+        self._delete_path(first['id'])
+        self._reserve(domain=self._domain()['id'])
+
+    def test_refused_without_a_source(self):
+        res = self._reserve(expected=400, source_host=None)
+        self.assertIn('source_host', self._message(res))
+
+    def test_refused_with_via_hosts(self):
+        res = self._reserve(expected=400, via_hosts=['s1'])
+        self.assertIn('exclude each other', self._message(res))
+
+    def test_refused_without_a_topology(self):
+        self.srv6.capacity = {}
+        res = self._reserve(expected=400)
+        self.assertIn('topology_file', self._message(res))
+
+    def test_refused_for_a_host_outside_the_topology(self):
+        srv6_db.set_host_locator(self.admin_ctx, 'node3', LOC3,
+                                 datetime.datetime.now(datetime.timezone.utc))
+        res = self._reserve(expected=400, destination_host='node3')
+        self.assertIn('node3 is not a node', self._message(res))
+
+    def test_bad_bandwidth_values_are_refused(self):
+        for value in (0, -5, 'lots'):
+            self._reserve(expected=400, bandwidth=value)
+
+    def test_the_hops_of_a_reservation_cannot_be_put(self):
+        path = self._reserve()
+        res = self._update(path['id'], expected=400, via_hosts=['la'])
+        self.assertIn('computed', self._message(res))
+
+    def test_an_operator_path_may_name_a_fabric_node(self):
+        path = self._host_path(via_hosts=['s2'])
+        self.assertIsNone(path['bandwidth'])
+        self.assertEqual(['fc00:0:c2:fff0::', self._decap()],
+                         path['segments'])
+
+
+class TestFabricLocators(TePluginTestCaseBase):
+    """Fabric nodes run no agent: their locators come from the topology."""
+
+    def setUp(self):
+        super().setUp()
+        self.plugin.fabric_locators = {'s1': 'fc00:0:c1::/48',
+                                       'node1': 'fc00:0:99::/48'}
+
+    def test_a_fabric_node_is_a_usable_waypoint(self):
+        self.assertEqual(['fc00:0:c1:fff0::', 'fc00:0:1:fff0::'],
+                         self.plugin._transit_sids(['s1', 'node1'],
+                                                   dict(self.locators)))
+
+    def test_the_payload_carries_fabric_locators_registered_hosts_win(self):
+        self.core.get_network.return_value = {'subnets': [], 'mtu': 1450}
+        self.core.get_ports.return_value = []
+        self._paths()
+        locators = self.plugin._build_domain_payload(
+            self.ctx, test_plugin._domain(networks=['net1']))['locators']
+        self.assertEqual('fc00:0:c1::/48', locators['s1'])
+        self.assertEqual(LOC1, locators['node1'])
