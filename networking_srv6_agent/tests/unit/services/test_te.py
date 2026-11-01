@@ -1124,6 +1124,15 @@ class TestTeBandwidthApi(TeRestTestCase):
         res = self._reserve(expected=400, source_host=None)
         self.assertIn('source_host', self._message(res))
 
+    def test_refused_for_a_port_destination(self):
+        # A port can migrate: its reservation would be accounted on the hops
+        # computed for the old host plus the new one, a link that is not
+        # there (test_te_bandwidth_migration_repro.py).
+        port = self._vm_port()
+        res = self._reserve(expected=400, destination_host=None,
+                            destination_port_id=port['id'])
+        self.assertIn('destination_host', self._message(res))
+
     def test_refused_with_via_hosts(self):
         res = self._reserve(expected=400, via_hosts=['s1'])
         self.assertIn('exclude each other', self._message(res))

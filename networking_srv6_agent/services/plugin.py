@@ -982,7 +982,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                          "VMs, so the path would steer nothing")
                 % {'p': port['id'], 's': source})
 
-    def _compute_hops(self, context, body, source, host, port, via_hosts):
+    def _compute_hops(self, context, body, source, host, via_hosts):
         """via_hosts for a bandwidth reservation, or 400 / 409.
 
         Online CSPF (services/pce.py) over the topology file, against what
@@ -990,6 +990,11 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         links are shared. The result pins every hop, leaves and spines
         included, so the reservation sits on exactly the links the traffic
         takes.
+
+        The destination must be a host, never a port: a port can migrate,
+        and the pinned hops end at the leaf of the host it was computed for,
+        so the books would then charge a link that does not exist and miss
+        the ones the traffic really takes (live-migration over-commit).
         """
         bandwidth = body[te_def.BANDWIDTH]
         if not self.capacity:
@@ -1004,12 +1009,16 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             raise te_ext.Srv6TePathInvalid(
                 reason=_("bandwidth and via_hosts exclude each other: with "
                          "bandwidth the hops are computed"))
-        destination = host or (port or {}).get(portbindings.HOST_ID)
+        if not host:
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("bandwidth needs destination_host: a reservation "
+                         "is tied to a node, and a port can migrate"))
+        destination = host
         for end in (source, destination):
-            if not end or not any(end == a for a, _b in self.capacity):
+            if not any(end == a for a, _b in self.capacity):
                 raise te_ext.Srv6TePathInvalid(
                     reason=_("%s is not a node of the underlay topology")
-                    % (end or 'the unbound port\'s host'))
+                    % end)
         held = []
         for p in te_db.get_bandwidth_paths(context):
             end = self._destination_of(context, p)
@@ -1074,7 +1083,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                     # the rest of this transaction.
                     domain_db.lock_all_domains(context)
                     via_hosts = self._compute_hops(context, body, source,
-                                                   host, port, via_hosts)
+                                                   host, via_hosts)
                 # Forced, never the caller's, as for associations: the path
                 # belongs with the domain it steers.
                 body = dict(body, project_id=domain['project_id'],
