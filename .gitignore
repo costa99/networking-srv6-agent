@@ -17,7 +17,8 @@ ChangeLog
 # Private notes, plans and reports: never committed.
 private-docs/
 /*.md
-live-tests/
+live-tests/*
+!live-tests/bwmig-repro.sh
 Claude outputs/
 .ua/
 .claude/
