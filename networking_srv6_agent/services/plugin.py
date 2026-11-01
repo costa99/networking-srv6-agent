@@ -114,21 +114,38 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         self._pool_synced = False
         self.encoding = self.conf.dataplane_encoding
         self._validate_function_id_ranges()
-        # The underlay for bandwidth-reserved TE paths ([srv6] topology_file):
-        # {node: locator} and {(a, b): Mbit/s}, read once. Empty without it.
-        self.fabric_locators, self.capacity = {}, {}
-        if self.conf.topology_file:
-            try:
-                self.fabric_locators, self.capacity = pce.load(
-                    self.conf.topology_file)
-            except (OSError, pce.TopologyError) as e:
-                raise n_exc.InvalidConfigurationOption(
-                    opt_name='[srv6] topology_file', opt_value=str(e))
+        self._load_topology()
         LOG.info("SRv6 service plugin initialised (vrf_table_base=%(base)s, "
-                 "function_id_ranges=%(ranges)s, dataplane_encoding=%(enc)s)",
+                 "function_id_ranges=%(ranges)s, dataplane_encoding=%(enc)s, "
+                 "reservable_fraction=%(frac)s)",
                  {'base': self.conf.vrf_table_base,
                   'ranges': self.conf.function_id_ranges,
-                  'enc': self.encoding})
+                  'enc': self.encoding,
+                  'frac': self.conf.reservable_fraction})
+
+    def _load_topology(self):
+        """The underlay for bandwidth-reserved TE paths, read once.
+
+        fabric_locators {node: locator} and capacity {(a, b): Mbit/s}, empty
+        without [srv6] topology_file. capacity is what admission may fill:
+        the file's capacity times reservable_fraction, so the rest of every
+        link stays free for traffic without a reservation.
+        """
+        fraction = self.conf.reservable_fraction
+        if not 0 < fraction <= 1:
+            raise n_exc.InvalidConfigurationOption(
+                opt_name='[srv6] reservable_fraction', opt_value=fraction)
+        self.fabric_locators, self.capacity = {}, {}
+        if not self.conf.topology_file:
+            return
+        try:
+            self.fabric_locators, raw = pce.load(self.conf.topology_file)
+        except (OSError, pce.TopologyError) as e:
+            raise n_exc.InvalidConfigurationOption(
+                opt_name='[srv6] topology_file', opt_value=str(e))
+        # round() first: 100 * 0.29 is 28.999999999999996, not 29
+        self.capacity = {link: int(round(mbps * fraction, 6))
+                         for link, mbps in raw.items()}
 
     @property
     def usid(self):
@@ -982,8 +999,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                          "VMs, so the path would steer nothing")
                 % {'p': port['id'], 's': source})
 
-    def _compute_hops(self, context, body, source, host, via_hosts):
-        """via_hosts for a bandwidth reservation, or 400 / 409.
+    def _compute_hops(self, context, body, source, host, port, via_hosts):
+        """(via_hosts, reserved host) for a bandwidth reservation, or 400/409.
 
         Online CSPF (services/pce.py) over the topology file, against what
         every existing reservation already holds, in every domain: the
@@ -991,10 +1008,12 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         included, so the reservation sits on exactly the links the traffic
         takes.
 
-        The destination must be a host, never a port: a port can migrate,
-        and the pinned hops end at the leaf of the host it was computed for,
-        so the books would then charge a link that does not exist and miss
-        the ones the traffic really takes (live-migration over-commit).
+        The destination is a host, or the host a port is bound to now. The
+        hops are computed for it, and it is stored as reserved_host. The
+        books are built from reserved_host, never from where a port is
+        later: after a migration the hops still end at that host's leaf,
+        and reading the port's new host made the books charge a link that
+        does not exist (live-migration over-commit, review of 0e282a3).
         """
         bandwidth = body[te_def.BANDWIDTH]
         if not self.capacity:
@@ -1009,11 +1028,11 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             raise te_ext.Srv6TePathInvalid(
                 reason=_("bandwidth and via_hosts exclude each other: with "
                          "bandwidth the hops are computed"))
-        if not host:
+        destination = host or (port or {}).get(portbindings.HOST_ID)
+        if not destination:
             raise te_ext.Srv6TePathInvalid(
-                reason=_("bandwidth needs destination_host: a reservation "
-                         "is tied to a node, and a port can migrate"))
-        destination = host
+                reason=_("bandwidth needs a bound port: the hops are "
+                         "computed for the host it is on"))
         for end in (source, destination):
             if not any(end == a for a, _b in self.capacity):
                 raise te_ext.Srv6TePathInvalid(
@@ -1021,20 +1040,31 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                     % end)
         held = []
         for p in te_db.get_bandwidth_paths(context):
-            end = self._destination_of(context, p)
+            # rows from before reserved_host existed are all to a host
+            end = p['reserved_host'] or p[te_def.DESTINATION_HOST]
             if end:
                 held.append(([p[te_def.SOURCE_HOST]] + p[te_def.VIA_HOSTS] +
                              [end], p[te_def.BANDWIDTH]))
+        used = pce.reserved(held)
+        over = sorted('%s>%s' % link for link, mbps in used.items()
+                      if mbps > self.capacity.get(link, mbps))
+        if over:
+            # reservable_fraction was lowered below what is already held
+            LOG.warning("SRv6 TE: reservations exceed the reservable "
+                        "capacity (reservable_fraction %(f)s) on %(l)s; new "
+                        "requests there are refused until some are deleted",
+                        {'f': self.conf.reservable_fraction,
+                         'l': ', '.join(over)})
         # The caller holds the admission lock (create_srv6_te_path).
-        path = pce.compute(self.capacity, pce.reserved(held), source,
-                           destination, bandwidth)
+        path = pce.compute(self.capacity, used, source, destination,
+                           bandwidth)
         if path is None:
             raise te_ext.Srv6TePathNoCapacity(
                 source=source, destination=destination, bandwidth=bandwidth)
         LOG.info("SRv6 TE: %(bw)d Mbit/s %(s)s -> %(d)s computed as %(p)s",
                  {'bw': bandwidth, 's': source, 'd': destination,
                   'p': '-'.join(path)})
-        return path[1:-1]
+        return path[1:-1], destination
 
     def create_srv6_te_path(self, context, srv6_te_path):
         body = srv6_te_path[te_def.RESOURCE_NAME]
@@ -1082,12 +1112,15 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                     # op 21). Every domain row is locked, in key order, for
                     # the rest of this transaction.
                     domain_db.lock_all_domains(context)
-                    via_hosts = self._compute_hops(context, body, source,
-                                                   host, via_hosts)
+                    via_hosts, reserved = self._compute_hops(
+                        context, body, source, host, port, via_hosts)
+                else:
+                    reserved = None
                 # Forced, never the caller's, as for associations: the path
                 # belongs with the domain it steers.
                 body = dict(body, project_id=domain['project_id'],
-                            via_hosts=via_hosts, source_host=source)
+                            via_hosts=via_hosts, source_host=source,
+                            reserved_host=reserved)
                 path = te_db.create_te_path(context, domain_id, body)
         except db_exc.DBDuplicateEntry:
             raise te_ext.Srv6TePathExists(domain_id=domain_id,
@@ -1242,11 +1275,65 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         if added:
             self._notify_port(context, dict(port, fixed_ips=added))
 
+    def _release_moved_reservations(self, context, port):
+        """Delete the bandwidth reservations a port's new host voids.
+
+        Decision D0 of PLAN-RESERVATION-FOLLOWS-INSTANCE: the reserved hops
+        lead to the host they were computed for, so a port elsewhere (or
+        unbound) ends its reservations; whoever made them asks again. Under
+        the admission lock, so a deletion never interleaves with an
+        admission reading the books. Never raises into the port update.
+        """
+        host = port.get(portbindings.HOST_ID) or None
+        try:
+            with db_api.CONTEXT_WRITER.using(context):
+                domain_db.lock_all_domains(context)
+                gone = te_db.delete_moved_reservations(context, port['id'],
+                                                       host)
+        except Exception:
+            LOG.exception("SRv6 TE: could not release the reservations of "
+                          "port %s after it moved", port['id'])
+            return
+        for path in gone:
+            LOG.warning("SRv6 TE: reservation %(id)s (%(bw)d Mbit/s from "
+                        "%(s)s to port %(p)s) deleted: it was reserved for "
+                        "%(old)s and the port is now on %(new)s",
+                        {'id': path['id'], 'bw': path[te_def.BANDWIDTH],
+                         's': path[te_def.SOURCE_HOST], 'p': port['id'],
+                         'old': path['reserved_host'], 'new': host})
+
+    def _release_stale_reservations(self, context):
+        """Release reservations whose port moved without our noticing.
+
+        The safety net of _release_moved_reservations, run by the TE
+        liveness worker: a port update that never reached the callback (a
+        server killed between ML2's commit and the callback) leaves a
+        reservation for a host the port has left. One read of the
+        reservations, one get_ports for their ports. A deleted port needs
+        nothing: its paths went with it (ON DELETE CASCADE).
+        """
+        held = {}
+        for path in te_db.get_bandwidth_paths(context):
+            port_id = path[te_def.DESTINATION_PORT_ID]
+            if port_id:
+                held.setdefault(port_id, set()).add(path['reserved_host'])
+        if not held:
+            return
+        for port in self._core_plugin().get_ports(
+                context, filters={'id': sorted(held)}):
+            if held[port['id']] != {port.get(portbindings.HOST_ID) or None}:
+                self._release_moved_reservations(context, port)
+
     @registry.receives(resources.PORT, [events.AFTER_UPDATE])
     def registry_port_updated(self, resource, event, trigger, payload=None):
         context = payload.context
         port = payload.latest_state
         original = payload.states[0] if payload.states else {}
+        if ((original.get(portbindings.HOST_ID) or None) !=
+                (port.get(portbindings.HOST_ID) or None)):
+            # Before any route is pushed: the new host's route must not be
+            # built from hops that lead to the old one.
+            self._release_moved_reservations(context.elevated(), port)
         try:
             was_active = original.get('status') == n_const.PORT_STATUS_ACTIVE
             is_active = port.get('status') == n_const.PORT_STATUS_ACTIVE

@@ -57,12 +57,24 @@ class TeLivenessMonitor:
         return waypoints
 
     def check(self):
-        """One pass. Never raises: a periodic function that raises is gone."""
+        """One pass. Never raises: a periodic function that raises is gone.
+
+        Also the safety net of the port-moved release: a reservation whose
+        port left the host it was made for, because the port update never
+        reached registry_port_updated, is deleted here. Separate from the
+        liveness part, which returns early when nothing died.
+        """
         try:
             self._check()
         except Exception:
             LOG.exception("SRv6 TE liveness check failed; trying again at "
                           "the next interval")
+        try:
+            self._plugin._release_stale_reservations(
+                n_context.get_admin_context())
+        except Exception:
+            LOG.exception("SRv6 TE: the check for reservations whose port "
+                          "moved failed; trying again at the next interval")
 
     def _check(self):
         ctx = n_context.get_admin_context()

@@ -136,10 +136,11 @@ RESOURCE_ATTRIBUTE_MAP = {
         # Set: the plugin computes via_hosts itself over the underlay
         # topology ([srv6] topology_file) -- fewest hops, then the widest
         # bottleneck among links with room -- or answers 409 when no path
-        # has room. Needs source_host (the ingress the path starts at),
-        # destination_host (not a port: a port can migrate, and the
-        # reservation is accounted on the hops computed for one host) and no
-        # via_hosts. Create-only: a different reservation is a different path.
+        # has room. Needs source_host (the ingress the path starts at) and no
+        # via_hosts. To a port, the reservation holds for the host the port
+        # is bound to when it is made, and is deleted when the port changes
+        # host or is deleted. Create-only: a different reservation is a
+        # different path.
         BANDWIDTH: {'allow_post': True, 'allow_put': False,
                     'default': None,
                     'convert_to': converters.convert_to_int_if_not_none,

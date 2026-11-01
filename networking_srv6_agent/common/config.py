@@ -73,7 +73,10 @@ srv6_server_opts = [
                "about agent_down_time plus this interval; lower "
                "agent_down_time to fail over faster. 0 turns the check "
                "off: a dead waypoint then blackholes its paths until an "
-               "admin re-steers them.")),
+               "admin re-steers them. The same check also deletes a "
+               "bandwidth reservation whose port left the host it was "
+               "made for without the server noticing; 0 turns that off "
+               "too.")),
     cfg.StrOpt(
         'topology_file',
         help=_("Optional underlay topology for bandwidth-reserved TE paths, "
@@ -83,6 +86,15 @@ srv6_server_opts = [
                "With it, a TE path created with 'bandwidth' gets its hops "
                "computed by the server, and fabric nodes may be named in "
                "via_hosts. Unset: 'bandwidth' is refused.")),
+    cfg.FloatOpt(
+        'reservable_fraction',
+        default=0.8,
+        help=_("Share of every link of topology_file that bandwidth "
+               "reservations may fill, more than 0 and at most 1. The rest "
+               "is left to traffic without a reservation, which the server "
+               "never counts. Lowering it evicts no reservation: a link "
+               "already above the new limit refuses new ones until enough "
+               "are deleted.")),
 ]
 
 srv6_agent_opts = [
