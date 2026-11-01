@@ -527,9 +527,13 @@ class TestBandwidth(Srv6TeDbTestCase):
         got = te_db.get_bandwidth_paths(self.ctx)
         self.assertEqual(['ml5', 'ml6'],
                          sorted(p['destination_host'] for p in got))
+        ml5 = [p for p in got if p['destination_host'] == 'ml5'][0]
+        # id and domain_id: a reservation is moved or deleted by id, and its
+        # domain re-pushed (PLAN-LINK-STATE-TE G3)
+        self.assertEqual(self.domain_id, ml5.pop('domain_id'))
+        self.assertTrue(ml5.pop('id'))
         self.assertEqual({'source_host': 'ml1',
                           'via_hosts': ['l1', 's1', 'l3'],
                           'destination_host': 'ml5',
                           'destination_port_id': None, 'bandwidth': 40,
-                          'reserved_host': None},
-                         [p for p in got if p['destination_host'] == 'ml5'][0])
+                          'reserved_host': None}, ml5)

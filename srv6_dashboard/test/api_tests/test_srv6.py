@@ -206,6 +206,20 @@ class LocatorApiTests(helpers.APITestCase):
         self.assertEqual('fc00:0:3::/48', ret.locator)
 
 
+class LinkStateApiTests(helpers.APITestCase):
+
+    @test.create_mocks({Proxy: ('_list',)})
+    def test_link_state_list(self):
+        self.mock__list.return_value = self.api_srv6_link_states
+
+        ret = srv6.link_state_list(self.request, from_node='l1')
+
+        self.mock__list.assert_called_once_with(resources.Srv6LinkState,
+                                                from_node='l1')
+        self.assertEqual('ale:l1', ret[0].id)
+        self.assertEqual((30.0, 1000), (ret[0].mbps, ret[0].capacity_mbps))
+
+
 class TePathApiTests(helpers.APITestCase):
 
     @test.create_mocks({Proxy: ('_list',)})

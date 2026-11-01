@@ -4,7 +4,12 @@
  * Plain DOM and SVG, no library (FEATURE D22). Every string from the API
  * goes in through textContent or setAttribute, never innerHTML.
  *
- *   - hosts sit on a circle, in the API's (sorted) order;
+ *   - with link states (an underlay topology on the server), nodes sit in
+ *     rows by tier: hosts at the bottom, leaves above, spines on top;
+ *     without, hosts sit on a circle, in the API's (sorted) order;
+ *   - each directed underlay link is a thin line, the two directions of a
+ *     link side by side, coloured by its level (load share of capacity,
+ *     down, or unknown when stale); hover for the figures;
  *   - each domain present on a host is a coloured badge under it, with
  *     its VM count;
  *   - each TE path is a line from its first waypoint (or from its source
@@ -12,7 +17,8 @@
  *     destination, green when ACTIVE and dashed amber when DEGRADED;
  *     paths sharing a hop are drawn side by side, not on top of each
  *     other;
- *   - the Domain select shows one domain's badges and paths only.
+ *   - the Domain select shows one domain's badges and paths only;
+ *   - data/ is fetched again every 5 s: the link state is live.
  */
 (function () {
   'use strict';
@@ -23,13 +29,21 @@
   var COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
                 '#8c564b', '#e377c2', '#17becf'];
   var STATUS_COLOR = {ACTIVE: '#3c763d', DEGRADED: '#f0ad4e'};
+  /* Not green/amber: those are the TE paths' colours. */
+  var LEVEL_COLOR = {ok: '#6baed6', busy: '#fd8d3c', congested: '#d62728',
+                     down: '#333', unknown: '#bbb'};
+  var LEVEL_TEXT = {ok: 'below 50 %', busy: '50–90 %', congested: '≥ 90 %',
+                    down: 'down', unknown: 'no fresh data'};
+  var LINK_GAP = 7, REFRESH_MS = 5000;
   var W = 900, H = 520, CX = W / 2, CY = H / 2 - 10, RADIUS = 175;
   var NODE_W = 170, NODE_H = 54, BADGE_R = 11, PATH_GAP = 9;
+  var nodeW = NODE_W;   /* narrower when a tier row holds many nodes */
 
   var svg = document.getElementById('srv6-topology-svg');
   var select = document.getElementById('srv6-topology-domain');
   var legend = document.getElementById('srv6-topology-legend');
   var pathRows = document.getElementById('srv6-topology-paths');
+  var linkRows = document.getElementById('srv6-topology-links');
   var errorBox = document.getElementById('srv6-topology-error');
   var data = null;
   var domainColor = {};
@@ -58,10 +72,33 @@
     while (node.firstChild) { node.removeChild(node.firstChild); }
   }
 
+  /* With an underlay: one row per tier (build() computed them), the
+     highest tier on top, nodes spread evenly in API order. */
+  function tieredLayout(hosts) {
+    var pos = {}, rows = {}, top = 0;
+    hosts.forEach(function (h) {
+      (rows[h.tier] = rows[h.tier] || []).push(h);
+      top = Math.max(top, h.tier);
+    });
+    var widest = Math.max.apply(null, Object.keys(rows).map(function (t) {
+      return rows[t].length;
+    }));
+    nodeW = Math.min(NODE_W, W / widest - 12);
+    Object.keys(rows).forEach(function (t) {
+      var row = rows[t];
+      var y = top ? 60 + (H - 150) * (top - t) / top : CY;
+      row.forEach(function (h, i) {
+        pos[h.host] = {x: W * (i + 0.5) / row.length, y: y};
+      });
+    });
+    return pos;
+  }
+
   /* Host centres on a circle, the first at the top; one host sits in the
      middle, two side by side. */
   function layout(hosts) {
     var pos = {};
+    nodeW = NODE_W;
     var n = hosts.length;
     hosts.forEach(function (h, i) {
       if (n === 1) {
@@ -80,7 +117,7 @@
      edge, so arrowheads stay visible. */
   function edgePoint(a, b) {
     var dx = b.x - a.x, dy = b.y - a.y;
-    var t = Math.min(dx ? (NODE_W / 2 + 4) / Math.abs(dx) : Infinity,
+    var t = Math.min(dx ? (nodeW / 2 + 4) / Math.abs(dx) : Infinity,
                      dy ? (NODE_H / 2 + 4) / Math.abs(dy) : Infinity);
     return {x: a.x + dx * t, y: a.y + dy * t};
   }
@@ -126,13 +163,49 @@
     }
   }
 
+  /* One direction of a link: offset to the right of its direction, so
+     a->b and b->a sit side by side. */
+  function drawLink(link, pos) {
+    var a = pos[link.from], b = pos[link.to];
+    if (!a || !b) { return; }
+    var len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+    var ox = -(b.y - a.y) / len * LINK_GAP / 2;
+    var oy = (b.x - a.x) / len * LINK_GAP / 2;
+    var p1 = edgePoint({x: a.x + ox, y: a.y + oy}, {x: b.x + ox, y: b.y + oy});
+    var p2 = edgePoint({x: b.x + ox, y: b.y + oy}, {x: a.x + ox, y: a.y + oy});
+    var attrs = {x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y,
+                 stroke: LEVEL_COLOR[link.level], 'stroke-width': 4};
+    if (link.level === 'down') { attrs['stroke-dasharray'] = '4 3'; }
+    var g = svgEl('g', {'class': 'srv6-link'}, svg);
+    svgEl('title', {}, g).textContent = linkText(link);
+    svgEl('line', attrs, g);
+  }
+
+  function fmt(v, unit) {
+    return v === null || v === undefined ? '–' : String(v) + (unit || '');
+  }
+
+  function linkText(link) {
+    return link.from + ' → ' + link.to + ': ' +
+      (link.level === 'down' ? 'DOWN, ' : '') +
+      fmt(link.mbps) + ' of ' + fmt(link.capacity_mbps, ' Mbit/s') +
+      (link.load === null ? '' : ' (' + Math.round(100 * link.load) + ' %)') +
+      ', reserved ' + fmt(link.reserved_mbps) +
+      ', delivered ' + fmt(link.delivered_mbps) +
+      ', peak ' + fmt(link.peak_mbps) +
+      (link.stale ? ', stale' : ', ' + fmt(link.age, ' s') + ' old');
+  }
+
   function drawHost(host, pos, domains) {
     var p = pos[host.host];
     var g = svgEl('g', {'class': 'srv6-host'}, svg);
-    var box = {x: p.x - NODE_W / 2, y: p.y - NODE_H / 2, width: NODE_W,
+    var box = {x: p.x - nodeW / 2, y: p.y - NODE_H / 2, width: nodeW,
                height: NODE_H, rx: 6, fill: '#fff', stroke: '#555',
                'stroke-width': 1.5};
-    if (!host.locator) {
+    if (host.fabric) {
+      box.fill = '#f5f5f5';
+      box.stroke = '#999';
+    } else if (!host.locator) {
       box.stroke = '#a94442';
       box['stroke-dasharray'] = '5 4';
     }
@@ -142,8 +215,8 @@
       .textContent = host.host;
     svgEl('text', {x: p.x, y: p.y + 14, 'text-anchor': 'middle',
                    'font-family': 'monospace', 'font-size': 12,
-                   fill: host.locator ? '#333' : '#a94442'}, g)
-      .textContent = host.locator || 'no locator';
+                   fill: host.locator || host.fabric ? '#333' : '#a94442'}, g)
+      .textContent = host.locator || (host.fabric ? 'fabric' : 'no locator');
     var present = domains.filter(function (d) {
       return d.hosts[host.host];
     });
@@ -175,6 +248,39 @@
            {style: 'color: ' + STATUS_COLOR.ACTIVE});
     htmlEl('span', '- - DEGRADED', st,
            {style: 'color: ' + STATUS_COLOR.DEGRADED});
+    if (!data.links.length) { return; }
+    var lk = htmlEl('div', 'Links (share of capacity): ', legend);
+    Object.keys(LEVEL_COLOR).forEach(function (level) {
+      var item = htmlEl('span', null, lk,
+                        {style: 'margin-right: 1.2em; white-space: nowrap'});
+      htmlEl('span', '▬ ', item, {style: 'color: ' + LEVEL_COLOR[level]});
+      htmlEl('span', LEVEL_TEXT[level], item);
+    });
+  }
+
+  function fillLinkTable(links) {
+    clear(linkRows);
+    if (!links.length) {
+      var tr0 = htmlEl('tr', null, linkRows);
+      htmlEl('td', 'No link state: the server has no topology_file.', tr0,
+             {colspan: 8});
+      return;
+    }
+    links.forEach(function (link) {
+      var tr = htmlEl('tr', null, linkRows);
+      var td = htmlEl('td', null, tr);
+      htmlEl('span', '▬ ', td, {style: 'color: ' + LEVEL_COLOR[link.level]});
+      htmlEl('span', link.from + ' → ' + link.to, td);
+      htmlEl('td', link.load === null ? '–' :
+             Math.round(100 * link.load) + ' %', tr);
+      htmlEl('td', fmt(link.mbps), tr);
+      htmlEl('td', fmt(link.reserved_mbps), tr);
+      htmlEl('td', fmt(link.capacity_mbps), tr);
+      htmlEl('td', fmt(link.delivered_mbps), tr);
+      htmlEl('td', fmt(link.peak_mbps), tr);
+      htmlEl('td', link.level === 'down' ? 'down' :
+             link.stale ? 'stale' : fmt(link.age, ' s'), tr);
+    });
   }
 
   function fillPathTable(paths) {
@@ -209,17 +315,20 @@
     var paths = data.te_paths.filter(function (p) {
       return !only || p.domain_id === only;
     });
-    var pos = layout(data.hosts);
+    var pos = data.links.length ? tieredLayout(data.hosts)
+                                : layout(data.hosts);
     if (!data.hosts.length) {
       svgEl('text', {x: CX, y: CY, 'text-anchor': 'middle'}, svg)
         .textContent = 'No host has registered an SRv6 locator.';
     }
-    /* Paths under the hosts, so boxes and labels stay readable. */
+    /* Links, then paths, then the hosts: boxes and labels stay readable. */
+    data.links.forEach(function (l) { drawLink(l, pos); });
     var drawn = paths.filter(function (p) { return p.hops.length > 1; });
     drawn.forEach(function (p, k) { drawPath(p, k, drawn.length, pos); });
     data.hosts.forEach(function (h) { drawHost(h, pos, domains); });
     drawLegend(domains);
     fillPathTable(paths);
+    fillLinkTable(data.links);
   }
 
   function showError(message) {
@@ -227,26 +336,38 @@
     errorBox.hidden = false;
   }
 
-  fetch(root.getAttribute('data-url'),
-        {credentials: 'same-origin', headers: {Accept: 'application/json'}})
-    .then(function (response) {
-      return response.json().then(function (body) {
-        if (!response.ok) {
-          throw new Error(body.error || response.statusText);
-        }
-        return body;
-      });
-    })
-    .then(function (body) {
-      data = body;
-      data.domains.forEach(function (d, i) {
-        domainColor[d.id] = COLORS[i % COLORS.length];
-        domainName[d.id] = d.name;
-        htmlEl('option', d.name, select, {value: d.id});
-      });
-      select.addEventListener('change', render);
-      render();
-    })
-    .catch(function (err) { showError(err.message); });
+  /* First load builds the Domain select; later loads (every 5 s) only
+     redraw. A failed reload keeps the last picture and shows the error. */
+  function load() {
+    return fetch(root.getAttribute('data-url'),
+                 {credentials: 'same-origin',
+                  headers: {Accept: 'application/json'}})
+      .then(function (response) {
+        return response.json().then(function (body) {
+          if (!response.ok) {
+            throw new Error(body.error || response.statusText);
+          }
+          return body;
+        });
+      })
+      .then(function (body) {
+        var first = data === null;
+        data = body;
+        data.links = data.links || [];
+        data.domains.forEach(function (d, i) {
+          if (domainColor[d.id]) { return; }
+          domainColor[d.id] = COLORS[Object.keys(domainColor).length %
+                                     COLORS.length];
+          domainName[d.id] = d.name;
+          htmlEl('option', d.name, select, {value: d.id});
+        });
+        if (first) { select.addEventListener('change', render); }
+        errorBox.hidden = true;
+        render();
+      })
+      .catch(function (err) { showError(err.message); });
+  }
+
+  load().then(function () { window.setInterval(load, REFRESH_MS); });
 })();
 </script>

@@ -32,6 +32,7 @@ would then run inside the transaction and agents could be told about state
 that later rolls back.
 """
 
+import collections
 import datetime
 import ipaddress
 
@@ -49,18 +50,22 @@ from neutron_lib import rpc as n_rpc
 from oslo_config import cfg
 from oslo_db import exception as db_exc
 from oslo_log import log as logging
+from oslo_utils import timeutils
 
 from networking_srv6_agent._i18n import _
 from networking_srv6_agent.api.definitions import srv6 as srv6_def
+from networking_srv6_agent.api.definitions import srv6_link_states as ls_def
 from networking_srv6_agent.api.definitions import srv6_locators as loc_def
 from networking_srv6_agent.api.definitions import srv6_te as te_def
 from networking_srv6_agent.common import config
 from networking_srv6_agent.common import constants
 from networking_srv6_agent.common import sid
 from networking_srv6_agent.db import domain_db
+from networking_srv6_agent.db import link_state_db
 from networking_srv6_agent.db import srv6_db
 from networking_srv6_agent.db import te_db
 from networking_srv6_agent.extensions import srv6 as srv6_ext
+from networking_srv6_agent.extensions import srv6_link_states as ls_ext
 from networking_srv6_agent.extensions import srv6_te as te_ext
 from networking_srv6_agent.services import pce
 from networking_srv6_agent.services import rpc
@@ -104,7 +109,11 @@ def _only(res, fields):
 class Srv6Plugin(srv6_ext.Srv6PluginBase):
 
     supported_extension_aliases = [srv6_def.ALIAS, loc_def.ALIAS,
-                                   te_def.ALIAS]
+                                   te_def.ALIAS, ls_def.ALIAS]
+    # A POST of a list reaches create_<resource>_bulk in one call, so a
+    # link-state batch is stored in one transaction. Only srv6_link_states
+    # allows bulk at all (its get_resources); the others refuse a list.
+    __native_bulk_support = True
 
     def __init__(self):
         super().__init__()
@@ -135,7 +144,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         if not 0 < fraction <= 1:
             raise n_exc.InvalidConfigurationOption(
                 opt_name='[srv6] reservable_fraction', opt_value=fraction)
-        self.fabric_locators, self.capacity = {}, {}
+        # link_capacity: the file's Mbit/s, for the link-state view
+        self.fabric_locators, self.capacity, self.link_capacity = {}, {}, {}
         if not self.conf.topology_file:
             return
         try:
@@ -143,6 +153,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         except (OSError, pce.TopologyError) as e:
             raise n_exc.InvalidConfigurationOption(
                 opt_name='[srv6] topology_file', opt_value=str(e))
+        self.link_capacity = raw
         # round() first: 100 * 0.29 is 28.999999999999996, not 29
         self.capacity = {link: int(round(mbps * fraction, 6))
                          for link, mbps in raw.items()}
@@ -620,6 +631,148 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 return self._make_locator_dict(row, fields)
         raise srv6_ext.Srv6LocatorNotFound(id=id)
 
+    # ------------------------------------------------------------------
+    # measured link state (PLAN-LINK-STATE-TE)
+    # ------------------------------------------------------------------
+    def create_srv6_link_state_bulk(self, context, srv6_link_states):
+        return self._add_link_states(
+            context, [item[ls_def.RESOURCE_NAME]
+                      for item in srv6_link_states[ls_def.COLLECTION_NAME]])
+
+    def create_srv6_link_state(self, context, srv6_link_state):
+        return self._add_link_states(
+            context, [srv6_link_state[ls_def.RESOURCE_NAME]])[0]
+
+    def _add_link_states(self, context, items):
+        """Validate and store one batch of measurements, whole or not at all.
+
+        Every item must be a link of the topology file, measured by one of
+        its two ends, at most once per batch; mbps and drops are null or a
+        non-negative finite number (the collector's data moves traffic, so
+        nothing else is trusted). The server's clock stamps the batch, and
+        the batch deletes its reporters' rows older than two windows.
+        """
+        if not self.capacity:
+            raise ls_ext.Srv6LinkStateInvalid(
+                reason=_("link state needs an underlay topology "
+                         "([srv6] topology_file)"))
+        rows, seen = [], set()
+        for item in items:
+            row = {k: item[k] for k in ('reporter', 'from_node', 'to_node',
+                                        'up', 'mbps', 'drops')}
+            link = (row['from_node'], row['to_node'])
+            name = '%s>%s' % link
+            if link not in self.capacity:
+                raise ls_ext.Srv6LinkStateInvalid(
+                    reason=_("%s is not a link of the underlay topology")
+                    % name)
+            if row['reporter'] not in link:
+                raise ls_ext.Srv6LinkStateInvalid(
+                    reason=_("reporter %(r)s is not an end of %(l)s")
+                    % {'r': row['reporter'], 'l': name})
+            if (row['reporter'], link) in seen:
+                raise ls_ext.Srv6LinkStateInvalid(
+                    reason=_("%(r)s reported %(l)s twice")
+                    % {'r': row['reporter'], 'l': name})
+            seen.add((row['reporter'], link))
+            # 1e7 Mbit/s = 10 Tbit/s: no link carries more; also NaN/inf
+            for attr, kinds, top in (('mbps', (int, float), 1e7),
+                                     ('drops', (int,), 2 ** 63)):
+                v = row[attr]
+                if v is not None and (isinstance(v, bool) or
+                                      not isinstance(v, kinds) or
+                                      not 0 <= v < top):
+                    raise ls_ext.Srv6LinkStateInvalid(
+                        reason=_("%(a)s of %(l)s must be null or a number "
+                                 "from 0 to %(t)g") %
+                        {'a': attr, 'l': name, 't': top})
+            rows.append(row)
+        # whole seconds: MySQL DATETIME rounds the fraction, which could
+        # store a measurement up to half a second in the future
+        now = timeutils.utcnow().replace(microsecond=0)
+        link_state_db.add_link_states(
+            context, rows, now, now - datetime.timedelta(
+                seconds=2 * self.conf.link_state_window))
+        return [dict(r, id='%s:%s' % (r['from_node'], r['to_node']),
+                     measured_at=now.isoformat()) for r in rows]
+
+    def _link_state_view(self, context):
+        """{(from, to): entry} of every link of the topology file.
+
+        capacity_mbps is the file's capacity, reserved_mbps what the
+        bandwidth reservations hold on the link (the books), shown next to
+        what is measured (U-a). A link nobody has reported yet has null
+        measurements and stale=true.
+
+        Per directed link, the sender's measurement is the load (what was
+        offered to the link) and the receiver's is what got through
+        (delivered_mbps); a link only one end reports (leaf-host) has just
+        that one. mbps comes from the sender if it is fresh, else from the
+        receiver if fresh, else from whichever is newer (then stale). A
+        measurement is fresh for link_state_stale_after seconds;
+        peak_mbps is the highest mbps of that end in link_state_window
+        (L4, L9). up is False if a fresh report from either end says so
+        (L8; a silent node is step 4's).
+        """
+        now = timeutils.utcnow()
+        fresh = now - datetime.timedelta(
+            seconds=self.conf.link_state_stale_after)
+        start = now - datetime.timedelta(seconds=self.conf.link_state_window)
+        hist = collections.defaultdict(list)      # (from, to, reporter)
+        for r in link_state_db.get_link_states(context):   # oldest first
+            hist[(r['from_node'], r['to_node'], r['reporter'])].append(r)
+        books = self._books(context)
+        view = {}
+        for a, b in sorted(self.capacity):
+            entry = {'id': '%s:%s' % (a, b), 'from_node': a, 'to_node': b,
+                     'capacity_mbps': self.link_capacity.get((a, b)),
+                     'reserved_mbps': books.get((a, b), 0)}
+            view[(a, b)] = entry
+            ends = [h for h in (hist.get((a, b, a)), hist.get((a, b, b)))
+                    if h]
+            if not ends:
+                entry.update(dict.fromkeys(
+                    ('reporter', 'up', 'mbps', 'drops', 'delivered_mbps',
+                     'peak_mbps', 'measured_at', 'age')), stale=True)
+                continue
+            live = [h for h in ends if h[-1]['measured_at'] >= fresh]
+            main = live[0] if live else max(
+                ends, key=lambda h: h[-1]['measured_at'])
+            last = main[-1]
+            rx = hist.get((a, b, b))
+            entry.update({
+                'reporter': last['reporter'],
+                'up': (all(h[-1]['up'] for h in live) if live
+                       else last['up']),
+                'mbps': last['mbps'],
+                'drops': last['drops'],
+                'delivered_mbps': (rx[-1]['mbps'] if rx and
+                                   rx[-1]['measured_at'] >= fresh else None),
+                'peak_mbps': max((r['mbps'] for r in main
+                                  if r['measured_at'] > start and
+                                  r['mbps'] is not None), default=None),
+                'measured_at': last['measured_at'].isoformat(),
+                'age': int((now - last['measured_at']).total_seconds()),
+                'stale': not live,
+            })
+        return view
+
+    def get_srv6_link_states(self, context, filters=None, fields=None,
+                             sorts=None, limit=None, marker=None,
+                             page_reverse=False):
+        filters = filters or {}
+        return [_only(entry, fields)
+                for entry in self._link_state_view(context).values()
+                if all(entry[k] in filters[k]
+                       for k in ('id', 'from_node', 'to_node')
+                       if filters.get(k))]
+
+    def get_srv6_link_state(self, context, id, fields=None):
+        entry = self._link_state_view(context).get(tuple(id.split(':', 1)))
+        if entry is None:
+            raise ls_ext.Srv6LinkStateNotFound(id=id)
+        return _only(entry, fields)
+
     def _check_capabilities(self, host, capabilities):
         """Name a node that cannot honour dataplane_encoding. Logs only.
 
@@ -686,22 +839,32 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         or the question cannot be answered: an unanswerable query leaves the
         paths steered, as before this check existed, instead of rerouting
         every one of them on a database hiccup.
+
+        Fabric nodes (spines, leaves) run no agent: one is dead when its
+        link-state reports stopped (L8, _silent_fabric), so an operator
+        path through a dead spine goes DEGRADED too. The two sources are
+        read apart: either failing leaves the other's answer.
         """
         if not self.conf.te_liveness_interval:
             return frozenset()
+        dead = set()
         get_agents = getattr(self._core_plugin(), 'get_agents', None)
-        if get_agents is None:
-            return frozenset()
         try:
-            agents = get_agents(
-                admin_context,
-                filters={'agent_type': [n_const.AGENT_TYPE_OVS]})
-            return frozenset(agent['host'] for agent in agents
-                             if not agent['alive'])
+            if get_agents is not None:
+                agents = get_agents(
+                    admin_context,
+                    filters={'agent_type': [n_const.AGENT_TYPE_OVS]})
+                dead.update(agent['host'] for agent in agents
+                            if not agent['alive'])
         except Exception:
             LOG.exception("SRv6: cannot read agent liveness; treating "
                           "every TE waypoint as alive")
-            return frozenset()
+        try:
+            dead.update(self._silent_fabric(admin_context)[0])
+        except Exception:
+            LOG.exception("SRv6: cannot read the fabric link state; "
+                          "treating every fabric node as alive")
+        return frozenset(dead)
 
     def _transit_sids(self, via_hosts, locators, dead_hosts=()):
         """The transit SIDs of via_hosts in order, or None if one is unusable.
@@ -999,6 +1162,148 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                          "VMs, so the path would steer nothing")
                 % {'p': port['id'], 's': source})
 
+    @staticmethod
+    def _books(context, exclude=None):
+        """{(a, b): Mbit/s} every reservation holds, in every domain.
+
+        Built from reserved_host, the host the hops were computed for,
+        never from where a port is now (see _compute_hops). exclude: the
+        id of a reservation being moved, which must not compete with
+        itself (G1).
+        """
+        held = []
+        for p in te_db.get_bandwidth_paths(context):
+            if p['id'] == exclude:
+                continue
+            # rows from before reserved_host existed are all to a host
+            end = p['reserved_host'] or p[te_def.DESTINATION_HOST]
+            if end:
+                held.append(([p[te_def.SOURCE_HOST]] + p[te_def.VIA_HOSTS] +
+                             [end], p[te_def.BANDWIDTH]))
+        return pce.reserved(held)
+
+    # ------------------------------------------------------------------
+    # failures of the underlay (PLAN-LINK-STATE-TE step 4)
+    # ------------------------------------------------------------------
+    def _silent_fabric(self, context):
+        """(fabric nodes down, outage) from the link-state reporters (L8).
+
+        A node that has posted link state and has posted nothing for
+        link_state_stale_after seconds is down: its agent runs on the node
+        itself, and a powered-off node's neighbours still see their NICs
+        up, so silence is the only signal. A node that never posted is
+        not down. Every reporter silent at once is an outage of the
+        collection (expired credentials, the API unreachable), not a
+        fabric failure: nothing is down, and outage is True.
+        """
+        last = link_state_db.get_last_seen(context)
+        fresh = timeutils.utcnow() - datetime.timedelta(
+            seconds=self.conf.link_state_stale_after)
+        silent = frozenset(r for r, t in last.items() if t < fresh)
+        if last and silent == frozenset(last):
+            return frozenset(), True
+        return silent, False
+
+    def _dead_links(self, context, silent):
+        """The directed topology links down now.
+
+        Reported down by a fresh end (or last seen down), or touching a
+        silent node (L8).
+        """
+        return frozenset(
+            link for link, entry in self._link_state_view(context).items()
+            if entry['up'] is False or not silent.isdisjoint(link))
+
+    def _live_capacity(self, context):
+        """self.capacity without the links down now.
+
+        All of it during an outage of the collection.
+        """
+        silent, outage = self._silent_fabric(context)
+        dead = frozenset() if outage else self._dead_links(context, silent)
+        return {link: mbps for link, mbps in self.capacity.items()
+                if link not in dead}
+
+    def _reroute_reservation(self, context, path_id, cap, delete=False):
+        """Move one reservation, in place, onto a path with room in cap (G1).
+
+        Under the admission lock, like an admission: the books of every
+        OTHER reservation, a new path from the same source to the same
+        reserved host for the same bandwidth, the hops replaced in the
+        row. The agents then swap the head-end route (ip route replace):
+        make-before-break, no window without a route. No path: the
+        reservation is deleted if delete (a failure, L6), else left.
+        Returns (the reservation before, the new node path or None);
+        (None, None) if it is gone.
+        """
+        with db_api.CONTEXT_WRITER.using(context):
+            domain_db.lock_all_domains(context)
+            old = next((p for p in te_db.get_bandwidth_paths(context)
+                        if p['id'] == path_id), None)
+            if old is None:
+                return None, None
+            end = old['reserved_host'] or old[te_def.DESTINATION_HOST]
+            path = pce.compute(cap, self._books(context, exclude=path_id),
+                               old[te_def.SOURCE_HOST], end,
+                               old[te_def.BANDWIDTH])
+            if path is not None:
+                te_db.update_te_path(context, path_id, None,
+                                     {te_def.VIA_HOSTS: path[1:-1]})
+            elif delete:
+                te_db.delete_te_path(context, path_id)
+            else:
+                return old, None
+        self._push_domain_by_id(context, old['domain_id'])
+        return old, path
+
+    def _reroute_failed_reservations(self, context):
+        """Move every reservation off the links and nodes that are down.
+
+        Run by the TE liveness worker. A reservation that no longer fits
+        is deleted with a WARNING (L6), like one whose port migrated. One
+        that crosses nothing dead is never touched, so a link coming back
+        moves nothing back by itself. During an outage of the collection
+        nothing moves (ERROR logged each pass).
+        """
+        if not self.capacity:
+            return
+        silent, outage = self._silent_fabric(context)
+        if outage:
+            LOG.error("SRv6 TE: no fabric node has posted link state for "
+                      "%ss: treated as an outage of the collection, not "
+                      "of the fabric; no reservation is moved",
+                      self.conf.link_state_stale_after)
+            return
+        dead = self._dead_links(context, silent)
+        if not dead:
+            return
+        cap = {link: mbps for link, mbps in self.capacity.items()
+               if link not in dead}
+        for p in te_db.get_bandwidth_paths(context):
+            end = p['reserved_host'] or p[te_def.DESTINATION_HOST]
+            hops = [p[te_def.SOURCE_HOST]] + p[te_def.VIA_HOSTS] + [end]
+            crossed = sorted('%s>%s' % link for link in pce.links_of(hops)
+                             if link in dead)
+            if not end or not crossed:
+                continue
+            old, path = self._reroute_reservation(context, p['id'], cap,
+                                                  delete=True)
+            if old is None:
+                continue
+            info = {'id': p['id'], 'bw': p[te_def.BANDWIDTH],
+                    's': p[te_def.SOURCE_HOST], 'd': end,
+                    'l': ', '.join(crossed), 'old': '-'.join(hops)}
+            if path:
+                info['new'] = '-'.join(path)
+                LOG.warning("SRv6 TE: reservation %(id)s (%(bw)d Mbit/s "
+                            "%(s)s -> %(d)s) crossed %(l)s, which is down: "
+                            "moved from %(old)s to %(new)s", info)
+            else:
+                LOG.warning("SRv6 TE: reservation %(id)s (%(bw)d Mbit/s "
+                            "%(s)s -> %(d)s) crossed %(l)s, which is down, "
+                            "and no other path has room: deleted, its "
+                            "creator must ask again", info)
+
     def _compute_hops(self, context, body, source, host, port, via_hosts):
         """(via_hosts, reserved host) for a bandwidth reservation, or 400/409.
 
@@ -1038,14 +1343,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 raise te_ext.Srv6TePathInvalid(
                     reason=_("%s is not a node of the underlay topology")
                     % end)
-        held = []
-        for p in te_db.get_bandwidth_paths(context):
-            # rows from before reserved_host existed are all to a host
-            end = p['reserved_host'] or p[te_def.DESTINATION_HOST]
-            if end:
-                held.append(([p[te_def.SOURCE_HOST]] + p[te_def.VIA_HOSTS] +
-                             [end], p[te_def.BANDWIDTH]))
-        used = pce.reserved(held)
+        used = self._books(context)
+        cap = self._live_capacity(context)
         over = sorted('%s>%s' % link for link, mbps in used.items()
                       if mbps > self.capacity.get(link, mbps))
         if over:
@@ -1056,8 +1355,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                         {'f': self.conf.reservable_fraction,
                          'l': ', '.join(over)})
         # The caller holds the admission lock (create_srv6_te_path).
-        path = pce.compute(self.capacity, used, source, destination,
-                           bandwidth)
+        path = pce.compute(cap, used, source, destination, bandwidth)
         if path is None:
             raise te_ext.Srv6TePathNoCapacity(
                 source=source, destination=destination, bandwidth=bandwidth)

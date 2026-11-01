@@ -98,3 +98,4 @@ packages = ["networking_srv6_agent", "srv6_dashboard"]
 "srv6_te_path_show" = "networking_srv6_agent.cli.v2.te_path:ShowTePath"
 "srv6_te_path_set" = "networking_srv6_agent.cli.v2.te_path:SetTePath"
 "srv6_te_path_delete" = "networking_srv6_agent.cli.v2.te_path:DeleteTePath"
+"srv6_link_list" = "networking_srv6_agent.cli.v2.link_state:ListLinkState"

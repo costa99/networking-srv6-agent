@@ -95,6 +95,23 @@ srv6_server_opts = [
                "never counts. Lowering it evicts no reservation: a link "
                "already above the new limit refuses new ones until enough "
                "are deleted.")),
+    cfg.IntOpt(
+        'link_state_stale_after',
+        default=15,
+        min=1,
+        help=_("Seconds after which a link measurement posted to "
+               "srv6_link_states is stale: a link with nothing newer is "
+               "shown with stale=true, and is no longer used as a "
+               "measurement. Keep it at about three periods of the fabric "
+               "agents.")),
+    cfg.IntOpt(
+        'link_state_window',
+        default=30,
+        min=1,
+        help=_("Seconds over which peak_mbps of a link is the highest "
+               "measurement. Each batch a fabric node posts deletes that "
+               "node's measurements older than twice this window. Keep it "
+               "at least as long as several fabric agent periods.")),
 ]
 
 srv6_agent_opts = [

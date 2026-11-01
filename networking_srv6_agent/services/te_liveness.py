@@ -14,6 +14,9 @@
 
 """Re-push the domains whose TE paths cross a node that died or came back.
 
+Each pass also moves bandwidth reservations off links and fabric nodes the
+link state reports down (Srv6Plugin._reroute_failed_reservations).
+
 The plugin already routes a path around a dead waypoint whenever it builds a
 payload (Srv6Plugin._dead_hosts): the dead node is judged from Neutron's
 agent table, which every API worker can read. What nothing does by itself is
@@ -64,6 +67,15 @@ class TeLivenessMonitor:
         reached registry_port_updated, is deleted here. Separate from the
         liveness part, which returns early when nothing died.
         """
+        # Reservations off dead links and fabric nodes first (PLAN-LINK-
+        # STATE-TE step 4): moved ones no longer name a dead waypoint, so
+        # the liveness part below does not push their domains twice.
+        try:
+            self._plugin._reroute_failed_reservations(
+                n_context.get_admin_context())
+        except Exception:
+            LOG.exception("SRv6 TE: rerouting reservations off failed "
+                          "links failed; trying again at the next interval")
         try:
             self._check()
         except Exception:
@@ -95,7 +107,8 @@ class TeLivenessMonitor:
                 affected.setdefault(domain_id, set()).add(path_id)
         for host in sorted(changed & (dead - previous)):
             LOG.warning("SRv6: node %(h)s looks dead (its agent missed "
-                        "its heartbeats); TE paths through it go direct: "
+                        "its heartbeats, or, for a fabric node, its link "
+                        "state stopped); TE paths through it go direct: "
                         "%(p)s",
                         {'h': host,
                          'p': ', '.join(sorted(

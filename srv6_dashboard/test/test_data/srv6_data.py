@@ -47,6 +47,8 @@ def data(TEST):
     TEST.api_srv6_locators = []
     TEST.srv6_te_paths = _container()
     TEST.api_srv6_te_paths = []
+    TEST.srv6_link_states = _container()
+    TEST.api_srv6_link_states = []
 
     # Horizon's own test networks and project: the domain holds net1, the
     # same network Horizon's neutron tests use, in the same project ('1').
@@ -139,6 +141,25 @@ def data(TEST):
         source_host='ale', via_hosts=['ale', 'ale-XPS-15-9570'],
         segments=['fc00:0:2::', 'fc00:0:3:e000::'],
         encoded_segments=['fc00:0:2:3:e000::']))
+
+    # --- link states: hosts ale and ale-node3 under leaf l1, spine s1 above,
+    # one directed link at each level the page colours (PLAN-LINK-STATE-TE)
+
+    def link(a, b, cap, mbps, up=True, stale=False, reserved=0):
+        return {'id': '%s:%s' % (a, b), 'from_node': a, 'to_node': b,
+                'reporter': 'l1', 'up': up, 'mbps': mbps,
+                'delivered_mbps': mbps, 'peak_mbps': mbps, 'drops': 0,
+                'capacity_mbps': cap, 'reserved_mbps': reserved,
+                'measured_at': '2026-11-01T12:00:00', 'age': 2,
+                'stale': stale}
+    for ls in (link('ale', 'l1', 1000, 30.0),               # ok
+               link('l1', 'ale', 1000, 950.0),              # congested
+               link('l1', 's1', 100, 60.0, reserved=40),    # busy
+               link('s1', 'l1', 100, 0.0, up=False),        # down
+               link('l1', 'ale-node3', 1000, 5.0, stale=True),   # unknown
+               link('ale-node3', 'l1', 1000, None)):        # unknown
+        _add(TEST.api_srv6_link_states, TEST.srv6_link_states,
+             resources.Srv6LinkState, srv6.LinkState, ls)
 
 
 def _container():

@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""What the topology page draws, assembled from four API answers.
+"""What the topology page draws, assembled from five API answers.
 
 build() is a pure function of the lists the API returned, so the whole
 picture is unit-tested without a browser (FEATURE D8): the JavaScript only
@@ -31,9 +31,53 @@ lays out and draws what this returns, it decides nothing.
               starts its hops at that host, minus leading waypoints equal
               to it: the node drops its own SID, so the packet never
               visits it twice (FEATURE-TE-SOURCE-HOST).
+    links     each directed underlay link with its measured state
+              (srv6_link_states, PLAN-LINK-STATE-TE step 3) and a level
+              the page colours it by. A node on a link without a locator
+              is a fabric node (spine/leaf): drawn as such, not flagged.
+              Every node gets a tier, its hop distance from the nearest
+              host with a locator: hosts 0, leaves 1, spines 2 on a Clos.
 """
 
 import collections
+
+# Shares of the link's capacity: the 90 % is te_reopt_high's default, the
+# load the re-optimisation will call congested (PLAN-LINK-STATE-TE L5).
+BUSY, CONGESTED = 0.5, 0.9
+
+
+def _level(link):
+    """down, unknown (stale or no rate), ok, busy or congested."""
+    if link.get('up') is False:
+        return 'down'
+    if link.get('stale') or link.get('mbps') is None:
+        return 'unknown'
+    load = link.get('load')
+    if load is None:
+        return 'unknown'
+    return ('congested' if load >= CONGESTED else
+            'busy' if load >= BUSY else 'ok')
+
+
+def _tiers(hosts, links):
+    """{node: hop distance to the nearest host with a locator} (BFS).
+
+    A node no host reaches goes one tier above the highest.
+    """
+    adj = collections.defaultdict(set)
+    for link in links:
+        adj[link['from']].add(link['to'])
+        adj[link['to']].add(link['from'])
+    tier = {h: 0 for h, v in hosts.items() if v['locator']}
+    queue = list(tier)
+    for node in queue:
+        for peer in sorted(adj[node]):
+            if peer not in tier:
+                tier[peer] = tier[node] + 1
+                queue.append(peer)
+    top = max(tier.values(), default=-1) + 1
+    return {h: tier.get(h, 0 if hosts[h]['locator'] or not adj[h] else top)
+            for h in hosts}
 
 
 def _port_host(port):
@@ -42,15 +86,31 @@ def _port_host(port):
     return port.get('binding_host_id') or port.get('binding:host_id') or None
 
 
-def build(locators, domains, ports, te_paths, path_url):
+def build(locators, domains, ports, te_paths, path_url, links=()):
     """The page's data as a JSON-ready dict.
 
     path_url(path_id) gives a TE path's detail URL: the page links each
-    drawn path to it.
+    drawn path to it. links: srv6_link_states entries (may be empty).
     """
     hosts = {loc.host: {'host': loc.host, 'locator': loc.locator,
                         'updated_at': loc.updated_at}
              for loc in locators}
+    out_links = []
+    for ls in links:
+        cap, mbps = ls.get('capacity_mbps'), ls.get('mbps')
+        link = {k: ls.get(k) for k in (
+            'up', 'mbps', 'delivered_mbps', 'peak_mbps', 'reserved_mbps',
+            'capacity_mbps', 'age', 'stale')}
+        link.update({'from': ls.get('from_node'), 'to': ls.get('to_node'),
+                     'load': (round(mbps / cap, 4)
+                              if cap and mbps is not None else None)})
+        link['level'] = _level(link)
+        out_links.append(link)
+        for node in (link['from'], link['to']):
+            # shortcut: a host of the topology file whose agent never
+            # registered is drawn as fabric; the API does not say roles
+            hosts.setdefault(node, {'host': node, 'locator': None,
+                                    'updated_at': None, 'fabric': True})
 
     net_domain = {nid: d.id for d in domains for nid in d.networks}
     presence = collections.defaultdict(collections.Counter)
@@ -106,8 +166,13 @@ def build(locators, domains, ports, te_paths, path_url):
             'url': path_url(p.id),
         })
 
+    tiers = _tiers(hosts, out_links)
+    for name, host in hosts.items():
+        host.setdefault('fabric', False)
+        host['tier'] = tiers[name]
     return {
         'hosts': [hosts[h] for h in sorted(hosts)],
         'domains': out_domains,
         'te_paths': out_paths,
+        'links': sorted(out_links, key=lambda x: (x['from'], x['to'])),
     }

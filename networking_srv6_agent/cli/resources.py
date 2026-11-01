@@ -93,6 +93,34 @@ class Srv6Locator(resource.Resource):
     updated_at = resource.Body('updated_at')
 
 
+class Srv6LinkState(resource.Resource):
+    """Admin-only. One entry per directed underlay link; id "<from>:<to>"."""
+
+    resource_key = 'srv6_link_state'
+    resources_key = 'srv6_link_states'
+    base_path = '/srv6_link_states'
+
+    allow_fetch = True
+    allow_list = True
+
+    _query_mapping = resource.QueryParameters('from_node', 'to_node')
+
+    id = resource.Body('id')
+    from_node = resource.Body('from_node')
+    to_node = resource.Body('to_node')
+    reporter = resource.Body('reporter')
+    up = resource.Body('up', type=bool)
+    mbps = resource.Body('mbps')
+    delivered_mbps = resource.Body('delivered_mbps')
+    peak_mbps = resource.Body('peak_mbps')
+    capacity_mbps = resource.Body('capacity_mbps')
+    reserved_mbps = resource.Body('reserved_mbps')
+    drops = resource.Body('drops')
+    measured_at = resource.Body('measured_at')
+    age = resource.Body('age', type=int)
+    stale = resource.Body('stale', type=bool)
+
+
 class Srv6TePath(resource.Resource):
     """Admin-only. Has no name, so it is found by ID only."""
 

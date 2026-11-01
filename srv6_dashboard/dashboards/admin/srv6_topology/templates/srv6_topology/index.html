@@ -9,6 +9,9 @@
     coloured badge per domain, with its VM count), and every TE path, drawn
     from its first waypoint to its destination: the domain's traffic enters
     a path from any of the domain's hosts. Click a path for its segments.
+    With an underlay topology on the server, spines and leaves are drawn
+    too, and every link direction is coloured by its measured load, as the
+    fabric nodes report it; the page refreshes every 5 seconds.
   {% endblocktrans %}</p>
   <div class="form-inline">
     <label for="srv6-topology-domain">{% trans "Domain" %}</label>
@@ -28,6 +31,16 @@
       <th>{% trans "Status" %}</th>
     </tr></thead>
     <tbody id="srv6-topology-paths"></tbody>
+  </table>
+  <h4>{% trans "Underlay links" %}</h4>
+  <table class="table table-condensed table-striped">
+    <thead><tr>
+      <th>{% trans "Link" %}</th><th>{% trans "Load" %}</th>
+      <th>{% trans "Mbit/s" %}</th><th>{% trans "Reserved" %}</th>
+      <th>{% trans "Capacity" %}</th><th>{% trans "Delivered" %}</th>
+      <th>{% trans "Peak" %}</th><th>{% trans "Age" %}</th>
+    </tr></thead>
+    <tbody id="srv6-topology-links"></tbody>
   </table>
   <noscript>{% trans "This page needs JavaScript to draw the topology." %}</noscript>
 </div>

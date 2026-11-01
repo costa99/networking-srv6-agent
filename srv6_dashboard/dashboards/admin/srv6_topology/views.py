@@ -38,11 +38,12 @@ class IndexView(views.HorizonTemplateView):
 
 
 class JSONView(django_views.View):
-    """GET data/: four API reads, one JSON answer.
+    """GET data/: five API reads, one JSON answer.
 
     locator_list, domain_list, port_list (only when some domain has
     networks: the VM ports, for where each domain runs and where a port
-    path ends) and te_path_list.
+    path ends), te_path_list and link_state_list (the underlay and its
+    measured load; the page reloads this every 5 s).
     """
 
     def get(self, request, *args, **kwargs):
@@ -53,6 +54,7 @@ class JSONView(django_views.View):
             ports = (srv6_api.port_list(request, network_id=networks)
                      if networks else [])
             paths = srv6_api.te_path_list(request)
+            links = srv6_api.link_state_list(request)
         except Exception as e:
             # Not exceptions.handle(): it redirects or re-raises, which
             # means nothing to a script. The page shows this message
@@ -62,4 +64,4 @@ class JSONView(django_views.View):
         return JsonResponse(topology.build(
             locators, domains, ports, paths,
             lambda pid: reverse('horizon:admin:srv6:te_path_detail',
-                                args=[pid])))
+                                args=[pid]), links))

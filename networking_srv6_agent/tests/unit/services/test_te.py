@@ -1172,7 +1172,11 @@ class TestTeBandwidthApi(TeRestTestCase):
                                   read(c)):
             self._reserve()
             self._host_path()                     # no bandwidth: no lock
-        self.assertEqual(['lock', 'read'], order)
+        # every read of the books (the admission's and the live-capacity
+        # view's) after the lock
+        self.assertEqual('lock', order[0])
+        self.assertEqual({'read'}, set(order[1:]))
+        self.assertEqual(1, order.count('lock'))
 
     def test_a_deleted_reservation_frees_its_links(self):
         first = self._reserve()

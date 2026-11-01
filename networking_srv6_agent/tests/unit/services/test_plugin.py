@@ -435,7 +435,7 @@ class PluginUnitTestCaseBase(base.BaseTestCase):
 
     def setUp(self):
         super().setUp()
-        for name in ('srv6_db', 'domain_db', 'te_db'):
+        for name in ('srv6_db', 'domain_db', 'te_db', 'link_state_db'):
             patcher = mock.patch.object(plugin, name)
             setattr(self, name, patcher.start())
             self.addCleanup(patcher.stop)
@@ -448,6 +448,9 @@ class PluginUnitTestCaseBase(base.BaseTestCase):
         get_plugin.start()
         self.addCleanup(get_plugin.stop)
         self.srv6_db.get_host_locators.return_value = {}
+        # no link state posted: no fabric node is down
+        self.link_state_db.get_last_seen.return_value = {}
+        self.link_state_db.get_link_states.return_value = []
         self.core.get_agents.return_value = []
         self.te_db.get_te_paths_for_domain.return_value = {'by_port': {},
                                                            'by_host': {}}

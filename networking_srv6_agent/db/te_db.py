@@ -313,10 +313,11 @@ def delete_moved_reservations(context, port_id, host):
 def get_bandwidth_paths(context):
     """Every reservation, in every domain: the links are shared by all.
 
-    [{'source_host', 'via_hosts', 'destination_host', 'destination_port_id',
-      'bandwidth', 'reserved_host'}]
+    [{'id', 'domain_id', 'source_host', 'via_hosts', 'destination_host',
+      'destination_port_id', 'bandwidth', 'reserved_host'}]
     """
-    return [{'source_host': p.source_host,
+    return [{'id': p.id, 'domain_id': p.domain_id,
+             'source_host': p.source_host,
              'via_hosts': [hop.via_host for hop in p.hops],
              'destination_host': p.destination_host,
              'destination_port_id': p.destination_port_id,

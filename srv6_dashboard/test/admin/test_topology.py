@@ -56,12 +56,12 @@ class BuildTests(helpers.TestCase):
             _port('p-unbound', self.net1, None),
         ]
 
-    def _build(self, paths=None, ports=None):
+    def _build(self, paths=None, ports=None, links=()):
         return topology.build(
             self.srv6_locators.list(), self.srv6_domains.list(),
             self.ports_ if ports is None else ports,
             self.srv6_te_paths.list() if paths is None else paths,
-            lambda pid: '/path/%s/' % pid)
+            lambda pid: '/path/%s/' % pid, links)
 
     def test_hosts_include_unregistered_ones_flagged(self):
         data = self._build()
@@ -132,7 +132,58 @@ class BuildTests(helpers.TestCase):
         self.assertIsNone(self._build()['te_paths'][0]['source'])
 
     def test_is_json_serialisable(self):
-        json.dumps(self._build())
+        json.dumps(self._build(links=self.srv6_link_states.list()))
+
+    def test_without_link_states_nothing_changes(self):
+        data = self._build()
+        self.assertEqual([], data['links'])
+        self.assertTrue(all(h['tier'] == 0 and not h['fabric']
+                            for h in data['hosts']))
+
+    def _links(self):
+        return self._build(links=self.srv6_link_states.list())
+
+    def test_link_ends_without_a_locator_are_fabric(self):
+        hosts = {h['host']: h for h in self._links()['hosts']}
+        self.assertTrue(hosts['l1']['fabric'])
+        self.assertTrue(hosts['s1']['fabric'])
+        self.assertIsNone(hosts['s1']['locator'])
+        self.assertFalse(hosts['ale']['fabric'])
+        # a VM host without a locator stays flagged, not fabric
+        self.assertFalse(hosts['mystery-host']['fabric'])
+
+    def test_tiers_are_hops_from_the_hosts(self):
+        hosts = {h['host']: h['tier'] for h in self._links()['hosts']}
+        self.assertEqual({'ale': 0, 'ale-node3': 0, 'ale-XPS-15-9570': 0,
+                          'l1': 1, 's1': 2, 'gone-host': 0,
+                          'mystery-host': 0}, hosts)
+
+    def test_each_link_gets_a_load_and_a_level(self):
+        links = {(x['from'], x['to']): x for x in self._links()['links']}
+        self.assertEqual(
+            {('ale', 'l1'): 'ok', ('l1', 'ale'): 'congested',
+             ('l1', 's1'): 'busy', ('s1', 'l1'): 'down',
+             ('l1', 'ale-node3'): 'unknown', ('ale-node3', 'l1'): 'unknown'},
+            {k: v['level'] for k, v in links.items()})
+        self.assertEqual(0.6, links['l1', 's1']['load'])
+        self.assertEqual(40, links['l1', 's1']['reserved_mbps'])
+        self.assertIsNone(links['ale-node3', 'l1']['load'])
+
+    def test_level_thresholds(self):
+        cases = ((49.9, 'ok'), (50.0, 'busy'), (89.9, 'busy'),
+                 (90.0, 'congested'), (120.0, 'congested'))
+        for mbps, level in cases:
+            base = self.srv6_link_states.list()[2].to_dict()
+            link = dict(base, mbps=mbps)
+            out = self._build(links=[link])['links'][0]
+            self.assertEqual(level, out['level'], mbps)
+
+    def test_a_fabric_node_no_host_reaches_goes_on_top(self):
+        island = dict(self.srv6_link_states.list()[2].to_dict(),
+                      from_node='x1', to_node='x2')
+        hosts = {h['host']: h['tier'] for h in self._build(
+            links=self.srv6_link_states.list() + [island])['hosts']}
+        self.assertEqual((3, 3), (hosts['x1'], hosts['x2']))
 
 
 class TopologyViewTests(helpers.BaseAdminViewTests):
@@ -146,20 +197,25 @@ class TopologyViewTests(helpers.BaseAdminViewTests):
         self.assertContains(res, "getElementById('srv6-topology')")
 
     @test.create_mocks({srv6_api: ('locator_list', 'domain_list',
-                                   'port_list', 'te_path_list')})
+                                   'port_list', 'te_path_list',
+                                   'link_state_list')})
     def test_data(self):
         self.mock_locator_list.return_value = self.srv6_locators.list()
         self.mock_domain_list.return_value = self.srv6_domains.list()
         self.mock_port_list.return_value = []
         self.mock_te_path_list.return_value = self.srv6_te_paths.list()
+        self.mock_link_state_list.return_value = self.srv6_link_states.list()
 
         res = self.client.get(DATA_URL)
 
         self.assertEqual(200, res.status_code)
         body = json.loads(res.content)
-        self.assertEqual(['hosts', 'domains', 'te_paths'], list(body))
-        # The three locators, and the DEGRADED path's lost waypoint.
-        self.assertEqual(4, len(body['hosts']))
+        self.assertEqual(['hosts', 'domains', 'te_paths', 'links'],
+                         list(body))
+        # The three locators, the DEGRADED path's lost waypoint, and the
+        # fabric nodes l1 and s1 of the link states.
+        self.assertEqual(6, len(body['hosts']))
+        self.assertEqual(6, len(body['links']))
         self.assertEqual(
             reverse('horizon:admin:srv6:te_path_detail',
                     args=[self.srv6_te_paths.first().id]),
@@ -170,13 +226,17 @@ class TopologyViewTests(helpers.BaseAdminViewTests):
         self.mock_locator_list.assert_called_once_with(test.IsHttpRequest())
         self.mock_domain_list.assert_called_once_with(test.IsHttpRequest())
         self.mock_te_path_list.assert_called_once_with(test.IsHttpRequest())
+        self.mock_link_state_list.assert_called_once_with(
+            test.IsHttpRequest())
 
     @test.create_mocks({srv6_api: ('locator_list', 'domain_list',
-                                   'port_list', 'te_path_list')})
+                                   'port_list', 'te_path_list',
+                                   'link_state_list')})
     def test_data_without_networks_skips_ports(self):
         self.mock_locator_list.return_value = self.srv6_locators.list()
         self.mock_domain_list.return_value = [self.srv6_domains.list()[1]]
         self.mock_te_path_list.return_value = []
+        self.mock_link_state_list.return_value = []
 
         res = self.client.get(DATA_URL)
 

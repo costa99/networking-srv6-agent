@@ -56,6 +56,10 @@ class TePath(neutron.NeutronAPIDictWrapper):
     """A traffic-engineering path inside a domain. Admin only."""
 
 
+class LinkState(neutron.NeutronAPIDictWrapper):
+    """Measured state of one directed underlay link. Admin only."""
+
+
 def _dict(res, **extra):
     # computed=False drops the SDK's client-side `location`; the URI
     # attributes (an association's domain_id) are not in the body either,
@@ -225,6 +229,19 @@ def locator_get(request, host):
     LOG.debug("locator_get(): host=%s", host)
     locator = networkclient(request)._get(resources.Srv6Locator, host)
     return Locator(_dict(locator))
+
+
+# --- link states (PLAN-LINK-STATE-TE) -------------------------------------
+
+def link_state_list(request, **filters):
+    """GET /v2.0/srv6_link_states -- policy get_srv6_link_state (admin).
+
+    One entry per directed link of the server's topology file; empty when
+    it has none. filters: from_node, to_node.
+    """
+    LOG.debug("link_state_list(): filters=%s", filters)
+    states = networkclient(request)._list(resources.Srv6LinkState, **filters)
+    return [LinkState(_dict(s)) for s in states]
 
 
 # --- TE paths ------------------------------------------------------------
