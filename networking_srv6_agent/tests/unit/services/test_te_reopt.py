@@ -176,6 +176,20 @@ class TestDamping(ReoptTestCase):
         self.reopt.check()
         self.assertEqual(VIA_S1, self._via(path))
 
+    def test_the_memory_of_moves_forgets_what_the_hold_down_no_longer_holds(
+            self):
+        # audit 2026-11-02 finding 6: _moved kept every reservation ever
+        # moved, deleted ones included
+        self._conf(te_reopt_hold_down=30)
+        path = self._reserve(bandwidth=30)
+        self._samples(3, {S1: 95})
+        self.reopt.check()
+        self.assertEqual({path['id']}, set(self.reopt._moved))
+        self._delete_path(path['id'])
+        self._samples(6, {S2: 95})             # a pass 30 s after the move
+        self.reopt.check()
+        self.assertEqual({}, self.reopt._moved)
+
     def test_oscillating_load_does_not_make_it_flap(self):
         # The hot spine flips every 15 s for 3 minutes. The reservation
         # follows the first change, then never again: the hold-down (60 s)

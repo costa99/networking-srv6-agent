@@ -101,6 +101,9 @@ class TeReoptimiser:
         measured = plugin._measured_load(ctx)
         now = timeutils.utcnow()
         hold = now - datetime.timedelta(seconds=conf.te_reopt_hold_down)
+        # an entry at or before `hold` no longer holds anything down: drop
+        # it, or every reservation ever moved stays here (audit 2026-11-02 6)
+        self._moved = {k: t for k, t in self._moved.items() if t > hold}
         moves = 0
         for link in sorted(congested, key=lambda k: (
                 -congested[k] / plugin.capacity[k], k)):    # hottest first

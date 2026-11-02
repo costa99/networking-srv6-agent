@@ -1088,6 +1088,33 @@ class TestStaleReservations(TePluginTestCaseBase):
         self._held(('p1', 'node2'))
         self._sweep('node2')[0].assert_not_called()
 
+    def test_the_domains_that_lost_a_reservation_are_pushed(self):
+        # audit 2026-11-02 finding 3: no route update follows the safety
+        # net, so without the push the head-end kept the deleted path
+        self._held(('p1', 'node2'), ('p2', 'node2'))
+        self.core.get_ports.return_value = [
+            test_plugin._port(id=p, **{portbindings.HOST_ID: 'node3'})
+            for p in ('p1', 'p2')]
+        with mock.patch.object(
+                self.plugin, '_release_moved_reservations',
+                side_effect=[[{'domain_id': 'd1'}, {'domain_id': 'd2'}],
+                             [{'domain_id': 'd1'}]]), \
+                mock.patch.object(self.plugin, '_push_domain_by_id') as push:
+            self.plugin._release_stale_reservations(self.ctx)
+        # once per domain
+        self.assertEqual([mock.call(self.ctx, 'd1'),
+                          mock.call(self.ctx, 'd2')], push.call_args_list)
+
+    def test_nothing_released_nothing_pushed(self):
+        self._held(('p1', 'node2'))
+        self.core.get_ports.return_value = [
+            test_plugin._port(id='p1', **{portbindings.HOST_ID: 'node3'})]
+        with mock.patch.object(self.plugin, '_release_moved_reservations',
+                               return_value=[]), \
+                mock.patch.object(self.plugin, '_push_domain_by_id') as push:
+            self.plugin._release_stale_reservations(self.ctx)
+        push.assert_not_called()
+
     def test_host_reservations_need_no_port_lookup(self):
         self._held((None, 'node2'))
         self.plugin._release_stale_reservations(self.ctx)

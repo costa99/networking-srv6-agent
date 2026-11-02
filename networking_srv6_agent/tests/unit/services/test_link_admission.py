@@ -81,3 +81,31 @@ class TestAdmission(test_te_reopt.ReoptTestCase):
         self.assertEqual(VIA_S1, path['via_hosts'])
         self.assertTrue(any('no fresh link state' in c[0][0]
                             for c in info.call_args_list))
+
+
+class TestFailureReroute(test_te_reopt.ReoptTestCase):
+    """A failure moves a reservation by the admission's rule (L4).
+
+    Audit 2026-11-02 finding 1: the failure reroute counted the books
+    only, so it moved a reservation onto a link that unreserved traffic
+    already filled, where a new request for the same path was refused.
+    """
+
+    def test_not_onto_a_link_measured_full(self):
+        path = self._reserve(bandwidth=60)
+        self.assertEqual(VIA_S1, path['via_hosts'])
+        self._sample({S2: 80})                 # unreserved: s2 has 20 free
+        self._report('la', down={S1})
+        with mock.patch.object(plugin.LOG, 'warning') as warn:
+            self._pass()
+        # a new 60 Mbit/s request is refused now, so the move is too: L6
+        self._reserve(409, domain=self._domain()['id'], bandwidth=60)
+        self._show(path['id'], expected=404, as_admin=True)
+        self.assertIn('deleted', warn.call_args_list[0][0][0])
+
+    def test_onto_a_loaded_link_that_still_has_room(self):
+        path = self._reserve(bandwidth=60)
+        self._sample({S2: 30})                 # s2 has 70 free
+        self._report('la', down={S1})
+        self._pass()
+        self.assertEqual(VIA_S2, self._via(path))

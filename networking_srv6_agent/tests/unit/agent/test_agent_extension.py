@@ -25,6 +25,7 @@ TestConfigValidation cover what P5 added.
 
 import inspect
 import threading
+import time
 from unittest import mock
 
 from neutron.conf.agent import securitygroups_rpc as sg_conf
@@ -1087,6 +1088,30 @@ class TestUnknownNetworkHoldoff(AgentExtensionTestCaseBase):
                                return_value=later):
             self._port_on_unknown_network()
         self.cctxt.call.assert_called_once()
+
+    def test_a_domain_that_failed_to_apply_costs_one_sync_per_holdoff(self):
+        # audit 2026-11-02 finding 7: the domain never enters self.domains,
+        # and every routes_updated of it was one full sync
+        self.cctxt.call.return_value = [_attached(self.domain_id)]
+        self.ext.dataplane.ensure_domain.side_effect = RuntimeError('seal')
+        self.ext._sync_state()
+        self.assertNotIn(self.domain_id, self.ext.domains)
+        self.cctxt.call.reset_mock()
+        for _ in range(6):                     # six port events elsewhere
+            self.ext.routes_updated(self.ext.context,
+                                    domain_id=self.domain_id,
+                                    add=[{'prefix': '10.0.0.5/32'}])
+        self.cctxt.call.assert_not_called()
+        later = time.monotonic() + \
+            agent_extension.UNKNOWN_NETWORK_SYNC_HOLDOFF + 1
+        with mock.patch.object(agent_extension.time, 'monotonic',
+                               return_value=later):
+            for _ in range(6):
+                self.ext.routes_updated(self.ext.context,
+                                        domain_id=self.domain_id,
+                                        add=[{'prefix': '10.0.0.5/32'}])
+        self.cctxt.call.assert_called_once()   # the retry after the holdoff
+        self.ext.dataplane.add_routes.assert_not_called()
 
     def test_a_failed_sync_does_not_start_the_holdoff(self):
         self.cctxt.call.side_effect = Exception('no route to server')

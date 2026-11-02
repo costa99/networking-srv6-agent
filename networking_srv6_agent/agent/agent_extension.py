@@ -56,6 +56,8 @@ LOG = logging.getLogger(__name__)
 # one of its port events was a full sync, and an agent restart a burst of
 # them. A network that really was just attached arrives by the
 # domain_updated fanout anyway; this is only the fallback for a lost one.
+# The same holdoff limits the resync of a routes_updated for a domain this
+# node does not hold (audit 2026-11-02 finding 7).
 UNKNOWN_NETWORK_SYNC_HOLDOFF = 60
 
 # How long a deleted domain's id is remembered (F9). Domain ids are UUIDs
@@ -525,10 +527,12 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             if domain_id not in self.domains:
                 # A route for a domain we have never heard of means our view
                 # is stale; a full sync is cheaper to reason about than
-                # building partial state from an incremental message.
-                LOG.debug("SRv6: routes for unknown domain %s; resyncing",
-                          domain_id)
-                self._do_sync_state()
+                # building partial state from an incremental message. At most
+                # one per holdoff: a domain this node failed to apply is never
+                # in self.domains, and every port event of it, anywhere in
+                # the cloud, was one full sync here (audit 2026-11-02 7).
+                self._sync_unless_recent('routes for unknown domain %s'
+                                         % domain_id)
                 return
             try:
                 if remove:
@@ -594,24 +598,26 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                         LOG.exception("SRv6: gateway port for network %s",
                                       network_id)
             if not known:
-                self._sync_for_unknown_network(network_id)
+                self._sync_unless_recent('port on unknown network %s'
+                                         % network_id)
 
-    def _sync_for_unknown_network(self, network_id):
-        """Resync for a port whose network is in no known domain, rarely.
+    def _sync_unless_recent(self, why):
+        """Resync for a port or route of something unknown, rarely.
 
         Caller holds the lock. A full sync from the last
         UNKNOWN_NETWORK_SYNC_HOLDOFF seconds already reflects every attach
         the server had made by then, and a later attach reaches this agent
         through the domain_updated fanout; so within the holdoff the sync
-        would only repeat what is known (F13).
+        would only repeat what is known (F13). A domain that failed to
+        apply is retried by the next sync after the holdoff, and by the
+        resync loop.
         """
         if (self._last_sync is not None and
                 time.monotonic() - self._last_sync <
                 UNKNOWN_NETWORK_SYNC_HOLDOFF):
-            LOG.debug("SRv6: port on unknown network %s; synced recently, "
-                      "not resyncing", network_id)
+            LOG.debug("SRv6: %s; synced recently, not resyncing", why)
             return
-        LOG.debug("SRv6: port on unknown network %s; resyncing", network_id)
+        LOG.debug("SRv6: %s; resyncing", why)
         self._do_sync_state()
 
     def delete_port(self, context, port):

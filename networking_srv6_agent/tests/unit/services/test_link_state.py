@@ -25,6 +25,7 @@ from unittest import mock
 
 from networking_srv6_agent.common import config
 from networking_srv6_agent.db import link_state_db
+from networking_srv6_agent.services import plugin
 from networking_srv6_agent.tests.unit.services import test_plugin
 
 
@@ -102,9 +103,23 @@ class TestIngestion(LinkStateRestTestCase):
         self._post(self._l1_batch())
         self.assertEqual({}, self._list(as_admin=False))
 
-    def test_one_bad_item_refuses_the_whole_batch(self):
-        res = self._post(self._l1_batch() + [_m('l1', 'l1', 's2')], 400)
-        self.assertIn('l1>s2 is not a link', res['NeutronError']['message'])
+    def test_an_unknown_link_is_skipped_and_the_rest_stored(self):
+        # a link map one line ahead of topology_file must not silence the
+        # node: a silent node reads as dead (L8)
+        with mock.patch.object(plugin.LOG, 'warning') as warn:
+            res = self._post(self._l1_batch() + [_m('l1', 'l1', 's2')])[LS]
+            self._post(self._l1_batch() + [_m('l1', 'l1', 's2')])
+        self.assertEqual({'l1:s1', 's1:l1'}, {r['id'] for r in res})
+        self.assertEqual(4, len(link_state_db.get_link_states(
+            self.admin_ctx)))
+        # once per reporter and link, not once per batch
+        self.assertEqual(1, warn.call_count)
+        self.assertIn('l1>s2', warn.call_args[0][1]['l'])
+
+    def test_a_batch_of_unknown_links_only_is_refused(self):
+        res = self._post([_m('l1', 'l1', 's2'), _m('l1', 's2', 'l1')], 400)
+        self.assertIn('l1>s2, s2>l1: not a link',
+                      res['NeutronError']['message'])
         self.assertEqual([], link_state_db.get_link_states(self.admin_ctx))
 
     def test_the_reporter_must_be_an_end_of_the_link(self):

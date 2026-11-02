@@ -158,6 +158,26 @@ class TestSilentNodes(LinkFailureTestCase):
         self.assertEqual('DEGRADED', self._show(
             operator['id'], as_admin=True)['status'])
 
+    def test_an_unknown_link_in_its_batch_does_not_silence_a_node(self):
+        # s1's link map names a link topology_file does not have (audit
+        # 2026-11-02 finding 2): the batch used to be refused whole, so s1
+        # went silent, read as dead, and the reservation left it
+        path = self._reserve()
+        self._all_report()
+        self._at(20)
+        self._all_report(but={'s1'})
+        items = [{'reporter': 's1', 'from_node': a, 'to_node': b,
+                  'up': True, 'mbps': 0.0, 'drops': 0}
+                 for a, b in sorted(self.srv6.capacity) if 's1' in (a, b)]
+        items.append({'reporter': 's1', 'from_node': 's1', 'to_node': 'lc',
+                      'up': True, 'mbps': 0.0, 'drops': 0})
+        req = self.new_create_request(LS, {LS: items}, as_admin=True)
+        self._check(req.get_response(self.ext_api), 201)
+        self.assertNotIn('s1', self.srv6._dead_hosts(self.admin_ctx))
+        self._pass()
+        self.assertEqual(['la', 's1', 'lb'], self._show(
+            path['id'], as_admin=True)['via_hosts'])
+
     def test_silent_for_less_than_stale_after_is_alive(self):
         path = self._reserve()
         self._all_report()

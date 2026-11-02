@@ -122,6 +122,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         self.conf = cfg.CONF[config.SRV6_SERVER_GROUP]
         self.agent_rpc = rpc.Srv6AgentNotifyAPI()
         self._pool_synced = False
+        # (reporter, link) already warned about by _add_link_states
+        self._unknown_links = set()
         self.encoding = self.conf.dataplane_encoding
         self._validate_function_id_ranges()
         self._load_topology()
@@ -652,26 +654,38 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
     def _add_link_states(self, context, items):
         """Validate and store one batch of measurements, whole or not at all.
 
-        Every item must be a link of the topology file, measured by one of
-        its two ends, at most once per batch; mbps and drops are null or a
-        non-negative finite number (the collector's data moves traffic, so
-        nothing else is trusted). The server's clock stamps the batch, and
-        the batch deletes its reporters' rows older than two windows.
+        Every item must be measured by one of its link's two ends, at most
+        once per batch; mbps and drops are null or a non-negative finite
+        number (the collector's data moves traffic, so nothing else is
+        trusted). The server's clock stamps the batch, and the batch deletes
+        its reporters' rows older than two windows.
+
+        An item for a link the topology file does not have is skipped, with
+        one WARNING per reporter and link, and the rest is stored: refusing
+        the batch would leave its reporter silent, which reads as a dead
+        node (L8) and moves or deletes every reservation through it. A
+        batch with no known link at all is refused.
         """
         if not self.capacity:
             raise ls_ext.Srv6LinkStateInvalid(
                 reason=_("link state needs an underlay topology "
                          "([srv6] topology_file)"))
-        rows, seen = [], set()
+        rows, seen, unknown = [], set(), []
         for item in items:
             row = {k: item[k] for k in ('reporter', 'from_node', 'to_node',
                                         'up', 'mbps', 'drops')}
             link = (row['from_node'], row['to_node'])
             name = '%s>%s' % link
             if link not in self.capacity:
-                raise ls_ext.Srv6LinkStateInvalid(
-                    reason=_("%s is not a link of the underlay topology")
-                    % name)
+                unknown.append(name)
+                if (row['reporter'], link) not in self._unknown_links:
+                    self._unknown_links.add((row['reporter'], link))
+                    LOG.warning("SRv6 link state: %(r)s reports %(l)s, which "
+                                "is not a link of the underlay topology "
+                                "(%(f)s); ignoring it, storing the rest",
+                                {'r': row['reporter'], 'l': name,
+                                 'f': self.conf.topology_file})
+                continue
             if row['reporter'] not in link:
                 raise ls_ext.Srv6LinkStateInvalid(
                     reason=_("reporter %(r)s is not an end of %(l)s")
@@ -693,6 +707,10 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                                  "from 0 to %(t)g") %
                         {'a': attr, 'l': name, 't': top})
             rows.append(row)
+        if not rows:
+            raise ls_ext.Srv6LinkStateInvalid(
+                reason=_("%s: not a link of the underlay topology")
+                % ', '.join(unknown))
         # whole seconds: MySQL DATETIME rounds the fraction, which could
         # store a measurement up to half a second in the future
         now = timeutils.utcnow().replace(microsecond=0)
@@ -1278,7 +1296,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         Under the admission lock, like an admission: the books of every
         OTHER reservation, a new path from the same source to the same
         reserved host for the same bandwidth, the hops replaced in the
-        row. measured ({link: Mbit/s}, re-optimisation): each link then
+        row. measured ({link: Mbit/s}, failure reroute and re-optimisation;
+        None: the books only): each link then
         holds max(reserved, measured) (L4), the measured load minus this
         reservation's own bandwidth on the links it crosses now (L10: its
         traffic is still there, and would be counted twice). The agents
@@ -1319,11 +1338,14 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
     def _reroute_failed_reservations(self, context):
         """Move every reservation off the links and nodes that are down.
 
-        Run by the TE liveness worker. A reservation that no longer fits
-        is deleted with a WARNING (L6), like one whose port migrated. One
-        that crosses nothing dead is never touched, so a link coming back
-        moves nothing back by itself. During an outage of the collection
-        nothing moves (ERROR logged each pass).
+        Run by the TE liveness worker. The new path must fit as an
+        admission would: each link holds max(reserved, measured) (L4), so a
+        reservation is not moved onto a link that unreserved traffic already
+        fills. A reservation that no longer fits is deleted with a WARNING
+        (L6), like one whose port migrated. One that crosses nothing dead is
+        never touched, so a link coming back moves nothing back by itself.
+        During an outage of the collection nothing moves (ERROR logged each
+        pass).
         """
         if not self.capacity:
             return
@@ -1334,11 +1356,13 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                       "of the fabric; no reservation is moved",
                       self.conf.link_state_stale_after)
             return
-        dead = self._dead_links(context, silent)
+        view = self._link_state_view(context)
+        dead = self._dead_links(context, silent, view)
         if not dead:
             return
         cap = {link: mbps for link, mbps in self.capacity.items()
                if link not in dead}
+        measured = self._measured_load(context, view)
         for p in te_db.get_bandwidth_paths(context):
             end = p['reserved_host'] or p[te_def.DESTINATION_HOST]
             hops = [p[te_def.SOURCE_HOST]] + p[te_def.VIA_HOSTS] + [end]
@@ -1347,7 +1371,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             if not end or not crossed:
                 continue
             old, path = self._reroute_reservation(context, p['id'], cap,
-                                                  delete=True)
+                                                  delete=True,
+                                                  measured=measured)
             if old is None:
                 continue
             info = {'id': p['id'], 'bw': p[te_def.BANDWIDTH],
@@ -1655,6 +1680,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         unbound) ends its reservations; whoever made them asks again. Under
         the admission lock, so a deletion never interleaves with an
         admission reading the books. Never raises into the port update.
+        Returns the deleted paths (dicts), [] on failure.
         """
         host = port.get(portbindings.HOST_ID) or None
         try:
@@ -1665,7 +1691,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         except Exception:
             LOG.exception("SRv6 TE: could not release the reservations of "
                           "port %s after it moved", port['id'])
-            return
+            return []
         for path in gone:
             LOG.warning("SRv6 TE: reservation %(id)s (%(bw)d Mbit/s from "
                         "%(s)s to port %(p)s) deleted: it was reserved for "
@@ -1673,6 +1699,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                         {'id': path['id'], 'bw': path[te_def.BANDWIDTH],
                          's': path[te_def.SOURCE_HOST], 'p': port['id'],
                          'old': path['reserved_host'], 'new': host})
+        return gone
 
     def _release_stale_reservations(self, context):
         """Release reservations whose port moved without our noticing.
@@ -1683,6 +1710,12 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         reservation for a host the port has left. One read of the
         reservations, one get_ports for their ports. A deleted port needs
         nothing: its paths went with it (ON DELETE CASCADE).
+
+        Each domain that lost a reservation is pushed in full: no route
+        update follows here, unlike in the callback, and without the push
+        the head-end kept the deleted path's waypoints until its own resync
+        (audit 2026-11-02 finding 3). The same push gives every node the
+        port's new host, which the missed update never sent either.
         """
         held = {}
         for path in te_db.get_bandwidth_paths(context):
@@ -1691,10 +1724,14 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 held.setdefault(port_id, set()).add(path['reserved_host'])
         if not held:
             return
+        domains = set()
         for port in self._core_plugin().get_ports(
                 context, filters={'id': sorted(held)}):
             if held[port['id']] != {port.get(portbindings.HOST_ID) or None}:
-                self._release_moved_reservations(context, port)
+                domains.update(p['domain_id'] for p in
+                               self._release_moved_reservations(context, port))
+        for domain_id in sorted(domains):
+            self._push_domain_by_id(context, domain_id)
 
     @registry.receives(resources.PORT, [events.AFTER_UPDATE])
     def registry_port_updated(self, resource, event, trigger, payload=None):
