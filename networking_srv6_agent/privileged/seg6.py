@@ -517,12 +517,3 @@ def list_sid_rules():
         sid_address = fields[fields.index('to') + 1].split('/')[0]
         rules.append((vrf_name, sid_address))
     return rules
-
-
-def route_exists(prefix, table, family_v6=False):
-    args = ['-6'] if family_v6 else []
-    args += ['route', 'show', prefix, 'table', str(table)]
-    try:
-        return bool(ip_route_cmd(args).strip())
-    except processutils.ProcessExecutionError:
-        return False

@@ -720,6 +720,26 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         return [dict(r, id='%s:%s' % (r['from_node'], r['to_node']),
                      measured_at=now.isoformat()) for r in rows]
 
+    @staticmethod
+    def _history(context):
+        """{(from, to, reporter): [row, ...]}, each oldest first."""
+        hist = collections.defaultdict(list)
+        for r in link_state_db.get_link_states(context):   # oldest first
+            hist[(r['from_node'], r['to_node'], r['reporter'])].append(r)
+        return hist
+
+    @staticmethod
+    def _ends(hist, a, b, fresh):
+        """(ends, live) of the directed link a -> b.
+
+        ends: the histories of the ends that reported it, the sender's
+        (a's) first; live: those with a measurement since fresh. live[0]
+        is the end that counts -- the sender if fresh, else the receiver
+        -- for the view (admission, the API) and the re-optimisation alike.
+        """
+        ends = [h for h in (hist.get((a, b, a)), hist.get((a, b, b))) if h]
+        return ends, [h for h in ends if h[-1]['measured_at'] >= fresh]
+
     def _link_state_view(self, context):
         """{(from, to): entry} of every link of the topology file.
 
@@ -742,9 +762,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         fresh = now - datetime.timedelta(
             seconds=self.conf.link_state_stale_after)
         start = now - datetime.timedelta(seconds=self.conf.link_state_window)
-        hist = collections.defaultdict(list)      # (from, to, reporter)
-        for r in link_state_db.get_link_states(context):   # oldest first
-            hist[(r['from_node'], r['to_node'], r['reporter'])].append(r)
+        hist = self._history(context)
         books = self._books(context)
         view = {}
         for a, b in sorted(self.capacity):
@@ -752,14 +770,12 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                      'capacity_mbps': self.link_capacity.get((a, b)),
                      'reserved_mbps': books.get((a, b), 0)}
             view[(a, b)] = entry
-            ends = [h for h in (hist.get((a, b, a)), hist.get((a, b, b)))
-                    if h]
+            ends, live = self._ends(hist, a, b, fresh)
             if not ends:
                 entry.update(dict.fromkeys(
                     ('reporter', 'up', 'mbps', 'drops', 'delivered_mbps',
                      'peak_mbps', 'measured_at', 'age')), stale=True)
                 continue
-            live = [h for h in ends if h[-1]['measured_at'] >= fresh]
             main = live[0] if live else max(
                 ends, key=lambda h: h[-1]['measured_at'])
             last = main[-1]
@@ -1199,11 +1215,9 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         for p in te_db.get_bandwidth_paths(context):
             if p['id'] == exclude:
                 continue
-            # rows from before reserved_host existed are all to a host
-            end = p['reserved_host'] or p[te_def.DESTINATION_HOST]
-            if end:
-                held.append(([p[te_def.SOURCE_HOST]] + p[te_def.VIA_HOSTS] +
-                             [end], p[te_def.BANDWIDTH]))
+            hops = te_db.reservation_hops(p)
+            if hops[-1]:
+                held.append((hops, p[te_def.BANDWIDTH]))
         return pce.reserved(held)
 
     # ------------------------------------------------------------------
@@ -1276,17 +1290,13 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         """
         fresh = timeutils.utcnow() - datetime.timedelta(
             seconds=self.conf.link_state_stale_after)
-        hist = collections.defaultdict(list)
-        for r in link_state_db.get_link_states(context):   # oldest first
-            hist[(r['from_node'], r['to_node'], r['reporter'])].append(r)
+        hist = self._history(context)
         series = {}
         for a, b in self.capacity:
-            for end in (a, b):
-                h = hist.get((a, b, end))
-                if h and h[-1]['measured_at'] >= fresh:
-                    series[(a, b)] = [(r['measured_at'], r['mbps'])
-                                      for r in h]
-                    break
+            _ends, live = self._ends(hist, a, b, fresh)
+            if live:
+                series[(a, b)] = [(r['measured_at'], r['mbps'])
+                                  for r in live[0]]
         return series
 
     def _reroute_reservation(self, context, path_id, cap, delete=False,
@@ -1313,18 +1323,17 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                         if p['id'] == path_id), None)
             if old is None:
                 return None, None
-            end = old['reserved_host'] or old[te_def.DESTINATION_HOST]
+            hops = te_db.reservation_hops(old)
             bw = old[te_def.BANDWIDTH]
             used = self._books(context, exclude=path_id)
             if measured:
                 # shortcut (L10 caveat): only the reserved part of the own
                 # traffic is subtracted; per-path counters would give it all
-                own = set(pce.links_of([old[te_def.SOURCE_HOST]] +
-                                       old[te_def.VIA_HOSTS] + [end]))
+                own = set(pce.links_of(hops))
                 for link, mbps in measured.items():
                     mine = bw if link in own else 0
                     used[link] = max(used.get(link, 0), max(0, mbps - mine))
-            path = pce.compute(cap, used, old[te_def.SOURCE_HOST], end, bw)
+            path = pce.compute(cap, used, hops[0], hops[-1], bw)
             if path is not None:
                 te_db.update_te_path(context, path_id, None,
                                      {te_def.VIA_HOSTS: path[1:-1]})
@@ -1364,8 +1373,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                if link not in dead}
         measured = self._measured_load(context, view)
         for p in te_db.get_bandwidth_paths(context):
-            end = p['reserved_host'] or p[te_def.DESTINATION_HOST]
-            hops = [p[te_def.SOURCE_HOST]] + p[te_def.VIA_HOSTS] + [end]
+            hops = te_db.reservation_hops(p)
+            end = hops[-1]
             crossed = sorted('%s>%s' % link for link in pce.links_of(hops)
                              if link in dead)
             if not end or not crossed:

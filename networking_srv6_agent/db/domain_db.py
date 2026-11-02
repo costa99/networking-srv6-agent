@@ -263,14 +263,6 @@ def get_domain_ids_for_network(context, network_id):
             .filter_by(network_id=network_id).all()]
 
 
-@db_api.CONTEXT_READER
-def get_network_ids(context, domain_id):
-    """The networks attached to one domain."""
-    return [row.network_id for row in
-            context.session.query(SRv6DomainNetAssociation.network_id)
-            .filter_by(domain_id=domain_id).all()]
-
-
 @db_api.CONTEXT_WRITER
 def lock_all_domains(context):
     """Lock every domain row until the caller's transaction ends.

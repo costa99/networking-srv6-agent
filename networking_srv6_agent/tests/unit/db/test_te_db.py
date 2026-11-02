@@ -537,3 +537,14 @@ class TestBandwidth(Srv6TeDbTestCase):
                           'destination_host': 'ml5',
                           'destination_port_id': None, 'bandwidth': 40,
                           'reserved_host': None}, ml5)
+
+    def test_reservation_hops_end_at_the_reserved_host(self):
+        # one definition for the books, the failure reroute and the
+        # re-optimisation (audit 2026-11-02 finding 4)
+        port_path = {'source_host': 'ml1', 'via_hosts': ['l1', 's1', 'l3'],
+                     'destination_host': None, 'reserved_host': 'ml5'}
+        self.assertEqual(['ml1', 'l1', 's1', 'l3', 'ml5'],
+                         te_db.reservation_hops(port_path))
+        # a row from before reserved_host existed: all were to a host
+        old_row = dict(port_path, destination_host='ml6', reserved_host=None)
+        self.assertEqual('ml6', te_db.reservation_hops(old_row)[-1])

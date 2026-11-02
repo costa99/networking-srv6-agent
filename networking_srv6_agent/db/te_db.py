@@ -309,6 +309,18 @@ def delete_moved_reservations(context, port_id, host):
     return gone
 
 
+def reservation_hops(path):
+    """The node path a reservation holds: [source, via..., reserved host].
+
+    path is a get_bandwidth_paths dict. The end is the host the hops were
+    computed for, never where a port is now; rows from before
+    reserved_host existed are all to a host. The one definition the books,
+    the failure reroute and the re-optimisation share.
+    """
+    end = path['reserved_host'] or path['destination_host']
+    return [path['source_host']] + path['via_hosts'] + [end]
+
+
 @db_api.CONTEXT_READER
 def get_bandwidth_paths(context):
     """Every reservation, in every domain: the links are shared by all.

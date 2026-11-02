@@ -198,8 +198,8 @@ class TestNetworkAssociations(DomainDbTestCase):
         deleted = domain_db.delete_net_assoc(self.ctx, assoc['id'],
                                              domain['id'])
         self.assertEqual(assoc['id'], deleted['id'])
-        self.assertEqual([], domain_db.get_network_ids(self.ctx,
-                                                       domain['id']))
+        self.assertEqual([], domain_db.get_net_assocs(self.ctx,
+                                                      domain['id']))
 
     def test_delete_assoc_missing_returns_none(self):
         domain = self._create_domain()
@@ -224,8 +224,8 @@ class TestNetworkAssociations(DomainDbTestCase):
         with db_api.CONTEXT_WRITER.using(self.ctx):
             self.ctx.session.query(models_v2.Network).filter_by(
                 id=net_id).delete()
-        self.assertEqual([], domain_db.get_network_ids(self.ctx,
-                                                       domain['id']))
+        self.assertEqual([], domain_db.get_net_assocs(self.ctx,
+                                                      domain['id']))
 
 
 class TestAllocationLifetime(DomainDbTestCase):

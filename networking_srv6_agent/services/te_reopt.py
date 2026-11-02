@@ -65,11 +65,6 @@ class TeReoptimiser:
             LOG.exception("SRv6 TE re-optimisation failed; trying again at "
                           "the next interval")
 
-    @staticmethod
-    def _hops(p):
-        end = p['reserved_host'] or p[te_def.DESTINATION_HOST]
-        return [p[te_def.SOURCE_HOST]] + p[te_def.VIA_HOSTS] + [end]
-
     def _congested(self, ctx):
         """{(a, b): latest Mbit/s} of the links congested now."""
         plugin, conf = self._plugin, self._plugin.conf
@@ -111,7 +106,7 @@ class TeReoptimiser:
                 plugin.capacity[link]
             crossing = sorted(
                 (p for p in te_db.get_bandwidth_paths(ctx)
-                 if link in pce.links_of(self._hops(p))),
+                 if link in pce.links_of(te_db.reservation_hops(p))),
                 key=lambda p: (-p[te_def.BANDWIDTH], p['id']))
             if not crossing:
                 LOG.info("SRv6 TE re-optimisation: %(l)s carries %(m).1f "
@@ -134,7 +129,7 @@ class TeReoptimiser:
                 moves += 1
                 load -= p[te_def.BANDWIDTH]
                 self._moved[p['id']] = now
-                for hop in pce.links_of(self._hops(old)):
+                for hop in pce.links_of(te_db.reservation_hops(old)):
                     self._link_moved[hop] = now
                 LOG.warning("SRv6 TE re-optimisation: %(l)s congested "
                             "(%(m).1f Mbit/s > %(h)s of %(c)d): reservation "
@@ -144,7 +139,7 @@ class TeReoptimiser:
                              'h': conf.te_reopt_high,
                              'c': plugin.capacity[link], 'id': p['id'],
                              'bw': p[te_def.BANDWIDTH],
-                             'old': '-'.join(self._hops(old)),
+                             'old': '-'.join(te_db.reservation_hops(old)),
                              'new': '-'.join(path)})
             if moves >= conf.te_reopt_max_moves:
                 break
