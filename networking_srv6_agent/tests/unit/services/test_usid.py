@@ -55,6 +55,9 @@ class UsidPluginTestCaseBase(test_plugin.PluginUnitTestCaseBase):
             srv6_db.parse_function_id_ranges
         self.plugin = plugin.Srv6Plugin()
         self.srv6_db.get_host_locators.return_value = dict(LOCATORS)
+        # a live agent on every registered host: one without is dead
+        self.core.get_agents.return_value = [
+            {'host': host, 'alive': True} for host in LOCATORS]
         self.srv6_db.get_function_id.return_value = 0xe005
 
 

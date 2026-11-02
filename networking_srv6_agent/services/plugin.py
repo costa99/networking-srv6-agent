@@ -620,9 +620,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             'locator': row['locator'],
             'updated_at': updated_at.isoformat() if updated_at else None,
         }
-        if fields:
-            return {k: v for k, v in res.items() if k in fields}
-        return res
+        return _only(res, fields)
 
     def get_srv6_locators(self, context, filters=None, fields=None,
                           sorts=None, limit=None, marker=None,
@@ -874,11 +872,14 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
 
         Computed from the database each time, never cached in the process:
         API workers resolve paths too, and one worker's memory would
-        disagree with another's. A host with no agent row is not dead, and
-        so is every host when the check is off (te_liveness_interval = 0)
-        or the question cannot be answered: an unanswerable query leaves the
-        paths steered, as before this check existed, instead of rerouting
-        every one of them on a database hiccup.
+        disagree with another's. A host with a registered locator but no
+        agent row is dead too: only an OVS agent registers a locator, so
+        that host is a removed node whose row an operator deleted (audit
+        2026-10-21, 5). No host is dead when the check is off
+        (te_liveness_interval = 0) or the question cannot be answered: an
+        unanswerable query leaves the paths steered, as before this check
+        existed, instead of rerouting every one of them on a database
+        hiccup.
 
         Fabric nodes (spines, leaves) run no agent: one is dead when its
         link-state reports stopped (L8, _silent_fabric), so an operator
@@ -896,6 +897,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                     filters={'agent_type': [n_const.AGENT_TYPE_OVS]})
                 dead.update(agent['host'] for agent in agents
                             if not agent['alive'])
+                dead.update(set(srv6_db.get_host_locators(admin_context)) -
+                            {agent['host'] for agent in agents})
         except Exception:
             LOG.exception("SRv6: cannot read agent liveness; treating "
                           "every TE waypoint as alive")
@@ -1058,20 +1061,6 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             return None
         return port.get(portbindings.HOST_ID) or None
 
-    @staticmethod
-    def _drop_leading(transit, own_sid):
-        """transit without its leading occurrences of own_sid.
-
-        The server-side twin of the agent's _transit_segments, for a path
-        with a source: that node is the ingress, and a first waypoint equal
-        to itself is dropped before the push. Compared as addresses.
-        """
-        own = ipaddress.IPv6Address(own_sid)
-        transit = list(transit)
-        while transit and ipaddress.IPv6Address(transit[0]) == own:
-            transit.pop(0)
-        return transit
-
     def _resolve_te_path(self, context, path, locators, function_id,
                          dead_hosts=()):
         """Attach `segments` and `status` -- what the server resolved.
@@ -1092,8 +1081,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
 
         `encoded_segments` is what the ingress will actually push: the
         same list with full SIDs, the C-SID containers in usid mode --
-        computed by the same sid.pack_next_csid the agent calls, so the
-        two cannot disagree.
+        computed by the same sid.encode the agent calls, so the two cannot
+        disagree. The leading-SID drop is sid.drop_leading, the agent's too.
 
         Server resolution, not an agent acknowledgement: ACTIVE says the
         payload carries this list, not that any kernel holds it.
@@ -1110,11 +1099,11 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         if active:
             own = self._transit_sids([source], locators) if source else None
             if own:
-                transit = self._drop_leading(transit, own[0])
+                transit = sid.drop_leading(transit, own[0])
             segments = transit + [
                 sid.format_sid(locators[destination], function_id)]
             path[te_def.SEGMENTS] = segments
-            path[te_def.ENCODED_SEGMENTS] = self._encoded(segments)
+            path[te_def.ENCODED_SEGMENTS] = sid.encode(segments, self.usid)
             path[te_def.STATUS] = te_def.STATUS_ACTIVE
             return path
         LOG.warning("SRv6 TE path %(id)s is DEGRADED: destination %(dst)s, "
@@ -1128,15 +1117,6 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         path[te_def.ENCODED_SEGMENTS] = []
         path[te_def.STATUS] = te_def.STATUS_DEGRADED
         return path
-
-    def _encoded(self, segments):
-        """The pushed form of a segment list; the agent's _encode twin."""
-        if not self.usid:
-            return list(segments)
-        try:
-            return sid.pack_next_csid(segments)
-        except sid.InvalidLocator:
-            return list(segments)
 
     def _resolved(self, context, path, locators=None):
         admin_context = context.elevated()
@@ -1335,7 +1315,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                     used[link] = max(used.get(link, 0), max(0, mbps - mine))
             path = pce.compute(cap, used, hops[0], hops[-1], bw)
             if path is not None:
-                te_db.update_te_path(context, path_id, None,
+                te_db.update_te_path(context, path_id,
                                      {te_def.VIA_HOSTS: path[1:-1]})
             elif delete:
                 te_db.delete_te_path(context, path_id)
@@ -1585,7 +1565,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                     reason=_("via_hosts of a path with a bandwidth "
                              "reservation are computed; delete and "
                              "re-create the path to move it"))
-        path = te_db.update_te_path(context, id, None, body)
+        path = te_db.update_te_path(context, id, body)
         if path is None:
             raise te_ext.Srv6TePathNotFound(id=id)
         LOG.info("SRv6 TE path %(id)s now via %(v)s",

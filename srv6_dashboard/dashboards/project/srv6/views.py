@@ -163,15 +163,9 @@ class DetailView(DomainMixin, tabs.TabbedTableView):
     @memoized.memoized_method
     def get_network_names(self):
         domain = self.get_domain()
-        if not domain.networks:
-            return {}
-        try:
-            return srv6_api.network_names(srv6_api.network_list(
-                self.request, project_id=domain.project_id))
-        except Exception:
-            exceptions.handle(self.request,
-                              _('Unable to retrieve network names.'))
-            return {}
+        add_network_names(self.request, [domain],
+                          project_id=domain.project_id)
+        return getattr(domain, 'network_names', {})
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)

@@ -61,6 +61,11 @@ class TestCreateNetworkAssociation(_Base):
         self.assertParserFails(na.CreateNetworkAssociation(self.app, None),
                                ['red'])
 
+    def test_no_project_option(self):
+        # The server always uses the domain's project (audit 2026-10-21, 10).
+        self.assertParserFails(na.CreateNetworkAssociation(self.app, None),
+                               ['red', 'net-a', '--project', 'demo'])
+
 
 class TestListNetworkAssociation(_Base):
 

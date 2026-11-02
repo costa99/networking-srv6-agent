@@ -269,3 +269,39 @@ def pack_next_csid(sids, block_bits=constants.USID_BLOCK_BITS,
             value |= csid << (128 - block_bits - csid_bits * (i + 1))
         result.append(str(ipaddress.IPv6Address(value)))
     return result
+
+
+def encode(segments, usid):
+    """What an ingress pushes for a logical segment list.
+
+    The list itself with full SIDs; in usid mode packed into NEXT-C-SID
+    containers. A list that cannot be packed -- SIDs from different blocks
+    -- stays full SIDs: bigger, but every SID in it is valid on its own.
+    The server shows this as encoded_segments, the agent pushes it.
+    """
+    if usid:
+        try:
+            return pack_next_csid(segments)
+        except InvalidLocator:
+            pass
+    return list(segments)
+
+
+def drop_leading(transit, own):
+    """transit without its LEADING occurrences of the SID own.
+
+    The ingress of a path whose first waypoint is itself would send each
+    packet into its own End behaviour and back out. Only leading ones go:
+    own later in the list is a real waypoint. Compared as addresses; a
+    segment that is not one stops the drop instead of raising.
+    """
+    own = ipaddress.IPv6Address(own)
+    transit = list(transit or [])
+    while transit:
+        try:
+            if ipaddress.IPv6Address(transit[0]) != own:
+                break
+        except ValueError:
+            break
+        transit.pop(0)
+    return transit

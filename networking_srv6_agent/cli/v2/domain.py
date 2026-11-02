@@ -95,9 +95,14 @@ class ListDomain(command.Lister):
         project_id = common.project_id(self.app.client_manager, parsed_args)
         if project_id is not None:
             filters['project_id'] = project_id
-        return common.list_columns(
-            client._list(resources.Srv6Domain, **filters),
-            _attr_map, parsed_args.long, _formatters)
+        domains = list(client._list(resources.Srv6Domain, **filters))
+        attr_map = _attr_map
+        # As in _show: a tenant's domains carry no sid_function (admin-only),
+        # and a column of "None" would read as "not allocated".
+        if all(d.sid_function is None for d in domains):
+            attr_map = [a for a in _attr_map if a[0] != 'sid_function']
+        return common.list_columns(domains, attr_map, parsed_args.long,
+                                   _formatters)
 
 
 class ShowDomain(command.ShowOne):

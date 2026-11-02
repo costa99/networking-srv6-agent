@@ -25,7 +25,7 @@ from horizon import tabs
 from horizon.utils import memoized
 from openstack_dashboard.api import keystone
 
-from networking_srv6_agent.common import constants
+from networking_srv6_agent.common import sid
 from srv6_dashboard.api import srv6 as srv6_api
 from srv6_dashboard.common import srv6 as srv6_common
 from srv6_dashboard.dashboards.admin.srv6.locators import (
@@ -138,8 +138,7 @@ class OverviewTab(project_tabs.OverviewTab):
         # The name every node gives the domain's VRF device: what an admin
         # greps for in `ip vrf` on a node (constants.VRF_PREFIX).
         if domain.sid_function is not None:
-            context['vrf_name'] = '%s%d' % (constants.VRF_PREFIX,
-                                            domain.sid_function)
+            context['vrf_name'] = sid.vrf_name(domain.sid_function)
         try:
             context['project_name'] = keystone.tenant_get(
                 request, domain.project_id).name

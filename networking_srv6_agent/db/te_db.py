@@ -165,11 +165,9 @@ def _make_te_path_dict(path_db, fields=None):
     return res
 
 
-def _get_path_db(context, path_id, domain_id):
-    query = context.session.query(SRv6TePath).filter_by(id=path_id)
-    if domain_id is not None:
-        query = query.filter_by(domain_id=domain_id)
-    return query.one_or_none()
+def _get_path_db(context, path_id):
+    return context.session.query(SRv6TePath).filter_by(
+        id=path_id).one_or_none()
 
 
 def _set_hops(context, path_db, via_hosts):
@@ -220,11 +218,11 @@ def create_te_path(context, domain_id, te_path):
 
 
 @db_api.CONTEXT_READER
-def get_te_path(context, path_id, domain_id=None, fields=None):
-    path_db = _get_path_db(context, path_id, domain_id)
+def get_te_path(context, path_id):
+    path_db = _get_path_db(context, path_id)
     if path_db is None:
         return None
-    return _make_te_path_dict(path_db, fields)
+    return _make_te_path_dict(path_db)
 
 
 # A source_host filter of [''] selects the any-source paths: the sentinel is
@@ -243,11 +241,9 @@ def _filtered(query, filters):
 
 
 @db_api.CONTEXT_READER
-def get_te_paths(context, domain_id, filters=None, fields=None):
-    query = _filtered(
-        context.session.query(SRv6TePath).filter_by(domain_id=domain_id),
-        filters)
-    return [_make_te_path_dict(path_db, fields)
+def get_te_paths(context, domain_id):
+    query = context.session.query(SRv6TePath).filter_by(domain_id=domain_id)
+    return [_make_te_path_dict(path_db)
             for path_db in query.order_by(SRv6TePath.destination_host,
                                           SRv6TePath.source_host,
                                           SRv6TePath.id).all()]
@@ -263,8 +259,8 @@ def get_all_te_paths(context, filters=None, fields=None):
 
 
 @db_api.CONTEXT_WRITER
-def update_te_path(context, path_id, domain_id, te_path):
-    path_db = _get_path_db(context, path_id, domain_id)
+def update_te_path(context, path_id, te_path):
+    path_db = _get_path_db(context, path_id)
     if path_db is None:
         return None
     if 'via_hosts' in te_path:
@@ -277,8 +273,8 @@ def update_te_path(context, path_id, domain_id, te_path):
 
 
 @db_api.CONTEXT_WRITER
-def delete_te_path(context, path_id, domain_id=None):
-    path_db = _get_path_db(context, path_id, domain_id)
+def delete_te_path(context, path_id):
+    path_db = _get_path_db(context, path_id)
     if path_db is None:
         return None
     # Read the dict BEFORE the delete: afterwards there is nothing to build

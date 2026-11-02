@@ -114,25 +114,12 @@ class TestCrud(Srv6TeDbTestCase):
 
     def test_get_round_trips(self):
         created = self._create_path(via_hosts=['cn2', 'cn4'])
-        fetched = te_db.get_te_path(self.ctx, created['id'], self.domain_id)
+        fetched = te_db.get_te_path(self.ctx, created['id'])
         self.assertEqual(created, fetched)
-
-    def test_get_is_scoped_to_its_domain_when_asked(self):
-        # A path id from another domain must not be readable through this
-        # one.
-        created = self._create_path()
-        other_domain = self._create_domain()
-        self.assertIsNone(
-            te_db.get_te_path(self.ctx, created['id'], other_domain))
-
-    def test_get_without_a_domain_finds_it_anywhere(self):
-        # The top-level API knows only the path id.
-        created = self._create_path()
-        self.assertEqual(created, te_db.get_te_path(self.ctx, created['id']))
 
     def test_get_missing_returns_none(self):
         self.assertIsNone(te_db.get_te_path(
-            self.ctx, uuidutils.generate_uuid(), self.domain_id))
+            self.ctx, uuidutils.generate_uuid()))
 
     def test_list_only_returns_this_domains_paths(self):
         self._create_path(destination_host='cn3')
@@ -152,7 +139,7 @@ class TestCrud(Srv6TeDbTestCase):
 
     def test_delete_missing_returns_none(self):
         self.assertIsNone(te_db.delete_te_path(
-            self.ctx, uuidutils.generate_uuid(), self.domain_id))
+            self.ctx, uuidutils.generate_uuid()))
 
 
 class TestHopOrdering(Srv6TeDbTestCase):
@@ -160,13 +147,13 @@ class TestHopOrdering(Srv6TeDbTestCase):
 
     def test_via_hosts_come_back_in_traversal_order(self):
         created = self._create_path(via_hosts=['cn2', 'cn4', 'cn5'])
-        fetched = te_db.get_te_path(self.ctx, created['id'], self.domain_id)
+        fetched = te_db.get_te_path(self.ctx, created['id'])
         self.assertEqual(['cn2', 'cn4', 'cn5'], fetched['via_hosts'])
 
     def test_order_is_not_alphabetical(self):
         # The guard against a relationship that happens to look sorted.
         created = self._create_path(via_hosts=['cn9', 'cn1', 'cn5'])
-        fetched = te_db.get_te_path(self.ctx, created['id'], self.domain_id)
+        fetched = te_db.get_te_path(self.ctx, created['id'])
         self.assertEqual(['cn9', 'cn1', 'cn5'], fetched['via_hosts'])
 
     def test_positions_are_zero_based_and_contiguous(self):
@@ -196,19 +183,12 @@ class TestUpdate(Srv6TeDbTestCase):
     def test_update_replaces_rather_than_appends(self):
         created = self._create_path(via_hosts=['cn2', 'cn4'])
         updated = te_db.update_te_path(
-            self.ctx, created['id'], self.domain_id, {'via_hosts': ['cn5']})
+            self.ctx, created['id'], {'via_hosts': ['cn5']})
         self.assertEqual(['cn5'], updated['via_hosts'])
-
-    def test_update_without_a_domain(self):
-        # What the top-level PUT does: it knows only the path id.
-        created = self._create_path(via_hosts=['cn2'])
-        updated = te_db.update_te_path(self.ctx, created['id'], None,
-                                       {'via_hosts': ['cn4']})
-        self.assertEqual(['cn4'], updated['via_hosts'])
 
     def test_update_leaves_no_orphan_hops(self):
         created = self._create_path(via_hosts=['cn2', 'cn4', 'cn5'])
-        te_db.update_te_path(self.ctx, created['id'], self.domain_id,
+        te_db.update_te_path(self.ctx, created['id'],
                              {'via_hosts': ['cn9']})
         rows = self.ctx.session.query(te_db.SRv6TePathHop).filter_by(
             path_id=created['id']).all()
@@ -219,21 +199,18 @@ class TestUpdate(Srv6TeDbTestCase):
         # what an operator PUTs to un-steer without a delete window.
         created = self._create_path(via_hosts=['cn2'])
         updated = te_db.update_te_path(
-            self.ctx, created['id'], self.domain_id, {'via_hosts': []})
+            self.ctx, created['id'], {'via_hosts': []})
         self.assertEqual([], updated['via_hosts'])
-        self.assertIsNotNone(te_db.get_te_path(self.ctx, created['id'],
-                                               self.domain_id))
+        self.assertIsNotNone(te_db.get_te_path(self.ctx, created['id']))
 
     def test_update_without_via_hosts_leaves_them_alone(self):
         created = self._create_path(via_hosts=['cn2'])
-        updated = te_db.update_te_path(self.ctx, created['id'],
-                                       self.domain_id, {})
+        updated = te_db.update_te_path(self.ctx, created['id'], {})
         self.assertEqual(['cn2'], updated['via_hosts'])
 
     def test_update_missing_returns_none(self):
         self.assertIsNone(te_db.update_te_path(
-            self.ctx, uuidutils.generate_uuid(), self.domain_id,
-            {'via_hosts': []}))
+            self.ctx, uuidutils.generate_uuid(), {'via_hosts': []}))
 
 
 class TestConstraintsAndCascades(Srv6TeDbTestCase):
@@ -252,7 +229,7 @@ class TestConstraintsAndCascades(Srv6TeDbTestCase):
 
     def test_deleting_a_path_cascades_its_hops(self):
         created = self._create_path(via_hosts=['cn2', 'cn4'])
-        te_db.delete_te_path(self.ctx, created['id'], self.domain_id)
+        te_db.delete_te_path(self.ctx, created['id'])
         rows = self.ctx.session.query(te_db.SRv6TePathHop).filter_by(
             path_id=created['id']).all()
         self.assertEqual([], rows)

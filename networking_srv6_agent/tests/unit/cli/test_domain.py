@@ -93,12 +93,20 @@ class TestListDomain(base.TestCommand):
                 self.cmd, ['--long', '--name', 'red', '--project', 'demo'])
         self.network._list.assert_called_once_with(
             resources.Srv6Domain, name='red', project_id=base.PROJECT_ID)
+        # A tenant's domains have no sid_function: no column of "None".
         self.assertEqual(('ID', 'Name', 'Project', 'SRv6 Behavior',
-                          'SID Function', 'Networks'), headers)
+                          'Networks'), headers)
         self.assertEqual(
-            [(base.DOMAIN_ID, 'red', base.PROJECT_ID, 'End.DT46', None,
+            [(base.DOMAIN_ID, 'red', base.PROJECT_ID, 'End.DT46',
               format_columns.ListColumn([base.NETWORK_ID]))],
             list(rows))
+
+    def test_long_shows_an_admin_the_sid_function(self):
+        self.network._list.return_value = iter([_domain(sid_function=7)])
+        headers, rows = self.run_cmd(self.cmd, ['--long'])
+        self.assertEqual(('ID', 'Name', 'Project', 'SRv6 Behavior',
+                          'SID Function', 'Networks'), headers)
+        self.assertEqual(7, dict(zip(headers, list(rows)[0]))['SID Function'])
 
 
 class TestShowDomain(base.TestCommand):

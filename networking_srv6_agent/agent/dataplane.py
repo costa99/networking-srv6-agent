@@ -1304,31 +1304,6 @@ class Srv6LinuxDataplane:
             return by_source[local_host]
         return route.get('segments')
 
-    def _transit_segments(self, segments):
-        """A route's transit SIDs, minus any leading transit SID of ours.
-
-        The payload fans out to every node, and the server does not know
-        which one will encapsulate a given packet: any-source segments are
-        pushed by every node, a source entry by the node it names, which
-        may also be its first waypoint. A path whose first waypoint is this
-        node would otherwise send each packet into our own End behaviour and
-        back out -- correct, but a pointless trip through the stack. Only
-        LEADING occurrences are dropped: this node appearing later in the
-        list is a real waypoint. Compared as addresses, not strings. "Ours"
-        is the End SID, or the uN in usid mode -- whichever the server
-        resolved the via hosts to.
-        """
-        own = ipaddress.IPv6Address(self.own_transit_sid)
-        transit = list(segments or [])
-        while transit:
-            try:
-                if ipaddress.IPv6Address(transit[0]) != own:
-                    break
-            except ValueError:
-                break
-            transit.pop(0)
-        return transit
-
     def add_routes(self, domain_id, routes, locators, local_host, mtus=None):
         """Install one encap route per remote workload address.
 
@@ -1396,8 +1371,13 @@ class Srv6LinuxDataplane:
             prefix = route['prefix']
             wanted.add(_normalise_prefix(prefix))
             remote_sid = sid.format_sid(locator, state.function_id)
-            transit = self._transit_segments(
-                self._segments_for(route, local_host))
+            # The payload fans out to every node and the server does not
+            # know which one will encapsulate a given packet (any-source
+            # segments are pushed by every node), so a leading waypoint
+            # that is this node is dropped here; "ours" is the End SID, or
+            # the uN in usid mode -- whichever the server resolved to.
+            transit = sid.drop_leading(self._segments_for(route, local_host),
+                                       self.own_transit_sid)
             segments, mode = self._encode(transit + [remote_sid], prefix)
             # The outer DA is the first PUSHED element: the decap SID, a
             # transit End SID, or in usid mode the first C-SID container --
@@ -1451,16 +1431,15 @@ class Srv6LinuxDataplane:
         reduced: bigger, but it works, since every SID in it is a valid
         SID on its own.
         """
+        pushed = sid.encode(segments, self.usid)
         if not self.usid:
-            return segments, constants.SEG6_MODE_ENCAP
-        try:
-            return (sid.pack_next_csid(segments),
-                    constants.SEG6_MODE_ENCAP_RED)
-        except sid.InvalidLocator as e:
-            LOG.warning("SRv6: route %(p)s: cannot compress %(s)s (%(e)s); "
-                        "pushing full SIDs", {'p': prefix, 's': segments,
-                                              'e': e})
-            return segments, constants.SEG6_MODE_ENCAP_RED
+            return pushed, constants.SEG6_MODE_ENCAP
+        # sid.encode gives back the list itself when it cannot pack it
+        if len(segments) > 1 and pushed == list(segments):
+            LOG.warning("SRv6: route %(p)s: cannot compress %(s)s (SIDs from "
+                        "different blocks?); pushing full SIDs",
+                        {'p': prefix, 's': segments})
+        return pushed, constants.SEG6_MODE_ENCAP_RED
 
     # ------------------------------------------------------------------
     # SID rules

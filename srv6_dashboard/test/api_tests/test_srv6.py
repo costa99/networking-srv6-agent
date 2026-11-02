@@ -140,19 +140,6 @@ class NetworkAssociationApiTests(helpers.APITestCase):
         # back, or the tables could not build the delete URL.
         self.assertEqual(dom.id, ret[0].domain_id)
 
-    @test.create_mocks({Proxy: ('_get',)})
-    def test_network_association_get(self):
-        exp = self.srv6_network_associations.first()
-        self.mock__get.return_value = self.api_srv6_network_associations[0]
-
-        ret = srv6.network_association_get(self.request, exp.domain_id,
-                                           exp.id)
-
-        self.mock__get.assert_called_once_with(
-            resources.Srv6NetworkAssociation, exp.id,
-            domain_id=exp.domain_id)
-        self.assertEqual(exp.domain_id, ret.domain_id)
-
     @test.create_mocks({Proxy: ('_create',)})
     def test_network_association_create(self):
         exp = self.srv6_network_associations.first()
@@ -192,18 +179,6 @@ class LocatorApiTests(helpers.APITestCase):
         self.assertEqual(['ale', 'ale-XPS-15-9570', 'ale-node3'],
                          [loc.host for loc in ret])
         self.assertEqual('fc00:0:1::/48', ret[0].locator)
-
-    @test.create_mocks({Proxy: ('_get',)})
-    def test_locator_get(self):
-        self.mock__get.return_value = self.api_srv6_locators[2]
-
-        ret = srv6.locator_get(self.request, 'ale-node3')
-
-        # The host name is the locator's ID.
-        self.mock__get.assert_called_once_with(resources.Srv6Locator,
-                                               'ale-node3')
-        self.assertIsInstance(ret, srv6.Locator)
-        self.assertEqual('fc00:0:3::/48', ret.locator)
 
 
 class LinkStateApiTests(helpers.APITestCase):

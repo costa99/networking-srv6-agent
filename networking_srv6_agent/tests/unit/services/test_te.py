@@ -401,6 +401,9 @@ class TePluginTestCaseBase(test_plugin.PluginUnitTestCaseBase):
         # These cases pin full SIDs; microSID paths are in test_usid.py.
         self.plugin.encoding = 'encap'
         self.srv6_db.get_host_locators.return_value = dict(self.locators)
+        # a live agent on every registered host: one without is dead
+        self.core.get_agents.return_value = [
+            {'host': host, 'alive': True} for host in self.locators]
         self.srv6_db.get_function_id.return_value = 7
 
     def _paths(self, by_port=None, by_host=None, by_source=None):
@@ -912,10 +915,22 @@ class TestDeadWaypoint(TePluginTestCaseBase):
         self.core.get_agents.assert_called_once_with(
             self.ctx, filters={'agent_type': ['Open vSwitch agent']})
 
-    def test_a_host_with_no_agent_is_alive(self):
+    def test_a_host_with_a_locator_and_no_agent_is_dead(self):
+        # audit 2026-10-21, 5: node1 and node3 were removed, rows deleted
         self._agents('node2', hosts=('node2',))
-        self.assertEqual(frozenset({'node2'}),
+        self.assertEqual(frozenset({'node1', 'node2', 'node3'}),
                          self.plugin._dead_hosts(self.ctx))
+
+    def test_a_host_with_no_locator_and_no_agent_is_alive(self):
+        self._agents(hosts=('node1', 'node2'))     # node3: neither
+        self.srv6_db.get_host_locators.return_value = {
+            'node1': LOC1, 'node2': LOC2}
+        self.assertEqual(frozenset(), self.plugin._dead_hosts(self.ctx))
+
+    def test_an_unreadable_registry_leaves_every_host_alive(self):
+        self._agents(hosts=('node1',))
+        self.srv6_db.get_host_locators.side_effect = RuntimeError('db gone')
+        self.assertEqual(frozenset(), self.plugin._dead_hosts(self.ctx))
 
     def test_the_check_off_asks_nobody(self):
         self.config(group=config.SRV6_SERVER_GROUP, te_liveness_interval=0)

@@ -53,9 +53,6 @@ class CreateNetworkAssociation(command.ShowOne):
             'network',
             metavar='<network>',
             help=_("Network to attach (name or ID)"))
-        common.add_project_options(
-            parser, _("Owner's project (name or ID), admin only. The server "
-                      "always uses the domain's project"))
         return parser
 
     def take_action(self, parsed_args):
@@ -63,11 +60,9 @@ class CreateNetworkAssociation(command.ShowOne):
         domain = common.find_domain(client, parsed_args.domain)
         network = client.find_network(parsed_args.network,
                                       ignore_missing=False)
-        attrs = {'domain_id': domain.id, 'network_id': network.id}
-        project_id = common.project_id(self.app.client_manager, parsed_args)
-        if project_id is not None:
-            attrs['project_id'] = project_id
-        obj = client._create(resources.Srv6NetworkAssociation, **attrs)
+        # No --project: the server always uses the domain's project.
+        obj = client._create(resources.Srv6NetworkAssociation,
+                             domain_id=domain.id, network_id=network.id)
         return common.show_columns(obj, _column_map, hidden=_hidden)
 
 

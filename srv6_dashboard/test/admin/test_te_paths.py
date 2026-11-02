@@ -417,6 +417,7 @@ class TePathDetailTests(helpers.BaseAdminViewTests):
         res = self.client.get(self._url(path))
 
         self.assertContains(res, 'has no registered SRv6 locator')
+        self.assertContains(res, 'a waypoint is down')
 
     @test.create_mocks({srv6_api: ('te_path_get', 'domain_get')})
     def test_detail_of_a_source_path(self):

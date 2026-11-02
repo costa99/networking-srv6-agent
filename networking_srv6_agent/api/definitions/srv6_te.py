@@ -70,8 +70,10 @@ SEGMENTS = 'segments'
 ENCODED_SEGMENTS = 'encoded_segments'
 STATUS = 'status'
 
-# ACTIVE: every host on the path has a registered locator, so `segments` is
-# what the routes carry. DEGRADED: one does not (or the port is unbound), so
+# ACTIVE: every host on the path has a registered locator and every waypoint
+# is alive, so `segments` is what the routes carry. DEGRADED: one host has no
+# locator, a waypoint is dead (agent down or removed, silent fabric node), or
+# the port is unbound or on the source itself (plugin._resolve_te_path), so
 # the routes fall back to the direct path and `segments` is empty.
 STATUS_ACTIVE = 'ACTIVE'
 STATUS_DEGRADED = 'DEGRADED'

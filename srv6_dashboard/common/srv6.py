@@ -67,9 +67,11 @@ def via_hosts(hosts):
 
 
 #: Status as a Bootstrap label (services/plugin.py _resolve_te_path).
-#: DEGRADED: a via host or the destination has no registered locator, or
-#: the destination port is unbound, so segments is [] and the domain's
-#: routes go direct -- traffic flows, but not through the waypoints.
+#: DEGRADED: a via host, the destination or the source has no registered
+#: locator, a via host is dead (agent down or removed, silent fabric node),
+#: the destination port is unbound or on the source itself, so segments is
+#: [] and the domain's routes go direct -- traffic flows, but not through
+#: the waypoints.
 #: ACTIVE is the server's resolution, not an agent's acknowledgement.
 _STATUS_LABEL = {'ACTIVE': 'label-success', 'DEGRADED': 'label-warning'}
 

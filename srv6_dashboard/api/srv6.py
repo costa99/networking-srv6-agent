@@ -169,18 +169,6 @@ def network_association_list(request, domain_id, **filters):
             for a in assocs]
 
 
-def network_association_get(request, domain_id, assoc_id):
-    """GET /v2.0/srv6_domains/{id}/network_associations/{assoc_id}.
-
-    Policy get_srv6_domain_network_association.
-    """
-    LOG.debug("network_association_get(): domain_id=%s, assoc_id=%s",
-              domain_id, assoc_id)
-    assoc = networkclient(request)._get(
-        resources.Srv6NetworkAssociation, assoc_id, domain_id=domain_id)
-    return NetworkAssociation(_dict(assoc, domain_id=domain_id))
-
-
 def network_association_create(request, domain_id, **attrs):
     """POST /v2.0/srv6_domains/{id}/network_associations.
 
@@ -219,16 +207,6 @@ def locator_list(request, **filters):
     locators = networkclient(request)._list(resources.Srv6Locator,
                                             **filters)
     return [Locator(_dict(loc)) for loc in locators]
-
-
-def locator_get(request, host):
-    """GET /v2.0/srv6_locators/{host} -- policy get_srv6_locator (admin).
-
-    The host name is the locator's ID.
-    """
-    LOG.debug("locator_get(): host=%s", host)
-    locator = networkclient(request)._get(resources.Srv6Locator, host)
-    return Locator(_dict(locator))
 
 
 # --- link states (PLAN-LINK-STATE-TE) -------------------------------------

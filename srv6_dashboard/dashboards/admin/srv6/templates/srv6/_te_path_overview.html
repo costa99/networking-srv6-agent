@@ -26,9 +26,10 @@
       {% if path.status == 'DEGRADED' %}
       <p class="help-block">{% blocktrans trimmed %}
         A waypoint, the destination or the source has no registered SRv6
-        locator, the destination port is unbound, or it is now on the source
-        host itself. Until that is fixed the traffic this path selects goes
-        direct.
+        locator; a waypoint is down (its agent is down or was removed, or a
+        spine or leaf stopped reporting link state); the destination port is
+        unbound; or the port is now on the source host itself. Until that is
+        fixed the traffic this path selects goes direct.
       {% endblocktrans %}</p>
       {% endif %}
     </dd>

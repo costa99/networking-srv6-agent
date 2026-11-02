@@ -18,7 +18,6 @@ What the admin sees in addition: the owning project and the SID function,
 which only an admin receives from the API (get_srv6_domain:sid_function).
 """
 
-from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 from horizon import tables
 
@@ -69,9 +68,6 @@ class DomainsTable(tables.DataTable):
 
 class AssociateNetworkFromTab(project_assoc_tables.AssociateNetwork):
     url = URL_PREFIX + 'associate'
-
-    def get_link_url(self, datum=None):
-        return reverse(self.url, args=(self.table.kwargs['domain'].id,))
 
 
 class AssocNetworkColumn(project_assoc_tables.NetworkColumn):

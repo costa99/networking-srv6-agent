@@ -36,6 +36,8 @@
                     down: 'down', unknown: 'no fresh data'};
   var LINK_GAP = 7, REFRESH_MS = 5000;
   var W = 900, H = 520, CX = W / 2, CY = H / 2 - 10, RADIUS = 175;
+  /* the largest circle whose boxes and badges still fit the canvas */
+  var RADIUS_MAX = 215;
   var NODE_W = 170, NODE_H = 54, BADGE_R = 11, PATH_GAP = 9;
   var nodeW = NODE_W;   /* narrower when a tier row holds many nodes */
 
@@ -95,19 +97,29 @@
   }
 
   /* Host centres on a circle, the first at the top; one host sits in the
-     middle, two side by side. */
+     middle, two side by side. The circle grows until neighbouring boxes
+     no longer overlap, up to RADIUS_MAX; past that the boxes narrow. */
   function layout(hosts) {
     var pos = {};
-    nodeW = NODE_W;
     var n = hosts.length;
+    /* Neighbours' centres are r * chord apart; two boxes clear each other
+       when that is at least hypot(box width, box height). */
+    var chord = n > 2 ? 2 * Math.sin(Math.PI / n) : 2;
+    var r = Math.min(RADIUS_MAX,
+                     Math.max(RADIUS, Math.hypot(NODE_W + 4, NODE_H) / chord));
+    /* shortcut: from 21 hosts the boxes overlap again (40 px minimum);
+       use a topology_file (tier layout) for clouds that large. */
+    nodeW = Math.max(40, Math.min(
+      NODE_W, Math.sqrt(Math.max(0, Math.pow(r * chord, 2) -
+                                    NODE_H * NODE_H)) - 4));
     hosts.forEach(function (h, i) {
       if (n === 1) {
         pos[h.host] = {x: CX, y: CY};
       } else {
         var a = -Math.PI / 2 + 2 * Math.PI * i / n;
         if (n === 2) { a = Math.PI * i; }
-        pos[h.host] = {x: CX + RADIUS * Math.cos(a),
-                       y: CY + RADIUS * Math.sin(a)};
+        pos[h.host] = {x: CX + r * Math.cos(a),
+                       y: CY + r * Math.sin(a)};
       }
     });
     return pos;
@@ -133,7 +145,23 @@
     });
   }
 
-  function drawPath(path, k, count, pos) {
+  /* An unordered hop pair, the key paths sharing a hop are counted by. */
+  function pairKey(a, b) { return a < b ? a + '|' + b : b + '|' + a; }
+
+  /* For each hop pair, the indices of the paths that use it, in order. */
+  function pairSlots(paths) {
+    var slots = {};
+    paths.forEach(function (p, k) {
+      for (var i = 0; i + 1 < p.hops.length; i++) {
+        var s = slots[pairKey(p.hops[i], p.hops[i + 1])] =
+          slots[pairKey(p.hops[i], p.hops[i + 1])] || [];
+        if (s.indexOf(k) < 0) { s.push(k); }
+      }
+    });
+    return slots;
+  }
+
+  function drawPath(path, k, slots, pos) {
     var color = STATUS_COLOR[path.status] || '#777';
     var g = svgEl('g', {'class': 'srv6-te-path', style: 'cursor: pointer'},
                   svg);
@@ -143,10 +171,15 @@
     g.addEventListener('click', function () {
       window.location.href = path.url;
     });
-    var offset = (k - (count - 1) / 2) * PATH_GAP;
     for (var i = 0; i + 1 < path.hops.length; i++) {
-      var a = pos[path.hops[i]], b = pos[path.hops[i + 1]];
+      var ha = path.hops[i], hb = path.hops[i + 1];
+      var a = pos[ha], b = pos[hb];
       if (!a || !b || a === b) { continue; }
+      /* Side by side only with the paths on this same hop pair; the sign
+         keeps a path on its side whichever way it runs the pair. */
+      var s = slots[pairKey(ha, hb)];
+      var offset = (s.indexOf(k) - (s.length - 1) / 2) * PATH_GAP;
+      if (ha > hb) { offset = -offset; }
       var len = Math.hypot(b.x - a.x, b.y - a.y);
       var ox = -(b.y - a.y) / len * offset, oy = (b.x - a.x) / len * offset;
       var p1 = edgePoint({x: a.x + ox, y: a.y + oy},
@@ -324,7 +357,8 @@
     /* Links, then paths, then the hosts: boxes and labels stay readable. */
     data.links.forEach(function (l) { drawLink(l, pos); });
     var drawn = paths.filter(function (p) { return p.hops.length > 1; });
-    drawn.forEach(function (p, k) { drawPath(p, k, drawn.length, pos); });
+    var slots = pairSlots(drawn);
+    drawn.forEach(function (p, k) { drawPath(p, k, slots, pos); });
     data.hosts.forEach(function (h) { drawHost(h, pos, domains); });
     drawLegend(domains);
     fillPathTable(paths);

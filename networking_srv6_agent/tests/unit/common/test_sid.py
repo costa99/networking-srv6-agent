@@ -273,3 +273,36 @@ class TestPackNextCsid(base.BaseTestCase):
 
     def test_garbage_is_refused(self):
         self.assertRaises(sid.InvalidLocator, sid.pack_next_csid, ['nope'])
+
+
+class TestSharedPathRules(base.BaseTestCase):
+    """drop_leading and encode: the one copy server and agent both call."""
+
+    OWN = 'fc00:0:1::'
+
+    def test_only_leading_own_sids_are_dropped(self):
+        for transit, expected in (
+                (['fc00:0:1::', 'fc00:0:2::'], ['fc00:0:2::']),
+                (['fc00:0:1::', 'fc00:0:1::', 'fc00:0:2::'], ['fc00:0:2::']),
+                (['fc00:0:2::', 'fc00:0:1::'], ['fc00:0:2::', 'fc00:0:1::']),
+                (['fc00:0:1:0:0::', 'fc00:0:2::'], ['fc00:0:2::']),
+                ([], []), (None, [])):
+            self.assertEqual(expected, sid.drop_leading(transit, self.OWN))
+
+    def test_a_segment_that_is_no_address_stops_the_drop(self):
+        self.assertEqual(['bad', 'fc00:0:2::'],
+                         sid.drop_leading(['fc00:0:1::', 'bad', 'fc00:0:2::'],
+                                          self.OWN))
+
+    def test_full_sids_are_pushed_as_they_are(self):
+        segments = ['fc00:0:2::', 'fd00:0:5:e005::']
+        self.assertEqual(segments, sid.encode(segments, usid=False))
+
+    def test_usid_packs_one_block_into_one_container(self):
+        self.assertEqual(['fc00:0:2:5:e005::'],
+                         sid.encode(['fc00:0:2::', 'fc00:0:5:e005::'],
+                                    usid=True))
+
+    def test_usid_keeps_full_sids_it_cannot_pack(self):
+        for segments in (['fc00:0:2::', 'fd00:0:5:e005::'], ['nonsense']):
+            self.assertEqual(segments, sid.encode(segments, usid=True))
