@@ -112,6 +112,45 @@ srv6_server_opts = [
                "measurement. Each batch a fabric node posts deletes that "
                "node's measurements older than twice this window. Keep it "
                "at least as long as several fabric agent periods.")),
+    cfg.IntOpt(
+        'te_reopt_interval',
+        default=10,
+        min=0,
+        help=_("Seconds between passes of the TE re-optimisation, which "
+               "moves bandwidth reservations off congested links, as the "
+               "fabric nodes measure them (srv6_link_states). 0 turns it "
+               "off. Needs topology_file.")),
+    cfg.FloatOpt(
+        'te_reopt_high',
+        default=0.9,
+        help=_("A link whose measured load is above this share of its "
+               "reservable capacity (capacity x reservable_fraction) for "
+               "te_reopt_samples measurements in a row is congested.")),
+    cfg.FloatOpt(
+        'te_reopt_low',
+        default=0.7,
+        help=_("Moves off a congested link stop once its load, minus the "
+               "reservations moved, is at most this share of its "
+               "reservable capacity. Below te_reopt_high (hysteresis).")),
+    cfg.IntOpt(
+        'te_reopt_samples',
+        default=3,
+        min=1,
+        help=_("Measurements in a row above te_reopt_high that make a link "
+               "congested. They must all be newer than the last move off "
+               "the link, so a move is seen in the data before the next.")),
+    cfg.IntOpt(
+        'te_reopt_hold_down',
+        default=60,
+        min=0,
+        help=_("Seconds during which a reservation that was moved is not "
+               "moved again by the re-optimisation (a failure still moves "
+               "it).")),
+    cfg.IntOpt(
+        'te_reopt_max_moves',
+        default=2,
+        min=1,
+        help=_("Reservations moved per re-optimisation pass at most.")),
 ]
 
 srv6_agent_opts = [

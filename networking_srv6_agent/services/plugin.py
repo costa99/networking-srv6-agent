@@ -70,6 +70,7 @@ from networking_srv6_agent.extensions import srv6_te as te_ext
 from networking_srv6_agent.services import pce
 from networking_srv6_agent.services import rpc
 from networking_srv6_agent.services import te_liveness
+from networking_srv6_agent.services import te_reopt
 
 
 LOG = logging.getLogger(__name__)
@@ -144,6 +145,11 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         if not 0 < fraction <= 1:
             raise n_exc.InvalidConfigurationOption(
                 opt_name='[srv6] reservable_fraction', opt_value=fraction)
+        if not 0 < self.conf.te_reopt_low < self.conf.te_reopt_high:
+            raise n_exc.InvalidConfigurationOption(
+                opt_name='[srv6] te_reopt_low/te_reopt_high',
+                opt_value='%s/%s (need 0 < low < high)' % (
+                    self.conf.te_reopt_low, self.conf.te_reopt_high))
         # link_capacity: the file's Mbit/s, for the link-state view
         self.fabric_locators, self.capacity, self.link_capacity = {}, {}, {}
         if not self.conf.topology_file:
@@ -1204,34 +1210,80 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             return frozenset(), True
         return silent, False
 
-    def _dead_links(self, context, silent):
+    def _dead_links(self, context, silent, view=None):
         """The directed topology links down now.
 
         Reported down by a fresh end (or last seen down), or touching a
-        silent node (L8).
+        silent node (L8). view: a _link_state_view already read.
         """
-        return frozenset(
-            link for link, entry in self._link_state_view(context).items()
-            if entry['up'] is False or not silent.isdisjoint(link))
+        view = self._link_state_view(context) if view is None else view
+        return frozenset(link for link, entry in view.items()
+                         if entry['up'] is False or
+                         not silent.isdisjoint(link))
 
-    def _live_capacity(self, context):
+    def _live_capacity(self, context, view=None):
         """self.capacity without the links down now.
 
         All of it during an outage of the collection.
         """
         silent, outage = self._silent_fabric(context)
-        dead = frozenset() if outage else self._dead_links(context, silent)
+        dead = (frozenset() if outage else
+                self._dead_links(context, silent, view))
         return {link: mbps for link, mbps in self.capacity.items()
                 if link not in dead}
 
-    def _reroute_reservation(self, context, path_id, cap, delete=False):
+    def _measured_load(self, context, view=None):
+        """{(a, b): Mbit/s}: each fresh link's peak in link_state_window.
+
+        What the free capacity counts beside the books (L4): a link
+        holds max(reserved, measured), so idle reservations still count
+        and traffic without one counts too. A stale link is not here: it
+        falls back to the books only. view: a _link_state_view already
+        read.
+        """
+        view = self._link_state_view(context) if view is None else view
+        # whole Mbit/s, the unit of reservations and capacities: idle
+        # links' control chatter (~0.03) counts as 0, so equal paths still
+        # tie and the choice stays deterministic (found live, step 6)
+        return {link: round(entry['peak_mbps'])
+                for link, entry in view.items()
+                if not entry['stale'] and entry['peak_mbps'] is not None}
+
+    def _load_series(self, context):
+        """{(a, b): [(measured_at, mbps), ...]} oldest first, per link.
+
+        The same end as the view's mbps: the sender's (offered load) if
+        fresh, else the receiver's if fresh; a link with neither is not
+        here. What the re-optimisation judges congestion on.
+        """
+        fresh = timeutils.utcnow() - datetime.timedelta(
+            seconds=self.conf.link_state_stale_after)
+        hist = collections.defaultdict(list)
+        for r in link_state_db.get_link_states(context):   # oldest first
+            hist[(r['from_node'], r['to_node'], r['reporter'])].append(r)
+        series = {}
+        for a, b in self.capacity:
+            for end in (a, b):
+                h = hist.get((a, b, end))
+                if h and h[-1]['measured_at'] >= fresh:
+                    series[(a, b)] = [(r['measured_at'], r['mbps'])
+                                      for r in h]
+                    break
+        return series
+
+    def _reroute_reservation(self, context, path_id, cap, delete=False,
+                             measured=None):
         """Move one reservation, in place, onto a path with room in cap (G1).
 
         Under the admission lock, like an admission: the books of every
         OTHER reservation, a new path from the same source to the same
         reserved host for the same bandwidth, the hops replaced in the
-        row. The agents then swap the head-end route (ip route replace):
-        make-before-break, no window without a route. No path: the
+        row. measured ({link: Mbit/s}, re-optimisation): each link then
+        holds max(reserved, measured) (L4), the measured load minus this
+        reservation's own bandwidth on the links it crosses now (L10: its
+        traffic is still there, and would be counted twice). The agents
+        then swap the head-end route (ip route replace): make-before-
+        break, no window without a route. No path: the
         reservation is deleted if delete (a failure, L6), else left.
         Returns (the reservation before, the new node path or None);
         (None, None) if it is gone.
@@ -1243,9 +1295,17 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             if old is None:
                 return None, None
             end = old['reserved_host'] or old[te_def.DESTINATION_HOST]
-            path = pce.compute(cap, self._books(context, exclude=path_id),
-                               old[te_def.SOURCE_HOST], end,
-                               old[te_def.BANDWIDTH])
+            bw = old[te_def.BANDWIDTH]
+            used = self._books(context, exclude=path_id)
+            if measured:
+                # shortcut (L10 caveat): only the reserved part of the own
+                # traffic is subtracted; per-path counters would give it all
+                own = set(pce.links_of([old[te_def.SOURCE_HOST]] +
+                                       old[te_def.VIA_HOSTS] + [end]))
+                for link, mbps in measured.items():
+                    mine = bw if link in own else 0
+                    used[link] = max(used.get(link, 0), max(0, mbps - mine))
+            path = pce.compute(cap, used, old[te_def.SOURCE_HOST], end, bw)
             if path is not None:
                 te_db.update_te_path(context, path_id, None,
                                      {te_def.VIA_HOSTS: path[1:-1]})
@@ -1307,11 +1367,13 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
     def _compute_hops(self, context, body, source, host, port, via_hosts):
         """(via_hosts, reserved host) for a bandwidth reservation, or 400/409.
 
-        Online CSPF (services/pce.py) over the topology file, against what
-        every existing reservation already holds, in every domain: the
-        links are shared. The result pins every hop, leaves and spines
-        included, so the reservation sits on exactly the links the traffic
-        takes.
+        Online CSPF (services/pce.py) over the topology file minus the
+        links down now, against what each link holds: the larger of what
+        every existing reservation reserves on it, in every domain (the
+        links are shared), and its measured peak load when the link state
+        is fresh (PLAN-LINK-STATE-TE L4). The result pins every hop,
+        leaves and spines included, so the reservation sits on exactly
+        the links the traffic takes.
 
         The destination is a host, or the host a port is bound to now. The
         hops are computed for it, and it is stored as reserved_host. The
@@ -1343,9 +1405,10 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 raise te_ext.Srv6TePathInvalid(
                     reason=_("%s is not a node of the underlay topology")
                     % end)
-        used = self._books(context)
-        cap = self._live_capacity(context)
-        over = sorted('%s>%s' % link for link, mbps in used.items()
+        books = self._books(context)
+        view = self._link_state_view(context)
+        cap = self._live_capacity(context, view)
+        over = sorted('%s>%s' % link for link, mbps in books.items()
                       if mbps > self.capacity.get(link, mbps))
         if over:
             # reservable_fraction was lowered below what is already held
@@ -1354,6 +1417,17 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                         "requests there are refused until some are deleted",
                         {'f': self.conf.reservable_fraction,
                          'l': ', '.join(over)})
+        # L4: a link holds max(reserved, measured peak): an idle
+        # reservation still counts, traffic without one counts too
+        measured = self._measured_load(context, view)
+        used = {link: max(books.get(link, 0), measured.get(link, 0))
+                for link in set(books) | set(measured)}
+        stale = sorted('%s>%s' % link for link, entry in view.items()
+                       if entry['stale'] and entry['measured_at'])
+        if stale:
+            LOG.info("SRv6 TE: no fresh link state for %(l)s: admission "
+                     "counts only their reservations there", {
+                         'l': ', '.join(stale)})
         # The caller holds the admission lock (create_srv6_te_path).
         path = pce.compute(cap, used, source, destination, bandwidth)
         if path is None:
@@ -1668,23 +1742,33 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
     # agent -> server
     # ------------------------------------------------------------------
     def get_workers(self):
-        """The TE liveness monitor, one instance for the whole server.
+        """The TE liveness monitor and the TE re-optimisation, one each.
 
         Neutron starts every worker with worker_process_count 0 as a thread
         of one extra process, so a node that dies is noticed and pushed once,
-        not once per API worker. Nothing to start when the check is off.
+        and a congested link handled once, not once per API worker. Each
+        starts only when its interval is not 0; the re-optimisation also
+        needs a topology_file.
 
-        The first pass waits half of agent_down_time, like Neutron's own
-        agent status check: right after a server restart the agents have not
-        yet reported, and a late heartbeat must not read as a death.
+        The liveness monitor's first pass waits half of agent_down_time,
+        like Neutron's own agent status check: right after a server restart
+        the agents have not yet reported, and a late heartbeat must not read
+        as a death. The re-optimisation's first pass waits one interval.
         """
+        workers = []
         interval = self.conf.te_liveness_interval
-        if not interval:
-            return []
-        monitor = te_liveness.TeLivenessMonitor(self)
-        return [neutron_worker.PeriodicWorker(
-            monitor.check, interval, max(cfg.CONF.agent_down_time // 2, 1),
-            desc='srv6-te-liveness')]
+        if interval:
+            monitor = te_liveness.TeLivenessMonitor(self)
+            workers.append(neutron_worker.PeriodicWorker(
+                monitor.check, interval,
+                max(cfg.CONF.agent_down_time // 2, 1),
+                desc='srv6-te-liveness'))
+        interval = self.conf.te_reopt_interval
+        if interval and self.capacity:
+            reopt = te_reopt.TeReoptimiser(self)
+            workers.append(neutron_worker.PeriodicWorker(
+                reopt.check, interval, interval, desc='srv6-te-reopt'))
+        return workers
 
     def start_rpc_listeners(self):
         """Serve sync_state. Called by neutron's RPC worker at startup.
