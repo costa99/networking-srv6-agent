@@ -121,6 +121,38 @@ class Srv6LinkState(resource.Resource):
     stale = resource.Body('stale', type=bool)
 
 
+class Srv6AggregateLoad(resource.Resource):
+    """Admin-only. One entry per (link, SID, VM pair); the id is opaque."""
+
+    resource_key = 'srv6_aggregate_load'
+    resources_key = 'srv6_aggregate_loads'
+    base_path = '/srv6_aggregate_loads'
+
+    allow_fetch = True
+    allow_list = True
+
+    _query_mapping = resource.QueryParameters('from_node', 'to_node',
+                                              'domain_id')
+
+    id = resource.Body('id')
+    from_node = resource.Body('from_node')
+    to_node = resource.Body('to_node')
+    reporter = resource.Body('reporter')
+    sid = resource.Body('sid')
+    source_address = resource.Body('source_address')
+    destination_address = resource.Body('destination_address')
+    mbps = resource.Body('mbps')
+    peak_mbps = resource.Body('peak_mbps')
+    steered = resource.Body('steered', type=bool)
+    domain_id = resource.Body('domain_id')
+    source_port_id = resource.Body('source_port_id')
+    source_host = resource.Body('source_host')
+    destination_port_id = resource.Body('destination_port_id')
+    destination_host = resource.Body('destination_host')
+    measured_at = resource.Body('measured_at')
+    age = resource.Body('age', type=int)
+
+
 class Srv6TePath(resource.Resource):
     """Admin-only. Has no name, so it is found by ID only."""
 
@@ -138,7 +170,7 @@ class Srv6TePath(resource.Resource):
 
     _query_mapping = resource.QueryParameters(
         'domain_id', 'destination_host', 'destination_port_id', 'source_host',
-        'project_id')
+        'source_port_id', 'origin', 'project_id')
 
     id = resource.Body('id')
     project_id = resource.Body('project_id', alias='tenant_id')
@@ -150,6 +182,11 @@ class Srv6TePath(resource.Resource):
     #: The ingress node the path is limited to; None: every ingress.
     #: Create-only.
     source_host = resource.Body('source_host')
+    #: The one VM the path is limited to (its node follows the VM).
+    #: Create-only; excludes source_host.
+    source_port_id = resource.Body('source_port_id')
+    #: 'user', or 'auto' for a path the server made (U-f). Read-only.
+    origin = resource.Body('origin')
     #: Traversal order. An update replaces the whole list.
     via_hosts = resource.Body('via_hosts', type=list)
     # Mbit/s reserved on every link; the server then computes via_hosts.

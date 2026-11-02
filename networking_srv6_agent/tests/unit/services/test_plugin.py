@@ -470,6 +470,8 @@ class PluginUnitTestCaseBase(base.BaseTestCase):
         self.core.get_agents.return_value = []
         self.te_db.get_te_paths_for_domain.return_value = {'by_port': {},
                                                            'by_host': {}}
+        self.te_db.delete_auto_paths_of_port.return_value = []
+        self.te_db.get_domain_ids_for_source_port.return_value = []
         self.plugin = plugin.Srv6Plugin()
         self.agent_rpc = self.plugin.agent_rpc
         self.ctx = mock.Mock(is_admin=False, project_id='p1')

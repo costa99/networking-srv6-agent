@@ -39,8 +39,18 @@ dropped, never queued: a late measurement is worth nothing. Only changes
 of the push state are logged, so a dead API does not flood the journal.
 Without --neutron-url, one JSON line per period on stdout (debugging).
 
+With --aggregates (PLAN-UNRESERVED-STEERING) the node also counts, per link
+it sends on, the SRv6 traffic of every VM pair: an nft table of its own
+(installed at start, needs CAP_NET_ADMIN) keys dynamic sets on (out
+interface, outer destination SID, inner source, inner destination). nft's
+transport-header offset lands on the inner header, past the outer IPv6
+header and any SRH. Every period the agent reads the counters, keeps the
+TOP_K largest pairs per link at FLOOR_MBPS or more, and POSTs them to
+srv6_aggregate_loads, a second batch next to the link states.
+
 Usage: srv6-fabric-agent.py --links FILE [--period 5] [--count N]
                             [--neutron-url URL --credentials FILE]
+                            [--aggregates]
        srv6-fabric-agent.py test          (self-check, no system access)
 
 The link map has one line per neighbour: <interface> <this node>
@@ -54,8 +64,10 @@ Standard library only.
 """
 import argparse
 import calendar
+import ipaddress
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -63,6 +75,47 @@ import urllib.error
 import urllib.request
 
 API_PATH = '/v2.0/srv6_link_states'
+AGGREGATE_PATH = '/v2.0/srv6_aggregate_loads'
+# VM pairs reported per link and period, and the smallest rate reported
+# (decision A8: a development constant, not an option; the server accepts
+# up to 64 per link).
+TOP_K = 16
+FLOOR_MBPS = 1.0
+NFT_TABLE = 'srv6_agg'
+# The inner-family test and the counter update sit in different rules (a
+# jump): nft 1.0.9 cannot print a rule holding both (payload.c assertion),
+# which would break `nft list ruleset` on the node (GATE A, D3). An element
+# idle for 60 s leaves its set; the agent reads every period.
+NFT_SCRIPT = """table inet %(t)s
+delete table inet %(t)s
+table inet %(t)s {
+    set v4 {
+        typeof oifname . ip6 daddr . @th,96,32 . @th,128,32
+        flags dynamic, timeout
+        timeout 60s
+        size 16384
+        counter
+    }
+    set v6 {
+        typeof oifname . ip6 daddr . @th,64,128 . @th,192,128
+        flags dynamic, timeout
+        timeout 60s
+        size 16384
+        counter
+    }
+    chain inner4 {
+        update @v4 { oifname . ip6 daddr . @th,96,32 . @th,128,32 }
+    }
+    chain inner6 {
+        update @v6 { oifname . ip6 daddr . @th,64,128 . @th,192,128 }
+    }
+    chain count {
+        type filter hook forward priority 0; policy accept;
+        meta nfproto ipv6 meta l4proto 4 jump inner4
+        meta nfproto ipv6 meta l4proto 41 jump inner6
+    }
+}
+""" % {'t': NFT_TABLE}
 
 
 def load_links(path):
@@ -140,6 +193,80 @@ def api_items(rep):
              'drops': x['drops']} for x in rep['links']]
 
 
+def parse_pair_set(text, version):
+    """`nft -j list set` -> {(oif, sid, src, dst): bytes}.
+
+    nft prints a 32-bit inner field as a number and a 128-bit one as a
+    "0x..." string; both become the address text.
+    """
+    make = ipaddress.IPv4Address if version == 4 else ipaddress.IPv6Address
+    out = {}
+    for obj in json.loads(text).get('nftables', []):
+        for e in obj.get('set', {}).get('elem', []):
+            e = e.get('elem', {})
+            oif, sid, src, dst = e['val']['concat']
+            src, dst = (make(int(v, 0) if isinstance(v, str) else v)
+                        for v in (src, dst))
+            out[(oif, sid, str(src), str(dst))] = e['counter']['bytes']
+    return out
+
+
+def pair_rates(prev, cur, elapsed):
+    """{key: Mbit/s} over one period, from two reads of the pair counters.
+
+    A key absent before is new since the last read: its whole counter is
+    this period's (an element is created by its first packet). A counter
+    that went backwards was dropped (60 s idle) and re-created: what it
+    holds now is this period's. prev None is the first read: a baseline
+    only, its counters hold history of unknown length.
+    """
+    if prev is None:
+        return {}
+    out = {}
+    for key, b in cur.items():
+        a = prev.get(key)
+        d = b - a if a is not None and b >= a else b
+        out[key] = d * 8 / elapsed / 1e6
+    return out
+
+
+def aggregate_items(node, links, rates, top_k=TOP_K, floor=FLOOR_MBPS):
+    """srv6_aggregate_loads batch items: the top_k pairs per link >= floor.
+
+    Interfaces that are not in the link map (management) are ignored.
+    """
+    peer = {iface: nb for iface, _me, nb in links}
+    by_link = {}
+    for (oif, sid, src, dst), mbps in rates.items():
+        if oif in peer and mbps >= floor:
+            by_link.setdefault(oif, []).append((mbps, sid, src, dst))
+    items = []
+    for oif in sorted(by_link):
+        for mbps, sid, src, dst in sorted(by_link[oif], reverse=True)[:top_k]:
+            items.append({'reporter': node, 'from_node': node,
+                          'to_node': peer[oif], 'sid': sid,
+                          'source_address': src, 'destination_address': dst,
+                          'mbps': round(mbps, 3)})
+    return items
+
+
+def nft_install():
+    """Replace this agent's nft table, atomically (one nft transaction)."""
+    subprocess.run(['nft', '-f', '-'], input=NFT_SCRIPT, text=True,
+                   check=True, capture_output=True, timeout=10)
+
+
+def nft_read():
+    """Both pair sets' counters, as one dict."""
+    out = {}
+    for name, version in (('v4', 4), ('v6', 6)):
+        r = subprocess.run(['nft', '-j', 'list', 'set', 'inet', NFT_TABLE,
+                            name], check=True, capture_output=True,
+                           text=True, timeout=10)
+        out.update(parse_pair_set(r.stdout, version))
+    return out
+
+
 def load_credentials(path):
     """{OS_*: value} from an openrc-style file: KEY=VALUE, export, quotes."""
     env = {}
@@ -165,7 +292,8 @@ class Neutron:
     """
 
     def __init__(self, url, creds):
-        self.url = url.rstrip('/') + API_PATH
+        self.base = url.rstrip('/')
+        self.url = self.base + API_PATH
         self.creds = creds
         self.token, self.expires = None, 0.0
 
@@ -192,13 +320,13 @@ class Neutron:
         self.expires = calendar.timegm(
             time.strptime(exp[:19], '%Y-%m-%dT%H:%M:%S'))
 
-    def post(self, items):
+    def post(self, items, path=API_PATH, key='srv6_link_states'):
         """POST one batch; raises on failure (the caller logs, drops it)."""
         for attempt in (1, 2):
             if not self.token or time.time() > self.expires - 300:
                 self._auth()
             req = urllib.request.Request(
-                self.url, json.dumps({'srv6_link_states': items}).encode(),
+                self.base + path, json.dumps({key: items}).encode(),
                 {'Content-Type': 'application/json',
                  'X-Auth-Token': self.token})
             try:
@@ -216,9 +344,36 @@ def read_dev():
         return parse_dev(f.read())
 
 
-def run(links, period, count, neutron=None):
+class Pusher:
+    """The log of one kind of push: only its changes of state.
+
+    'pushing to', then 'push failed ...' once, so a dead API does not
+    flood the journal.
+    """
+
+    def __init__(self, what):
+        self.what, self.failing = what, None
+
+    def ok(self, url):
+        if self.failing is not False:
+            print('pushing %s to %s' % (self.what, url), file=sys.stderr,
+                  flush=True)
+        self.failing = False
+
+    def failed(self, e):
+        if self.failing is not True:
+            print('%s push failed, dropping reports until it works: %s'
+                  % (self.what, e), file=sys.stderr, flush=True)
+        self.failing = True
+
+
+def run(links, period, count, neutron=None, aggregates=False):
     node = links[0][1]
-    failing = None                      # push state: None = not tried yet
+    links_push, pairs_push = Pusher('link states'), Pusher('VM-pair loads')
+    pairs_prev = None
+    if aggregates:
+        nft_install()                   # fails the start: systemd restarts
+        pairs_prev = nft_read()         # a baseline only
     prev, t_prev = read_dev(), time.monotonic()
     deadline = t_prev + period
     n = 0
@@ -231,21 +386,34 @@ def run(links, period, count, neutron=None):
         cur, now = read_dev(), time.monotonic()
         states = {iface: operstate(iface) for iface, _, _ in links}
         rep = report(node, links, prev, cur, states, now - t_prev)
+        pairs = []
+        if aggregates:
+            try:
+                pairs_cur = nft_read()
+                pairs = aggregate_items(node, links, pair_rates(
+                    pairs_prev, pairs_cur, now - t_prev))
+                pairs_prev = pairs_cur
+            except Exception as e:      # the table gone, nft failing
+                pairs_push.failed(e)
+                pairs_prev = None       # next good read is a new baseline
         if neutron is None:
+            if aggregates:
+                rep['pairs'] = pairs
             sys.stdout.write(json.dumps(rep, separators=(',', ':')) + '\n')
             sys.stdout.flush()
         else:
             try:
                 neutron.post(api_items(rep))
-                if failing is not False:
-                    print('pushing to %s' % neutron.url, file=sys.stderr,
-                          flush=True)
-                failing = False
+                links_push.ok(neutron.url)
             except Exception as e:      # any failure: log once, drop, go on
-                if failing is not True:
-                    print('push failed, dropping reports until it works: %s'
-                          % e, file=sys.stderr, flush=True)
-                failing = True
+                links_push.failed(e)
+            if pairs:                   # nothing above the floor: no POST
+                try:
+                    neutron.post(pairs, AGGREGATE_PATH,
+                                 'srv6_aggregate_loads')
+                    pairs_push.ok(neutron.base + AGGREGATE_PATH)
+                except Exception as e:
+                    pairs_push.failed(e)
         prev, t_prev = cur, now
         n += 1
 
@@ -298,6 +466,50 @@ def selftest():
                  'OS_PASSWORD': 'p=w', 'OS_PROJECT_NAME': 'admin'}, c
     assert (Neutron('http://ctl/networking/', c).url ==
             'http://ctl/networking/v2.0/srv6_link_states')
+    # --- VM-pair loads (PLAN-UNRESERVED-STEERING) -----------------------
+    # the JSON of nft 1.0.9 (GATE A): 32-bit fields as numbers, 128-bit
+    # ones as hex strings
+    v4 = json.dumps({'nftables': [{'metainfo': {}}, {'set': {'elem': [
+        {'elem': {'val': {'concat': ['s2', 'fc00:0:4:e300::', 173736203,
+                                     173736462]},
+                  'counter': {'packets': 9615, 'bytes': 13153320}}}]}}]})
+    v6 = json.dumps({'nftables': [{'set': {'elem': [
+        {'elem': {'val': {'concat': [
+            'OVS3', 'fc00:0:3:e300::', '0x20010db8006600000000000000000001',
+            '0x20010db8007700000000000000000001']},
+            'counter': {'packets': 5, 'bytes': 920}}}]}}]})
+    a4, a6 = parse_pair_set(v4, 4), parse_pair_set(v6, 6)
+    k4 = ('s2', 'fc00:0:4:e300::', '10.91.1.11', '10.91.2.14')
+    k6 = ('OVS3', 'fc00:0:3:e300::', '2001:db8:66::1', '2001:db8:77::1')
+    assert a4 == {k4: 13153320} and a6 == {k6: 920}, (a4, a6)
+    assert parse_pair_set('{"nftables": [{"set": {}}]}', 4) == {}
+    # rates: the first read is a baseline; growth; a reset; a new key
+    assert pair_rates(None, a4, 5.0) == {}
+    k_new = ('s1', 'fc00:0:3:e300::', '10.91.1.11', '10.91.2.13')
+    r = pair_rates({k4: 1000, k6: 5000}, {k4: 1000 + 12500000, k6: 2500,
+                                         k_new: 625000}, 5.0)
+    assert r == {k4: 20.0, k6: 0.004, k_new: 1.0}, r
+    # items: top K per link above the floor; interfaces off the map ignored
+    links2 = [('s1', 'l1', 's1'), ('s2', 'l1', 's2'),
+              ('OVS1', 'l1', 'ubuntu-ovs1')]
+    rates = {('s2', 'sid', '10.0.0.%d' % i, '10.0.1.1'): float(i)
+             for i in range(1, 21)}
+    rates.update({('s1', 'sid', '10.0.0.1', '10.0.1.1'): 0.5,
+                  ('enp1s0', 'sid', '10.0.0.1', '10.0.1.1'): 99.0})
+    items = aggregate_items('l1', links2, rates)
+    assert len(items) == TOP_K and {x['to_node'] for x in items} == {'s2'}
+    assert items[0] == {'reporter': 'l1', 'from_node': 'l1', 'to_node': 's2',
+                        'sid': 'sid', 'source_address': '10.0.0.20',
+                        'destination_address': '10.0.1.1', 'mbps': 20.0}
+    assert min(x['mbps'] for x in items) == 5.0
+    assert aggregate_items('l1', links2, rates, top_k=2, floor=19.5) == \
+        items[:1]
+    # the table: jump chains, never an @th update next to l4proto
+    for line in NFT_SCRIPT.splitlines():
+        assert not ('l4proto' in line and '@th' in line), line
+    assert NFT_SCRIPT.startswith('table inet %s\ndelete table' % NFT_TABLE)
+    assert (Neutron('http://ctl/networking', c).base + AGGREGATE_PATH ==
+            'http://ctl/networking/v2.0/srv6_aggregate_loads')
     print('srv6-fabric-agent self-test ok')
 
 
@@ -315,6 +527,9 @@ def main():
                     help='Neutron endpoint, e.g. http://ctl/networking')
     ap.add_argument('--credentials',
                     help='openrc-style file with the OS_* credentials')
+    ap.add_argument('--aggregates', action='store_true',
+                    help='also count and post per-VM-pair loads (nft; '
+                         'needs CAP_NET_ADMIN)')
     a = ap.parse_args()
     if bool(a.neutron_url) != bool(a.credentials):
         sys.exit('--neutron-url and --credentials go together')
@@ -324,7 +539,7 @@ def main():
                  'period > 0')
     run(links, a.period, a.count,
         Neutron(a.neutron_url, load_credentials(a.credentials))
-        if a.neutron_url else None)
+        if a.neutron_url else None, a.aggregates)
 
 
 if __name__ == '__main__':

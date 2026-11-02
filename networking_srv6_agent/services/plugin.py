@@ -54,19 +54,25 @@ from oslo_utils import timeutils
 
 from networking_srv6_agent._i18n import _
 from networking_srv6_agent.api.definitions import srv6 as srv6_def
+from networking_srv6_agent.api.definitions import srv6_aggregate_loads \
+    as ag_def
 from networking_srv6_agent.api.definitions import srv6_link_states as ls_def
 from networking_srv6_agent.api.definitions import srv6_locators as loc_def
 from networking_srv6_agent.api.definitions import srv6_te as te_def
 from networking_srv6_agent.common import config
 from networking_srv6_agent.common import constants
 from networking_srv6_agent.common import sid
+from networking_srv6_agent.db import aggregate_load_db
 from networking_srv6_agent.db import domain_db
 from networking_srv6_agent.db import link_state_db
 from networking_srv6_agent.db import srv6_db
 from networking_srv6_agent.db import te_db
 from networking_srv6_agent.extensions import srv6 as srv6_ext
+from networking_srv6_agent.extensions import srv6_aggregate_loads as \
+    ag_ext
 from networking_srv6_agent.extensions import srv6_link_states as ls_ext
 from networking_srv6_agent.extensions import srv6_te as te_ext
+from networking_srv6_agent.services import aggregates
 from networking_srv6_agent.services import pce
 from networking_srv6_agent.services import rpc
 from networking_srv6_agent.services import te_liveness
@@ -78,6 +84,11 @@ LOG = logging.getLogger(__name__)
 
 def _prefix_for(address):
     return '%s/%d' % (address, 128 if ':' in address else 32)
+
+
+# Seconds by which a VM-pair row may precede its reporter's newest link-state
+# row and still belong to the same report (_aggregate_view).
+AGGREGATE_HEARTBEAT_SLACK = 2
 
 
 def _route_for(port, address, host):
@@ -110,10 +121,11 @@ def _only(res, fields):
 class Srv6Plugin(srv6_ext.Srv6PluginBase):
 
     supported_extension_aliases = [srv6_def.ALIAS, loc_def.ALIAS,
-                                   te_def.ALIAS, ls_def.ALIAS]
+                                   te_def.ALIAS, ls_def.ALIAS, ag_def.ALIAS]
     # A POST of a list reaches create_<resource>_bulk in one call, so a
     # link-state batch is stored in one transaction. Only srv6_link_states
-    # allows bulk at all (its get_resources); the others refuse a list.
+    # and srv6_aggregate_loads allow bulk at all (their get_resources); the
+    # others refuse a list.
     __native_bulk_support = True
 
     def __init__(self):
@@ -124,6 +136,11 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         self._pool_synced = False
         # (reporter, link) already warned about by _add_link_states
         self._unknown_links = set()
+        # (reporter, link) already warned about by _add_aggregate_loads
+        self._unknown_aggregate_links = set()
+        # port id -> the domains of its source-VM paths, between the
+        # BEFORE_DELETE and AFTER_DELETE of that port
+        self._deleting_source_ports = {}
         self.encoding = self.conf.dataplane_encoding
         self._validate_function_id_ranges()
         self._load_topology()
@@ -811,6 +828,130 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             raise ls_ext.Srv6LinkStateNotFound(id=id)
         return _only(entry, fields)
 
+    # ------------------------------------------------------------------
+    # measured load per VM pair and link (PLAN-UNRESERVED-STEERING)
+    # ------------------------------------------------------------------
+    def create_srv6_aggregate_load_bulk(self, context, srv6_aggregate_loads):
+        return self._add_aggregate_loads(
+            context, [item[ag_def.RESOURCE_NAME] for item in
+                      srv6_aggregate_loads[ag_def.COLLECTION_NAME]])
+
+    def create_srv6_aggregate_load(self, context, srv6_aggregate_load):
+        return self._add_aggregate_loads(
+            context, [srv6_aggregate_load[ag_def.RESOURCE_NAME]])[0]
+
+    def _add_aggregate_loads(self, context, items):
+        """Validate and store one batch of VM-pair loads, whole or not at all.
+
+        aggregates.check_batch says what is refused. Items on a link the
+        topology file does not have are skipped with one WARNING per
+        reporter and link, as for link states; a batch with no known link
+        is refused. Stamped with the server's clock; the batch deletes its
+        reporter's rows older than two link_state_window.
+        """
+        if not self.capacity:
+            raise ag_ext.Srv6AggregateLoadInvalid(
+                reason=_("aggregate loads need an underlay topology "
+                         "([srv6] topology_file)"))
+        try:
+            rows, unknown = aggregates.check_batch(items, self.capacity)
+        except aggregates.Invalid as e:
+            raise ag_ext.Srv6AggregateLoadInvalid(reason=str(e))
+        for link in unknown:
+            reporter = link[0]
+            if (reporter, link) not in self._unknown_aggregate_links:
+                self._unknown_aggregate_links.add((reporter, link))
+                LOG.warning("SRv6 aggregate load: %(r)s reports %(l)s, "
+                            "which is not a link of the underlay topology "
+                            "(%(f)s); ignoring it, storing the rest",
+                            {'r': reporter, 'l': '%s>%s' % link,
+                             'f': self.conf.topology_file})
+        if not rows:
+            raise ag_ext.Srv6AggregateLoadInvalid(
+                reason=_("%s: not a link of the underlay topology") %
+                ', '.join(sorted({'%s>%s' % link for link in unknown})))
+        # whole seconds, as _add_link_states (MySQL rounds the fraction)
+        now = timeutils.utcnow().replace(microsecond=0)
+        aggregate_load_db.add_aggregate_loads(
+            context, rows, now, now - datetime.timedelta(
+                seconds=2 * self.conf.link_state_window))
+        return [dict(r, id=aggregates.entry_id(r),
+                     measured_at=now.isoformat()) for r in rows]
+
+    def _domain_addresses(self, admin_context, domain):
+        """{address: (port id, host)} of a domain's bound workload ports.
+
+        The same ports _routes_for_domain advertises (_port_is_relevant),
+        whatever the host's locator: the measurement already shows where
+        the traffic is.
+        """
+        network_ids = domain.get(srv6_def.NETWORKS) or []
+        if not network_ids:
+            return {}
+        out = {}
+        for port in self._core_plugin().get_ports(
+                admin_context, filters={'network_id': list(network_ids)}):
+            host = port.get(portbindings.HOST_ID) or port.get('host')
+            if not host or not self._port_is_relevant(port):
+                continue
+            for fixed_ip in port.get('fixed_ips', []):
+                address = fixed_ip.get('ip_address')
+                if address:
+                    out[str(ipaddress.ip_address(address))] = (port['id'],
+                                                               host)
+        return out
+
+    def _aggregate_view(self, context):
+        """[entry] of every VM pair measured on a link and still fresh.
+
+        Fresh = within link_state_stale_after, the link states' rule; the
+        peak is over link_state_window. The domain, ports and hosts are
+        resolved now, from today's ports: a pair whose VM has gone keeps
+        its rate with null ports.
+        """
+        now = timeutils.utcnow()
+        fresh = now - datetime.timedelta(
+            seconds=self.conf.link_state_stale_after)
+        start = now - datetime.timedelta(seconds=self.conf.link_state_window)
+        rows = aggregate_load_db.get_aggregate_loads(context,
+                                                     min(fresh, start))
+        if not rows:
+            return []
+        admin_context = context.elevated()
+        domains = []
+        for domain in domain_db.get_domains(admin_context):
+            function_id = srv6_db.get_function_id(admin_context,
+                                                  domain['id'])
+            if function_id is not None:
+                domains.append((domain, function_id))
+        resolve = aggregates.Resolver(
+            domains, srv6_db.get_host_locators(admin_context), self.usid,
+            lambda domain: self._domain_addresses(admin_context, domain))
+        # The link-state batch every agent posts each period is the
+        # heartbeat: a pair row older than its reporter's last one has left
+        # the link. AGGREGATE_HEARTBEAT_SLACK: both POSTs of one period are
+        # stamped in whole seconds, the pairs' just after the links'.
+        current = {reporter: seen - datetime.timedelta(
+            seconds=AGGREGATE_HEARTBEAT_SLACK) for reporter, seen in
+            link_state_db.get_last_seen(context).items()}
+        return aggregates.view(rows, now, fresh, start, resolve, current)
+
+    def get_srv6_aggregate_loads(self, context, filters=None, fields=None,
+                                 sorts=None, limit=None, marker=None,
+                                 page_reverse=False):
+        filters = filters or {}
+        return [_only(entry, fields)
+                for entry in self._aggregate_view(context)
+                if all(entry[k] in filters[k]
+                       for k in ('id', 'from_node', 'to_node', 'domain_id')
+                       if filters.get(k))]
+
+    def get_srv6_aggregate_load(self, context, id, fields=None):
+        for entry in self._aggregate_view(context):
+            if entry['id'] == id:
+                return _only(entry, fields)
+        raise ag_ext.Srv6AggregateLoadNotFound(id=id)
+
     def _check_capabilities(self, host, capabilities):
         """Name a node that cannot honour dataplane_encoding. Logs only.
 
@@ -1025,9 +1166,11 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         paths = te_db.get_te_paths_for_domain(admin_context, domain_id)
         by_port, by_host = paths['by_port'], paths['by_host']
         by_source = paths.get('by_source') or {}
+        by_source_port = paths.get('by_source_port') or {}
         # by_source too: a domain whose only paths name a source must not
         # leave here unsteered.
-        if not by_port and not by_host and not by_source:
+        if not by_port and not by_host and not by_source and \
+                not by_source_port:
             return routes
         if dead_hosts is None:
             dead_hosts = self._dead_hosts(admin_context)
@@ -1048,7 +1191,55 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                     per_source[source] = transit
             if per_source:
                 route['segments_by_source'] = per_source
+        if by_source_port:
+            self._attach_source_port_segments(
+                admin_context, domain_id, routes, by_source_port, locators,
+                dead_hosts)
         return routes
+
+    def _attach_source_port_segments(self, admin_context, domain_id, routes,
+                                     by_source_port, locators, dead_hosts):
+        """Give each route its source-VM paths. Mutates `routes`.
+
+        route['segments_by_source_port'] = {source port id: {
+            'host': the node it is bound to (the only agent that acts),
+            'network_id': its network (whose gateway port the rule names),
+            'prefixes': its fixed IPs, as /32 or /128 (the rule's `from`),
+            'segments': transit SIDs; [] is "direct for this VM"}}
+
+        Ranks within a source VM: its path to the route's port > its path
+        to the route's host (_route_transit). A source VM that is unbound,
+        gone, or on a node without a locator gets no entry: its traffic
+        follows the other ranks. Nor does a route toward the VM's own node,
+        whose traffic is never encapsulated there.
+        """
+        vms = {}
+        for port_id in sorted(by_source_port):
+            try:
+                port = self._core_plugin().get_port(admin_context, port_id)
+            except n_exc.PortNotFound:
+                continue
+            host = port.get(portbindings.HOST_ID)
+            if not host or not locators.get(host):
+                continue
+            vms[port_id] = {
+                'host': host, 'network_id': port.get('network_id'),
+                'prefixes': [_prefix_for(f['ip_address'])
+                             for f in port.get('fixed_ips') or []
+                             if f.get('ip_address')]}
+        for route in routes:
+            per_vm = {}
+            for port_id, vm in vms.items():
+                if vm['host'] == route.get('host'):
+                    continue
+                maps = by_source_port[port_id]
+                transit = self._route_transit(
+                    domain_id, route, maps['by_port'], maps['by_host'],
+                    locators, source=vm['host'], dead_hosts=dead_hosts)
+                if transit is not None:
+                    per_vm[port_id] = dict(vm, segments=transit)
+            if per_vm:
+                route['segments_by_source_port'] = per_vm
 
     def _destination_of(self, admin_context, path):
         """The compute host a path's traffic is headed for, or None."""
@@ -1089,11 +1280,19 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         """
         path = dict(path)
         source = path.get(te_def.SOURCE_HOST)
+        source_port_id = path.get(te_def.SOURCE_PORT_ID)
+        if source_port_id:
+            # the node the VM is bound to now: the path follows it
+            source = self._destination_of(
+                context.elevated(),
+                {te_def.DESTINATION_PORT_ID: source_port_id})
         destination = self._destination_of(context.elevated(), path)
         transit = self._transit_sids(path[te_def.VIA_HOSTS], locators,
                                      dead_hosts)
         active = bool(destination and locators.get(destination) and
                       transit is not None and function_id is not None)
+        if active and source_port_id and not source:
+            active = False                  # the source VM is unbound
         if active and source:
             active = bool(locators.get(source)) and destination != source
         if active:
@@ -1140,13 +1339,19 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 reason=_("via_hosts %s have no registered SRv6 locator (see "
                          "GET /v2.0/srv6_locators)") % ', '.join(unknown))
 
-    def _validate_destination_port(self, admin_context, domain, port_id):
-        """The port, if it may be a destination of this domain; else 400."""
+    def _validate_destination_port(self, admin_context, domain, port_id,
+                                   role=te_def.DESTINATION_PORT_ID):
+        """The port, if it may be a `role` of this domain's paths; else 400.
+
+        role: the attribute that named it, for the message
+        (destination_port_id or source_port_id).
+        """
         try:
             port = self._core_plugin().get_port(admin_context, port_id)
         except n_exc.PortNotFound:
             raise te_ext.Srv6TePathInvalid(
-                reason=_("destination_port_id %s does not exist") % port_id)
+                reason=_("%(r)s %(p)s does not exist")
+                % {'r': role, 'p': port_id})
         if port['network_id'] not in (domain.get(srv6_def.NETWORKS) or []):
             raise te_ext.Srv6TePathInvalid(
                 reason=_("port %(p)s is on network %(n)s, which is not "
@@ -1154,6 +1359,39 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 % {'p': port_id, 'n': port['network_id'],
                    'd': domain['id']})
         return port
+
+    def _validate_source_port(self, admin_context, domain, body, locators,
+                              host, port):
+        """A 400 for a source VM that could never steer anything.
+
+        One VM of the domain, bound to an SRv6 node (whose agent installs
+        the rule), not the destination itself, nor on the destination's
+        node. It replaces source_host (its node is its binding, which
+        follows the VM) and cannot reserve: reservations start at a node
+        (PLAN-UNRESERVED-STEERING step 4).
+        """
+        source_port_id = body[te_def.SOURCE_PORT_ID]
+        if body.get(te_def.SOURCE_HOST):
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("source_port_id and source_host exclude each other: "
+                         "a source VM's node is where it is bound"))
+        if body.get(te_def.BANDWIDTH) is not None:
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("bandwidth reservations start at a source_host; a "
+                         "path from one VM does not reserve"))
+        if source_port_id == (port or {}).get('id'):
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("port %s cannot be its own destination")
+                % source_port_id)
+        source_port = self._validate_destination_port(
+            admin_context, domain, source_port_id, te_def.SOURCE_PORT_ID)
+        bound = source_port.get(portbindings.HOST_ID)
+        if not bound:
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("source_port_id %s is not bound to a node")
+                % source_port_id)
+        self._validate_source_host(bound, locators, host, port)
+        return source_port
 
     @staticmethod
     def _validate_source_host(source, locators, host, port):
@@ -1324,6 +1562,50 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         self._push_domain_by_id(context, old['domain_id'])
         return old, path
 
+    def _place_auto_path(self, context, pair, node_path, existing=None):
+        """Create, or move, the server's own path for one VM pair (U-f).
+
+        Under the admission lock, like an admission or a reservation's move,
+        so it never interleaves with them. pair: one aggregate-view entry
+        (domain_id, source_port_id, destination_port_id); node_path: the
+        full computed path [source host, ..., destination host], every hop
+        pinned, the leaf included, so the head-end's own ECMP cannot undo
+        the choice. existing: the pair's auto path, moved in place
+        (make-before-break: the head-end replaces the routes of its steer
+        table). Returns the path, or None if a concurrent change created
+        the same one first.
+        """
+        via_hosts = node_path[1:-1]
+        try:
+            with db_api.CONTEXT_WRITER.using(context):
+                domain_db.lock_all_domains(context)
+                if existing:
+                    path = te_db.update_te_path(
+                        context, existing['id'], {te_def.VIA_HOSTS: via_hosts})
+                else:
+                    domain = domain_db.get_domain(context, pair['domain_id'])
+                    if domain is None:
+                        return None
+                    path = te_db.create_te_path(context, pair['domain_id'], {
+                        'project_id': domain['project_id'],
+                        te_def.DESTINATION_PORT_ID:
+                            pair['destination_port_id'],
+                        te_def.SOURCE_PORT_ID: pair['source_port_id'],
+                        te_def.VIA_HOSTS: via_hosts,
+                        te_def.ORIGIN: te_def.ORIGIN_AUTO})
+        except (db_exc.DBDuplicateEntry, db_exc.DBReferenceError):
+            return None                     # raced, or a port just went
+        if path is not None:
+            self._push_domain_by_id(context, pair['domain_id'])
+        return path
+
+    def _release_auto_path(self, context, path):
+        """Delete one auto path: its pair's traffic goes back to ECMP."""
+        gone = te_db.delete_te_path(context, path['id'])
+        if gone is not None:
+            self._push_domain_by_id(context, gone['domain_id'])
+        return gone
+
     def _reroute_failed_reservations(self, context):
         """Move every reservation off the links and nodes that are down.
 
@@ -1480,6 +1762,10 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         source = body.get(te_def.SOURCE_HOST) or None
         if source:
             self._validate_source_host(source, locators, host, port)
+        source_port_id = body.get(te_def.SOURCE_PORT_ID)
+        if source_port_id:
+            self._validate_source_port(admin_context, domain, body, locators,
+                                       host, port)
         # via == destination is accepted on purpose: a harmless detour, and
         # on two nodes the only depth-2 SRH there is (TE-DEPTH2).
         via_hosts = body.get(te_def.VIA_HOSTS) or []
@@ -1488,6 +1774,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         selector = ('port %s' % port_id) if port_id else ('host %s' % host)
         if source:
             selector += ' from %s' % source
+        if source_port_id:
+            selector += ' from port %s' % source_port_id
         try:
             with db_api.CONTEXT_WRITER.using(context):
                 if body.get(te_def.BANDWIDTH) is not None:
@@ -1506,15 +1794,17 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 # belongs with the domain it steers.
                 body = dict(body, project_id=domain['project_id'],
                             via_hosts=via_hosts, source_host=source,
-                            reserved_host=reserved)
+                            reserved_host=reserved,
+                            origin=te_def.ORIGIN_USER)
                 path = te_db.create_te_path(context, domain_id, body)
         except db_exc.DBDuplicateEntry:
             raise te_ext.Srv6TePathExists(domain_id=domain_id,
                                           selector=selector)
         except db_exc.DBReferenceError:
-            # The port went between the check and the insert.
+            # A port went between the check and the insert.
             raise te_ext.Srv6TePathInvalid(
-                reason=_("destination_port_id %s does not exist") % port_id)
+                reason=_("port %s does not exist")
+                % ' or '.join(p for p in (port_id, source_port_id) if p))
         LOG.info("SRv6 TE path %(id)s created in domain %(d)s: %(s)s via "
                  "%(v)s", {'id': path['id'], 'd': domain_id, 's': selector,
                            'v': via_hosts})
@@ -1558,6 +1848,13 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             self._validate_via_hosts(body[te_def.VIA_HOSTS],
                                      {**self.fabric_locators, **locators})
             old = te_db.get_te_path(context, id)
+            if old and old.get(te_def.ORIGIN) == te_def.ORIGIN_AUTO:
+                # The re-optimisation computed it and moves it; a hand edit
+                # would be undone or fought. Delete it to go back to ECMP.
+                raise te_ext.Srv6TePathInvalid(
+                    reason=_("via_hosts of a path the server created "
+                             "(origin auto) are computed; delete it to send "
+                             "its traffic back to the default routes"))
             if old and old.get(te_def.BANDWIDTH) is not None:
                 # The reservation is accounted on the computed hops: other
                 # hops would hold capacity on links the traffic avoids.
@@ -1690,6 +1987,39 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                          'old': path['reserved_host'], 'new': host})
         return gone
 
+    def _source_vm_moved(self, context, port):
+        """A VM changed node: end its auto paths, re-push its source paths.
+
+        Auto paths from or to it were computed for the old nodes, so they
+        are deleted (A10); the next re-optimisation pass judges the pair
+        where it is now. A user's source-VM path follows the VM, but its
+        rule must leave the old node and appear on the new one: every
+        domain with a source-VM path of this port is pushed in full. Never
+        raises into the port update.
+        """
+        try:
+            gone = te_db.delete_auto_paths_of_port(context, port['id'])
+            domains = ({p['domain_id'] for p in gone} |
+                       set(te_db.get_domain_ids_for_source_port(
+                           context, port['id'])))
+        except Exception:
+            LOG.exception("SRv6 TE: could not update the paths of port %s "
+                          "after it moved", port['id'])
+            return
+        for path in gone:
+            LOG.warning("SRv6 TE: automatic path %(id)s (port %(s)s to %(d)s) "
+                        "deleted: port %(p)s moved to %(h)s",
+                        {'id': path['id'], 's': path[te_def.SOURCE_PORT_ID],
+                         'd': path[te_def.DESTINATION_PORT_ID],
+                         'p': port['id'],
+                         'h': port.get(portbindings.HOST_ID)})
+        for domain_id in sorted(domains):
+            try:
+                self._push_domain_by_id(context, domain_id)
+            except Exception:
+                LOG.exception("SRv6: could not push domain %s after port %s "
+                              "moved", domain_id, port['id'])
+
     def _release_stale_reservations(self, context):
         """Release reservations whose port moved without our noticing.
 
@@ -1732,6 +2062,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             # Before any route is pushed: the new host's route must not be
             # built from hops that lead to the old one.
             self._release_moved_reservations(context.elevated(), port)
+            self._source_vm_moved(context.elevated(), port)
         try:
             was_active = original.get('status') == n_const.PORT_STATUS_ACTIVE
             is_active = port.get('status') == n_const.PORT_STATUS_ACTIVE
@@ -1754,6 +2085,23 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             LOG.exception("SRv6: failed to process port update for %s",
                           port.get('id'))
 
+    @registry.receives(resources.PORT, [events.BEFORE_DELETE])
+    def registry_port_deleting(self, resource, event, trigger, payload=None):
+        """Remember the domains a VM's source-VM paths are in.
+
+        The paths go with the port (ON DELETE CASCADE), so after the delete
+        nothing says which domains still carry its rule; the AFTER_DELETE
+        handler pushes these. Never raises: it must not block a delete.
+        """
+        try:
+            domains = te_db.get_domain_ids_for_source_port(
+                payload.context.elevated(), payload.resource_id)
+            if domains:
+                self._deleting_source_ports[payload.resource_id] = domains
+        except Exception:
+            LOG.exception("SRv6: could not read the source-VM paths of "
+                          "port %s before its delete", payload.resource_id)
+
     @registry.receives(resources.PORT, [events.AFTER_DELETE])
     def registry_port_deleted(self, resource, event, trigger, payload=None):
         context = payload.context
@@ -1763,6 +2111,13 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         except Exception:
             LOG.exception("SRv6: failed to process port delete for %s",
                           port.get('id'))
+        for domain_id in self._deleting_source_ports.pop(port.get('id'), []):
+            try:
+                self._push_domain_by_id(context.elevated(), domain_id)
+            except Exception:
+                LOG.exception("SRv6: could not push domain %s after its "
+                              "source VM %s was deleted", domain_id,
+                              port.get('id'))
 
     # ------------------------------------------------------------------
     # agent -> server

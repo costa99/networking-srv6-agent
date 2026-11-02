@@ -119,6 +119,41 @@ def compute(cap, used, src, dst, bw):
     return None
 
 
+def shortest_links(cap, src, dst):
+    """Every directed link of every shortest (fewest-hop) path src -> dst.
+
+    What default routing may use: the underlay's ECMP spreads traffic over
+    all of them, and which one a pair takes can change (a flow label, the
+    head-end's route cache: TECH-DOC-NOTES N7). The U-f release judges the
+    room on all of them (worst case). Empty if dst is unreachable.
+    """
+    adj, pred = collections.defaultdict(list), collections.defaultdict(list)
+    for a, b in cap:
+        adj[a].append(b)
+        pred[b].append(a)
+    dist = {src: 0}
+    queue = collections.deque([src])
+    while queue:
+        node = queue.popleft()
+        for nxt in adj[node]:
+            if nxt not in dist:
+                dist[nxt] = dist[node] + 1
+                queue.append(nxt)
+    if dst not in dist or src == dst:
+        return set()
+    # back from dst, along links that lose exactly one hop each
+    links, frontier = set(), {dst}
+    while frontier:
+        step = set()
+        for b in frontier:
+            for a in pred[b]:
+                if dist.get(a) == dist[b] - 1:
+                    links.add((a, b))
+                    step.add(a)
+        frontier = step - {src}
+    return links
+
+
 def reserved(paths):
     """{(a, b): Mbit/s} reserved by [(node path, Mbit/s)]."""
     used = collections.Counter()

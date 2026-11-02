@@ -23,6 +23,7 @@ metadata -- a drift the sync test would report and nobody would expect.
 from neutron.db.migration.models import head
 
 # pylint: disable=unused-import
+from networking_srv6_agent.db import aggregate_load_db  # noqa: F401
 from networking_srv6_agent.db import domain_db  # noqa: F401
 from networking_srv6_agent.db import link_state_db  # noqa: F401
 from networking_srv6_agent.db import srv6_db  # noqa: F401

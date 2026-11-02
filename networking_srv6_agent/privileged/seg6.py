@@ -490,6 +490,75 @@ def delete_sid_rule(vrf_name, sid_address):
         raise
 
 
+def _steer_rule_args(verb, prefix, iif, table, family_v6):
+    return (['-6'] if family_v6 else []) + [
+        'rule', verb, 'pref', str(constants.STEER_RULE_PRIORITY),
+        'from', prefix, 'iif', iif, 'lookup', str(table)]
+
+
+def add_steer_rule(prefix, iif, table, family_v6=False):
+    """Send one VM address's traffic to its steer table.
+
+        ip [-6] rule add pref 900 from <prefix> iif <gateway port> \
+            lookup <table>
+
+    An existing rule ("File exists") counts as success, as for SID rules.
+    """
+    try:
+        return ip_route_cmd(_steer_rule_args('add', prefix, iif, table,
+                                             family_v6))
+    except processutils.ProcessExecutionError as e:
+        if 'File exists' in str(e):
+            return None
+        raise
+
+
+def delete_steer_rule(prefix, iif, table, family_v6=False):
+    """Remove one steer rule, tolerating its absence."""
+    try:
+        return ip_route_cmd(_steer_rule_args('del', prefix, iif, table,
+                                             family_v6))
+    except processutils.ProcessExecutionError as e:
+        if ('No such file' in str(e) or 'No such process' in str(e) or
+                'Cannot find' in str(e)):
+            return None
+        raise
+
+
+def list_steer_rules():
+    """[(prefix, iif, table, family_v6), ...] of every steer rule.
+
+    Parses `ip rule show` and `ip -6 rule show`, whose lines look like
+        900:	from 10.91.1.11 iif svp-58112-3 lookup 75536
+        900:	from fd00::9 iif svp-58112-3 [detached] lookup 75536
+    (a host prefix prints without its length; `[detached]` once the port is
+    gone). Only rules at STEER_RULE_PRIORITY whose iif carries this
+    package's gateway-port prefix count: nothing else is ours. Raises on
+    failure: callers reconcile from this.
+    """
+    rules = []
+    for family_v6 in (False, True):
+        out = ip_route_cmd((['-6'] if family_v6 else []) + ['rule', 'show'])
+        for line in out.splitlines():
+            fields = line.split()
+            if not fields or \
+                    fields[0] != '%d:' % constants.STEER_RULE_PRIORITY:
+                continue
+            if 'from' not in fields or 'iif' not in fields or \
+                    fields[-2] != 'lookup':
+                continue
+            iif = fields[fields.index('iif') + 1]
+            if not iif.startswith(constants.GW_PORT_PREFIX):
+                continue
+            try:
+                table = int(fields[-1])
+            except ValueError:
+                continue
+            rules.append((fields[fields.index('from') + 1], iif, table,
+                          family_v6))
+    return rules
+
+
 def list_sid_rules():
     """[(vrf_name, sid), ...] for every SID rule this package installed.
 

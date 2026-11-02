@@ -81,6 +81,18 @@ class SRv6TePath(model_base.BASEV2, model_base.HasId):
     # symbolic here, resolved against the locator registry on every use.
     source_host = sa.Column(sa.String(255), nullable=False, default='',
                             server_default='')
+    # One source VM: the path holds only for that port's traffic, at the
+    # node it is bound to (PLAN-UNRESERVED-STEERING). CASCADE as for the
+    # destination port. source_port_key mirrors it as '' or the id, for the
+    # unique constraints, where NULLs would be distinct (as source_host).
+    source_port_id = sa.Column(sa.String(36),
+                               sa.ForeignKey('ports.id', ondelete='CASCADE'),
+                               nullable=True)
+    source_port_key = sa.Column(sa.String(36), nullable=False, default='',
+                                server_default='')
+    # 'user', or 'auto' for a path the server made itself (U-f)
+    origin = sa.Column(sa.String(16), nullable=False, default='user',
+                       server_default='user')
     # Mbit/s reserved on every link of the path; NULL for an operator-chosen
     # path. When set, the plugin computed via_hosts itself (services/pce.py)
     # and the hops pin every link, so the reservation is exact.
@@ -107,13 +119,14 @@ class SRv6TePath(model_base.BASEV2, model_base.HasId):
         # rows on purpose: precedence chooses between them per ingress.
         # NULLs are distinct in a unique constraint, so host paths and port
         # paths do not collide on their unset destination column.
+        # The source VM is part of the key too (e5a7c1b94d36): two VMs of
+        # one host may each have a path to one destination.
         sa.UniqueConstraint(
-            'domain_id', 'destination_host', 'source_host',
-            name='uniq_srv6_te_paths0domain_id0destination_host0source_host'),
+            'domain_id', 'destination_host', 'source_host', 'source_port_key',
+            name='uniq_srv6_te_paths0dst_host0src'),
         sa.UniqueConstraint(
             'domain_id', 'destination_port_id', 'source_host',
-            name=('uniq_srv6_te_paths0domain_id0destination_port_id0'
-                  'source_host')),
+            'source_port_key', name='uniq_srv6_te_paths0dst_port0src'),
         model_base.BASEV2.__table_args__,
     )
 
@@ -154,6 +167,8 @@ def _make_te_path_dict(path_db, fields=None):
         'destination_port_id': path_db.destination_port_id,
         # The '' sentinel is a storage detail: the API says None.
         'source_host': path_db.source_host or None,
+        'source_port_id': path_db.source_port_id,
+        'origin': path_db.origin,
         'via_hosts': [hop.via_host for hop in path_db.hops],
         'bandwidth': path_db.bandwidth,
         'segments': [],
@@ -208,6 +223,9 @@ def create_te_path(context, domain_id, te_path):
         # Set explicitly, not left to the column default: the dict below
         # reads it, and an unset attribute would be expired and re-read.
         source_host=te_path.get('source_host') or '',
+        source_port_id=te_path.get('source_port_id'),
+        source_port_key=te_path.get('source_port_id') or '',
+        origin=te_path.get('origin') or 'user',
         bandwidth=te_path.get('bandwidth'),
         reserved_host=te_path.get('reserved_host'))
     context.session.add(path_db)
@@ -229,7 +247,7 @@ def get_te_path(context, path_id):
 # what is stored, and neutron passes an empty filter value through only
 # with its empty-string-filtering extension (loaded by ML2).
 _FILTERS = ('id', 'domain_id', 'destination_host', 'destination_port_id',
-            'source_host', 'project_id')
+            'source_host', 'source_port_id', 'origin', 'project_id')
 
 
 def _filtered(query, filters):
@@ -283,6 +301,32 @@ def delete_te_path(context, path_id):
     res = _make_te_path_dict(path_db)
     context.session.delete(path_db)
     return res
+
+
+@db_api.CONTEXT_WRITER
+def delete_auto_paths_of_port(context, port_id):
+    """Delete the server's own paths from or to port_id; return them.
+
+    An auto path was computed for the hosts its two VMs were on; once
+    either moves it leads nowhere useful, and the next re-optimisation pass
+    judges the pair where it is now (PLAN-UNRESERVED-STEERING A10).
+    """
+    gone = []
+    for path_db in context.session.query(SRv6TePath).filter(
+            SRv6TePath.origin == 'auto',
+            sa.or_(SRv6TePath.source_port_id == port_id,
+                   SRv6TePath.destination_port_id == port_id)).all():
+        gone.append(_make_te_path_dict(path_db))
+        context.session.delete(path_db)
+    return gone
+
+
+@db_api.CONTEXT_READER
+def get_domain_ids_for_source_port(context, port_id):
+    """The domains with a path limited to port_id as its source VM."""
+    return sorted({d for (d,) in context.session.query(
+        SRv6TePath.domain_id).filter(
+            SRv6TePath.source_port_id == port_id).all()})
 
 
 @db_api.CONTEXT_WRITER
@@ -341,10 +385,13 @@ def get_te_paths_for_domain(context, domain_id):
 
         {'by_port': {port_id: [via_host, ...]},
          'by_host': {destination_host: [via_host, ...]},
-         'by_source': {source_host: {'by_port': {...}, 'by_host': {...}}}}
+         'by_source': {source_host: {'by_port': {...}, 'by_host': {...}}},
+         'by_source_port': {source_port_id: {'by_port': {...},
+                                             'by_host': {...}}}}
 
     by_port and by_host hold the any-source paths, by_source the paths
-    limited to one ingress node, under that node. One query per payload
+    limited to one ingress node, under that node, by_source_port the paths
+    limited to one source VM, under its port. One query per payload
     build, rather than one per route: a domain with 200 ports would
     otherwise issue 200 identical lookups. The maps are kept apart because
     precedence ((port, source) > (host, source) > port > host) is decided
@@ -354,12 +401,16 @@ def get_te_paths_for_domain(context, domain_id):
     maps would overwrite (or be overwritten by) the any-source path to the
     same destination, depending only on row order.
     """
-    res = {'by_port': {}, 'by_host': {}, 'by_source': {}}
+    res = {'by_port': {}, 'by_host': {}, 'by_source': {},
+           'by_source_port': {}}
     for path_db in context.session.query(SRv6TePath).filter_by(
             domain_id=domain_id).all():
         via_hosts = [hop.via_host for hop in path_db.hops]
         maps = res
-        if path_db.source_host:
+        if path_db.source_port_id:
+            maps = res['by_source_port'].setdefault(
+                path_db.source_port_id, {'by_port': {}, 'by_host': {}})
+        elif path_db.source_host:
             maps = res['by_source'].setdefault(
                 path_db.source_host, {'by_port': {}, 'by_host': {}})
         if path_db.destination_port_id:

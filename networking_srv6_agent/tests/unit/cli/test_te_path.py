@@ -63,6 +63,18 @@ class TestCreateTePath(_Base):
         self.cmd = te_path.CreateTePath(self.app, None)
         self.network._create.return_value = _path()
 
+    def test_source_port_is_sent_as_its_id(self):
+        self.run_cmd(self.cmd, ['--domain', 'red', '--destination-port',
+                                'vm-port', '--source-port', 'vm-port'])
+        self.network._create.assert_called_once_with(
+            TE, domain_id=base.DOMAIN_ID, destination_port_id=base.PORT_ID,
+            source_port_id=base.PORT_ID)
+
+    def test_source_port_and_source_host_exclude_each_other(self):
+        self.assertParserFails(self.cmd, [
+            '--domain', 'red', '--destination-host', 'node2',
+            '--source-host', 'node1', '--source-port', 'vm-port'])
+
     def test_port_selector_keeps_via_order(self):
         result = self.run_cmd(self.cmd, [
             '--domain', 'red', '--destination-port', 'vm-port',
@@ -78,6 +90,8 @@ class TestCreateTePath(_Base):
             'Destination Host': None,
             'Destination Port': base.PORT_ID,
             'Source Host': te_path.SourceHostColumn(None),
+            'Source Port': None,
+            'Origin': None,
             'Via Hosts': common.PathColumn(['node2']),
             'Bandwidth (Mbit/s)': None,
             'Status': 'ACTIVE',

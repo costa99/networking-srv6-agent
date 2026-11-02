@@ -463,6 +463,23 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                 LOG.exception("SRv6: reconciling the gateway ports of "
                               "domain %s", domain_id)
 
+    def _gateway_ports(self, payload, vlans=None):
+        """{network_id: its gateway port's name} for the networks here.
+
+        A source VM's steer rule matches on the gateway port its traffic
+        enters the VRF through (PLAN-UNRESERVED-STEERING step 5). vlans: the
+        local VLANs _apply_domain already looked up; otherwise looked up.
+        """
+        out = {}
+        for network in payload.get('networks') or []:
+            network_id = network['network_id']
+            vlan = (vlans or {}).get(network_id) if vlans is not None else \
+                self._local_vlan_for(network_id)
+            if vlan is not None:
+                out[network_id] = sid.gateway_port_name(
+                    payload['function_id'], vlan)
+        return out
+
     @staticmethod
     def _network_mtus(payload):
         """network_id -> MTU, for the per-route check."""
@@ -530,9 +547,10 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             self.dataplane.ensure_gateway_port(
                 domain_id, network_id, local_vlan,
                 network.get('subnets') or [], mtu=network.get('mtu'))
-        self.dataplane.sync_routes(domain_id, payload.get('routes') or [],
-                                   self.locators, self.host,
-                                   mtus=self._network_mtus(payload))
+        self.dataplane.sync_routes(
+            domain_id, payload.get('routes') or [], self.locators, self.host,
+            mtus=self._network_mtus(payload),
+            gateway_ports=self._gateway_ports(payload, vlans))
         self.domains[domain_id] = payload
         return encoding_changed
 
@@ -599,9 +617,11 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                 if add:
                     # The MTUs come from the cached domain payload: an
                     # incremental message carries routes, not networks.
+                    payload = self.domains[domain_id]
                     self.dataplane.add_routes(
                         domain_id, add, self.locators, self.host,
-                        mtus=self._network_mtus(self.domains[domain_id]))
+                        mtus=self._network_mtus(payload),
+                        gateway_ports=self._gateway_ports(payload))
             except Exception:
                 LOG.exception("SRv6: failed to apply routes_updated for %s",
                               domain_id)

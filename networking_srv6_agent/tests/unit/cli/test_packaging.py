@@ -63,7 +63,7 @@ class TestEntryPoints(testtools.TestCase):
 
     def test_every_command_resolves(self):
         commands = self.entry_points['openstack.srv6.v2']
-        self.assertEqual(17, len(commands))
+        self.assertEqual(18, len(commands))
         for name, target in commands.items():
             self.assertTrue(name.startswith('srv6_'), name)
             module, attr = target.split(':')
@@ -84,7 +84,8 @@ class TestNoServerImports(testtools.TestCase):
                    'networking_srv6_agent.cli.v2.network_association',
                    'networking_srv6_agent.cli.v2.locator',
                    'networking_srv6_agent.cli.v2.te_path',
-                   'networking_srv6_agent.cli.v2.link_state']
+                   'networking_srv6_agent.cli.v2.link_state',
+                   'networking_srv6_agent.cli.v2.aggregate_load']
         code = ('import sys\n'
                 'for m in %r: __import__(m)\n'
                 'print(sorted(m for m in sys.modules\n'

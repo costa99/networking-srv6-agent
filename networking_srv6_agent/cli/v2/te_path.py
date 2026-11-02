@@ -19,6 +19,9 @@ and the host names are checked by the server, not here.
 
 --source-host limits a path to the traffic entering the domain at one node;
 such a path outranks every path without one (FEATURE-TE-SOURCE-HOST).
+--source-port limits it to one VM's traffic, at whatever node the VM is
+bound to; such a path outranks every other (PLAN-UNRESERVED-STEERING).
+Origin "auto" marks a path the server created to steer a heavy VM pair.
 """
 
 from cliff import columns as cliff_columns
@@ -36,9 +39,11 @@ _attr_map = (
     ('destination_host', 'Destination Host', column_util.LIST_BOTH),
     ('destination_port_id', 'Destination Port', column_util.LIST_BOTH),
     ('source_host', 'Source Host', column_util.LIST_BOTH),
+    ('source_port_id', 'Source Port', column_util.LIST_LONG_ONLY),
     ('via_hosts', 'Via Hosts', column_util.LIST_BOTH),
     ('bandwidth', 'Bandwidth (Mbit/s)', column_util.LIST_BOTH),
     ('status', 'Status', column_util.LIST_BOTH),
+    ('origin', 'Origin', column_util.LIST_LONG_ONLY),
     ('segments', 'Segments', column_util.LIST_LONG_ONLY),
     ('encoded_segments', 'Encoded Segments', column_util.LIST_LONG_ONLY),
     ('project_id', 'Project', column_util.LIST_LONG_ONLY),
@@ -109,12 +114,19 @@ class CreateTePath(command.ShowOne):
             metavar='<port>',
             help=_("Steer only the traffic toward this port's fixed IPs "
                    "(name or ID)"))
-        parser.add_argument(
+        source = parser.add_mutually_exclusive_group()
+        source.add_argument(
             '--source-host',
             metavar='<host>',
             help=_("Steer only the traffic that enters the domain at this "
                    "host (the ingress node). Such a path outranks every path "
                    "without a source. Default: every ingress"))
+        source.add_argument(
+            '--source-port',
+            metavar='<port>',
+            help=_("Steer only the traffic of this VM port (name or ID), at "
+                   "the node it is bound to. Such a path outranks every "
+                   "other"))
         _add_via_host_argument(
             parser, _("Waypoint host, in traversal order (repeat option "
                       "for more hosts). Without it the path is direct"))
@@ -143,6 +155,9 @@ class CreateTePath(command.ShowOne):
         # Only send a source if the user gave one: None is "any ingress".
         if parsed_args.source_host is not None:
             attrs['source_host'] = parsed_args.source_host
+        if parsed_args.source_port is not None:
+            attrs['source_port_id'] = client.find_port(
+                parsed_args.source_port, ignore_missing=False).id
         # Only send waypoints if the user gave some.
         if parsed_args.via_hosts is not None:
             attrs['via_hosts'] = parsed_args.via_hosts

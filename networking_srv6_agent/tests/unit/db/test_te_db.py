@@ -347,19 +347,21 @@ class TestPayloadHelpers(Srv6TeDbTestCase):
         self.assertEqual(
             {'by_port': {port_id: ['cn5']},
              'by_host': {'cn3': ['cn2'], 'cn4': ['cn2', 'cn5']},
-             'by_source': {}},
+             'by_source': {}, 'by_source_port': {}},
             te_db.get_te_paths_for_domain(self.ctx, self.domain_id))
 
     def test_paths_for_domain_is_empty_without_policy(self):
         self.assertEqual(
-            {'by_port': {}, 'by_host': {}, 'by_source': {}},
+            {'by_port': {}, 'by_host': {}, 'by_source': {},
+             'by_source_port': {}},
             te_db.get_te_paths_for_domain(self.ctx, self.domain_id))
 
     def test_paths_for_domain_is_scoped_to_the_domain(self):
         other_domain = self._create_domain()
         self._create_path(destination_host='cn3', domain_id=other_domain)
         self.assertEqual(
-            {'by_port': {}, 'by_host': {}, 'by_source': {}},
+            {'by_port': {}, 'by_host': {}, 'by_source': {},
+             'by_source_port': {}},
             te_db.get_te_paths_for_domain(self.ctx, self.domain_id))
 
     def test_an_explicitly_direct_path_is_still_listed(self):
@@ -445,7 +447,8 @@ class TestSourceSelector(Srv6TeDbTestCase):
              'by_source': {
                  'cn1': {'by_port': {port_id: []},
                          'by_host': {'cn3': ['cn5']}},
-                 'cn5': {'by_port': {}, 'by_host': {'cn4': ['cn2']}}}},
+                 'cn5': {'by_port': {}, 'by_host': {'cn4': ['cn2']}}},
+             'by_source_port': {}},
             te_db.get_te_paths_for_domain(self.ctx, self.domain_id))
 
     def test_paths_for_domain_does_not_depend_on_row_order(self):
@@ -525,3 +528,86 @@ class TestBandwidth(Srv6TeDbTestCase):
         # a row from before reserved_host existed: all were to a host
         old_row = dict(port_path, destination_host='ml6', reserved_host=None)
         self.assertEqual('ml6', te_db.reservation_hops(old_row)[-1])
+
+
+class TestSourcePort(Srv6TeDbTestCase):
+    """Paths limited to one source VM (PLAN-UNRESERVED-STEERING step 4)."""
+
+    def _vm_path(self, source_port_id, destination_port_id=None,
+                 destination_host=None, origin=None, via_hosts=None):
+        return te_db.create_te_path(
+            self.ctx, self.domain_id,
+            {'project_id': 'test-project',
+             'destination_host': destination_host,
+             'destination_port_id': destination_port_id,
+             'source_port_id': source_port_id, 'origin': origin,
+             'via_hosts': via_hosts if via_hosts is not None else ['cn2']})
+
+    def test_shown_with_its_source_port_and_origin(self):
+        vm, dst = self._create_port(), self._create_port()
+        path = self._vm_path(vm, dst)
+        self.assertEqual((vm, None, 'user'),
+                         (path['source_port_id'], path['source_host'],
+                          path['origin']))
+        auto = self._vm_path(vm, destination_host='cn3', origin='auto')
+        self.assertEqual('auto', te_db.get_te_path(self.ctx,
+                                                   auto['id'])['origin'])
+
+    def test_filed_under_its_source_port(self):
+        vm, dst = self._create_port(), self._create_port()
+        self._create_port_path(dst, via_hosts=['cn5'])
+        self._vm_path(vm, dst, via_hosts=['cn4'])
+        self._vm_path(vm, destination_host='cn3', via_hosts=[])
+        self.assertEqual(
+            {'by_port': {dst: ['cn5']}, 'by_host': {}, 'by_source': {},
+             'by_source_port': {vm: {'by_port': {dst: ['cn4']},
+                                     'by_host': {'cn3': []}}}},
+            te_db.get_te_paths_for_domain(self.ctx, self.domain_id))
+
+    def test_two_vms_to_one_destination_next_to_an_any_source_path(self):
+        a, b, dst = (self._create_port() for _ in range(3))
+        self._create_port_path(dst)
+        self._vm_path(a, dst)
+        self._vm_path(b, dst)
+        self._create_path(destination_host='cn3')
+        self._vm_path(a, destination_host='cn3')
+
+    def test_one_vm_twice_to_one_destination_is_refused(self):
+        vm, dst = self._create_port(), self._create_port()
+        self._vm_path(vm, dst)
+        self.assertRaises(db_exc.DBDuplicateEntry, self._vm_path, vm, dst)
+
+    def test_filters_by_origin_and_source_port(self):
+        vm, dst = self._create_port(), self._create_port()
+        self._create_path()
+        auto = self._vm_path(vm, dst, origin='auto')
+        for filters in ({'origin': ['auto']}, {'source_port_id': [vm]}):
+            self.assertEqual([auto['id']], [
+                p['id'] for p in te_db.get_all_te_paths(self.ctx, filters)])
+
+    def test_deleting_the_source_vm_deletes_its_paths(self):
+        vm, dst = self._create_port(), self._create_port()
+        path = self._vm_path(vm, dst)
+        with db_api.CONTEXT_WRITER.using(self.ctx):
+            self.ctx.session.query(models_v2.Port).filter_by(id=vm).delete()
+        self.assertIsNone(te_db.get_te_path(self.ctx, path['id']))
+
+    def test_delete_auto_paths_of_port_both_ends_auto_only(self):
+        vm, dst, other = (self._create_port() for _ in range(3))
+        user = self._vm_path(vm, dst)
+        from_vm = self._vm_path(vm, other, origin='auto')
+        to_vm = self._vm_path(other, vm, origin='auto')
+        gone = te_db.delete_auto_paths_of_port(self.ctx, vm)
+        self.assertEqual(sorted([from_vm['id'], to_vm['id']]),
+                         sorted(p['id'] for p in gone))
+        self.assertIsNotNone(te_db.get_te_path(self.ctx, user['id']))
+        self.assertIsNone(te_db.get_te_path(self.ctx, to_vm['id']))
+
+    def test_domain_ids_for_source_port(self):
+        vm, dst = self._create_port(), self._create_port()
+        self.assertEqual([], te_db.get_domain_ids_for_source_port(self.ctx,
+                                                                  vm))
+        self._vm_path(vm, dst)
+        self._vm_path(vm, destination_host='cn3')
+        self.assertEqual([self.domain_id],
+                         te_db.get_domain_ids_for_source_port(self.ctx, vm))

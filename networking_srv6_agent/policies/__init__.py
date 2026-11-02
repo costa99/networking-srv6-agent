@@ -24,6 +24,7 @@ and fails if an enforce_policy attribute has no rule here.
 import itertools
 
 from networking_srv6_agent.policies import network_association
+from networking_srv6_agent.policies import srv6_aggregate_load
 from networking_srv6_agent.policies import srv6_domain
 from networking_srv6_agent.policies import srv6_link_state
 from networking_srv6_agent.policies import srv6_locator
@@ -37,4 +38,5 @@ def list_rules():
         srv6_locator.list_rules(),
         srv6_te_path.list_rules(),
         srv6_link_state.list_rules(),
+        srv6_aggregate_load.list_rules(),
     )

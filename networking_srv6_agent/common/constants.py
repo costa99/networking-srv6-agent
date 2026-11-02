@@ -132,6 +132,19 @@ VRF_UNREACHABLE_METRIC = 4278198272
 # hop to the underlay however many hops away it is.
 SID_RULE_PRIORITY = 999
 
+# Steering by source VM (PLAN-UNRESERVED-STEERING step 5): one policy rule per
+# steered VM address, ahead of the l3mdev rule (1000) and of the SID rules:
+#     ip [-6] rule add pref 900 from <VM address> iif <gateway port> \
+#         lookup <steer table>
+# `iif <vrf>` does NOT match a VM's forwarded traffic; its network's gateway
+# port does (GATE A, D1), and that port belongs to one VRF. The steer table
+# holds only that VM's steered destinations: anything else misses there and
+# falls through to the l3mdev rule and the VRF's sealed table. Steer tables
+# sit above every VRF table (vrf_table_base + function id, at most 0xffff).
+STEER_RULE_PRIORITY = 900
+STEER_TABLE_OFFSET = 0x10000
+STEER_TABLE_SLOTS = 4096
+
 # Where the `local` FIB rule goes (F7). The kernel puts it at 0, ahead of
 # the l3mdev rule at 1000, so a lookup from inside a VRF found every host
 # address first: t9 saw a tenant ping the management address and deliver a

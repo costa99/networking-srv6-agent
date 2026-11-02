@@ -466,3 +466,52 @@ class TestProbeCapabilities(Seg6ArgvTestCase):
         self.ip_route_cmd.side_effect = RuntimeError('privsep died')
         self.assertRaises(RuntimeError, seg6.probe_capabilities)
         self.flush.assert_called_once()
+
+
+class TestSteerRules(Seg6ArgvTestCase):
+    """A source VM's rules into its steer table (PLAN-UNRESERVED-STEERING)."""
+
+    def test_add_v4(self):
+        seg6.add_steer_rule('10.91.1.11/32', 'svp-58112-3', 75536)
+        self.assertEqual(
+            ['rule', 'add', 'pref', '900', 'from', '10.91.1.11/32', 'iif',
+             'svp-58112-3', 'lookup', '75536'], self.argv)
+
+    def test_add_v6(self):
+        seg6.add_steer_rule('fd00::9/128', 'svp-58112-3', 75536,
+                            family_v6=True)
+        self.assertEqual(['-6', 'rule', 'add', 'pref', '900'], self.argv[:5])
+
+    def test_add_of_an_existing_rule_is_success(self):
+        self.ip_route_cmd.side_effect = \
+            seg6.processutils.ProcessExecutionError(
+                stderr='RTNETLINK answers: File exists')
+        self.assertIsNone(seg6.add_steer_rule('10.0.0.1/32', 'svp-1-1', 2))
+
+    def test_delete_of_a_missing_rule_is_success(self):
+        self.ip_route_cmd.side_effect = \
+            seg6.processutils.ProcessExecutionError(
+                stderr='RTNETLINK answers: No such file or directory')
+        self.assertIsNone(seg6.delete_steer_rule('10.0.0.1/32', 'svp-1-1', 2))
+        self.ip_route_cmd.side_effect = \
+            seg6.processutils.ProcessExecutionError(stderr='Invalid argument')
+        self.assertRaises(seg6.processutils.ProcessExecutionError,
+                          seg6.delete_steer_rule, '10.0.0.1/32', 'svp-1-1', 2)
+
+    def test_list_keeps_only_this_packages_rules_both_families(self):
+        v4 = ('0:\tfrom all lookup local\n'
+              '900:\tfrom 10.91.1.11 iif svp-58112-3 lookup 75536\n'
+              '900:\tfrom 10.91.1.12 iif eth0 lookup 75537\n'
+              '900:\tfrom 10.91.1.13 iif svp-58112-4 lookup main\n'
+              '901:\tfrom 10.91.1.14 iif svp-58112-3 lookup 75538\n'
+              '1000:\tfrom all lookup [l3mdev-table]\n')
+        v6 = ('900:\tfrom fd00::9 iif svp-58112-3 [detached] lookup 75536\n'
+              '999:\tfrom all to fc00:0:2:e300:: iif sv6vrf-58112 lookup '
+              'main\n')
+        self.ip_route_cmd.side_effect = [v4, v6]
+        self.assertEqual([('10.91.1.11', 'svp-58112-3', 75536, False),
+                          ('fd00::9', 'svp-58112-3', 75536, True)],
+                         seg6.list_steer_rules())
+        self.assertEqual([mock.call(['rule', 'show']),
+                          mock.call(['-6', 'rule', 'show'])],
+                         self.ip_route_cmd.call_args_list)

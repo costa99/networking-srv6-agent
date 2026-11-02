@@ -19,12 +19,12 @@ node l3  leaf  b3 ale-l3  192.168.122.23
 node l4  leaf  b4 ale-l4  192.168.122.24
 node l5  leaf  b5 ale-l5  192.168.122.25
 node l6  leaf  b6 ale-l6  192.168.122.26
-node ml1 host  1  ale-ml1 10.47.7.151 ale-ovn1 10.47.7.141
-node ml4 host  4  ale-ml4 10.47.7.154 ale-ovn4 10.47.7.144
-node ml5 host  5  ale-ml5 10.47.7.155 ale-ovn5 10.47.7.145
-node ml6 host  6  ale-ml6 10.47.7.156 ale-ovn6 10.47.7.146
-node ml7 host  7  ale-ml7 10.47.7.157 ale-ovn7 10.47.7.147
-node ml8 host  8  ale-ml8 10.47.7.158 ale-ovn8 10.47.7.148
+node OVS1 host  1  ubuntu-ovs1 10.47.7.151 ubuntu-ovn1 10.47.7.141
+node OVS2 host  2  ubuntu-ovs2 10.47.7.154 ubuntu-ovn2 10.47.7.144
+node OVS3 host  3  ubuntu-ovs3 10.47.7.155 ubuntu-ovn3 10.47.7.145
+node OVS4 host  4  ubuntu-ovs4 10.47.7.156 ubuntu-ovn4 10.47.7.146
+node OVS5 host  5  ubuntu-ovs5 10.47.7.157 ubuntu-ovn5 10.47.7.147
+node OVS6 host  6  ubuntu-ovs6 10.47.7.158 ubuntu-ovn6 10.47.7.148
 
 # link <a> <b> <capacity Mbit/s>
 # Capacity per direction, enforced by tc tbf on mac-server's two taps of the link
@@ -42,23 +42,23 @@ link s2 l1  100
 link s2 l2  100
 link s2 l3  100
 link s2 l4  100
-link l1 ml1 1000
-link l2 ml1 1000
-link l1 ml4 1000
-link l2 ml4 1000
-link l3 ml5 1000
-link l4 ml5 1000
+link l1 OVS1 1000
+link l2 OVS1 1000
+link l1 OVS2 1000
+link l2 OVS2 1000
+link l3 OVS3 1000
+link l4 OVS3 1000
 # rack B's second host (PLAN-PATH-COMPUTATION U3); appended so links 1-e keep
 # their prefixes and MACs
-link l3 ml6 1000
-link l4 ml6 1000
-# rack C (2026-11-02): leaves l5/l6 under both spines, hosts ml7 + ml8; appended
-# like ml6, so links 1-18 keep their prefixes and MACs
+link l3 OVS4 1000
+link l4 OVS4 1000
+# rack C (2026-11-02): leaves l5/l6 under both spines, hosts OVS5 + OVS6; appended
+# like OVS4, so links 1-18 keep their prefixes and MACs
 link s1 l5  100
 link s2 l5  100
 link s1 l6  100
 link s2 l6  100
-link l5 ml7 1000
-link l6 ml7 1000
-link l5 ml8 1000
-link l6 ml8 1000
+link l5 OVS5 1000
+link l6 OVS5 1000
+link l5 OVS6 1000
+link l6 OVS6 1000

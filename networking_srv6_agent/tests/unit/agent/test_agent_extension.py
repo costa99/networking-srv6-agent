@@ -299,7 +299,16 @@ class TestApplyDomain(AgentExtensionTestCaseBase):
         self.ext.dataplane.sync_routes.assert_called_once_with(
             self.domain_id, routes,
             {'node2': 'fc00:0:2::/48', 'node3': 'fc00:0:3::/48'}, HOST,
-            mtus={'net1': 1450})
+            mtus={'net1': 1450}, gateway_ports={})
+
+    def test_the_gateway_ports_of_local_networks_go_to_the_routes(self):
+        # a source VM's steer rule matches its network's gateway port
+        self.ext.vlan_manager.get_segments.return_value = {1: _segment(100)}
+        payload = _attached(self.domain_id)
+        self.ext._apply_domain(payload)
+        self.assertEqual(
+            {'net1': 'svp-%d-100' % payload['function_id']},
+            self.ext.dataplane.sync_routes.call_args[1]['gateway_ports'])
 
     def test_multi_segment_network_uses_the_first_segment(self):
         self.ext.vlan_manager.get_segments.return_value = {

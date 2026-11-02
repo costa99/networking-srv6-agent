@@ -29,14 +29,24 @@ enforced by the plugin, not here and not by a CHECK constraint.
 
 It may also name source_host, the ingress node: the path then applies only
 to the domain's traffic that enters the SRv6 domain at that node (is
-encapsulated there). Without it the path applies at every ingress. Per route
-and per ingress, the first of these that exists wins:
+encapsulated there). Without it the path applies at every ingress. Or it
+may name source_port_id, one VM: the path then applies only to that VM's
+traffic (its fixed IPs as source), at whatever node the VM is bound to
+(PLAN-UNRESERVED-STEERING). Per route and per ingress, the first of these
+that exists wins:
 
-    destination port + this source    >  destination host + this source
-    >  destination port, any source   >  destination host, any source
+    destination port + this source VM  >  destination host + this source VM
+    >  destination port + this source   >  destination host + this source
+    >  destination port, any source     >  destination host, any source
     >  direct
 
-so a source path outranks every path without one (FEATURE-TE-SOURCE-HOST).
+so a source-VM path outranks every other, and a source path every path
+without one (FEATURE-TE-SOURCE-HOST). The source-VM ranks are a policy rule
+at the ingress, looked up before the domain's routing table.
+
+`origin` is 'user' for a path an admin created and 'auto' for one the server
+created to steer a heavy VM pair off a congested link (U-f); an auto path
+cannot be re-steered by hand, only deleted.
 
 `segments` and `status` are what the SERVER resolved when the path was read,
 not an acknowledgement from any agent.
@@ -52,7 +62,7 @@ NAME = 'SRv6 traffic engineering'
 ALIAS = 'srv6-te'
 DESCRIPTION = ("Admin-only SRv6 paths that steer a domain's traffic toward a "
                "compute node, or a single port, through explicit waypoints")
-UPDATED_TIMESTAMP = '2026-11-01T00:00:00-00:00'
+UPDATED_TIMESTAMP = '2026-11-02T00:00:00-00:00'
 API_PREFIX = ''
 IS_SHIM_EXTENSION = False
 IS_STANDARD_ATTR_EXTENSION = False
@@ -64,6 +74,8 @@ DOMAIN_ID = 'domain_id'
 DESTINATION_HOST = 'destination_host'
 DESTINATION_PORT_ID = 'destination_port_id'
 SOURCE_HOST = 'source_host'
+SOURCE_PORT_ID = 'source_port_id'
+ORIGIN = 'origin'
 VIA_HOSTS = 'via_hosts'
 BANDWIDTH = 'bandwidth'
 SEGMENTS = 'segments'
@@ -77,6 +89,9 @@ STATUS = 'status'
 # the routes fall back to the direct path and `segments` is empty.
 STATUS_ACTIVE = 'ACTIVE'
 STATUS_DEGRADED = 'DEGRADED'
+
+ORIGIN_USER = 'user'
+ORIGIN_AUTO = 'auto'
 
 # The width of binding:host_id and of the srv6_host_locators key.
 HOST_FIELD_SIZE = 255
@@ -125,6 +140,18 @@ RESOURCE_ATTRIBUTE_MAP = {
                       'is_visible': True,
                       'is_filter': True,
                       'enforce_policy': True},
+        # One VM's traffic only, at the node it is bound to; excludes
+        # source_host and bandwidth. Create-only like the selectors.
+        SOURCE_PORT_ID: {'allow_post': True, 'allow_put': False,
+                         'default': None,
+                         'validate': {'type:uuid_or_none': None},
+                         'is_visible': True,
+                         'is_filter': True,
+                         'enforce_policy': True},
+        # 'user' or 'auto': who made the path. Set by the server only.
+        ORIGIN: {'allow_post': False, 'allow_put': False,
+                 'is_visible': True,
+                 'is_filter': True},
         # PUT REPLACES the list: re-steering without a delete/create window.
         # [] means "explicitly direct".
         VIA_HOSTS: {'allow_post': True, 'allow_put': True,

@@ -151,6 +151,42 @@ srv6_server_opts = [
         default=2,
         min=1,
         help=_("Reservations moved per re-optimisation pass at most.")),
+    # --- U-f: steering heavy unreserved VM pairs (PLAN-UNRESERVED-STEERING)
+    cfg.BoolOpt(
+        'te_auto_steering',
+        default=True,
+        help=_("Let the TE re-optimisation steer heavy unreserved traffic: "
+               "on a congested link, the largest VM pair the fabric nodes "
+               "measured (srv6_aggregate_loads) gets a path of its own "
+               "(origin auto) onto links with room, before any reservation "
+               "is moved; the path is released when the pair goes idle or "
+               "the default routes have room again. Acts only with a "
+               "topology_file and fabric agents that report VM pairs "
+               "(--aggregates).")),
+    cfg.FloatOpt(
+        'te_auto_min_share',
+        default=0.1,
+        help=_("A VM pair is steered only if it carries at least this share "
+               "of the congested link's reservable capacity (the elephant "
+               "threshold); a steered pair below it on its path is idle.")),
+    cfg.IntOpt(
+        'te_auto_release_after',
+        default=120,
+        min=0,
+        help=_("Seconds an automatic path stays idle (its pair below "
+               "te_auto_min_share) before it is released and its traffic "
+               "goes back to the default routes.")),
+    cfg.IntOpt(
+        'te_auto_max_paths',
+        default=64,
+        min=0,
+        help=_("Automatic paths at most, in the whole cloud.")),
+    cfg.IntOpt(
+        'te_auto_max_rules_per_host',
+        default=16,
+        min=0,
+        help=_("Source VMs with an automatic path at most per node: each "
+               "has a policy rule that every packet the node routes walks.")),
 ]
 
 srv6_agent_opts = [

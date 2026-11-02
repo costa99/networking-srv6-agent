@@ -2,7 +2,7 @@
 # clos.sh <action> [node...]   -- the Clos underlay of PLAN-CLOS-TESTBED.md
 #
 # Builds and checks a 2-spine / 6-leaf routed fabric of small VMs on mac-server
-# (10.47.7.66) under the ML2 cloud's hosts ale-ml1/4/5/6/7/8 (racks l1/l2,
+# (10.47.7.66) under the ML2 cloud's hosts ubuntu-ovs1..6 (racks l1/l2,
 # l3/l4, l5/l6). clos.topo is the only input; clos.py derives the networks,
 # MACs, addresses and routes from it.
 # Every action is idempotent.
@@ -10,8 +10,8 @@
 #   nets     one isolated libvirt network per link (bridge br-<a><b>, MTU 9000)
 #   fabric   the spine/leaf VMs: disk, cloud-init seed, fixed NAT lease, all NICs;
 #            wait for SSH, then push
-#   hosts    attach the fabric NICs to every host VM of both clouds (ale-ml1/4/5/6/7/8
-#            and ale-ovn1/4/5/6 share a slot's NICs; persistent, live too if the
+#   hosts    attach the fabric NICs to every host VM of both clouds (ubuntu-ovs1..6
+#            and ubuntu-ovn1..6 share a slot's NICs; persistent, live too if the
 #            VM runs), and any NIC a fabric VM lacks after links were added to
 #            clos.topo; then push to the running ones
 #
@@ -193,6 +193,9 @@ WantedBy=multi-user.target'
 # so a crashed agent must come back within seconds. DynamicUser: it only reads
 # /proc/net/dev and /sys, so it runs as a throwaway unprivileged user; systemd
 # hands it the root-only credentials file through LoadCredential (%d).
+# --aggregates (PLAN-UNRESERVED-STEERING step 2): it also installs and reads
+# its own nft table of per-VM-pair counters, which needs CAP_NET_ADMIN, and
+# only that: ambient (inherited by nft) and the whole bounding set (GATE A D4).
 agent_unit() {   # [<extra ExecStart args>]: the unit file
     cat <<UNIT
 [Unit]
@@ -200,11 +203,13 @@ Description=SRv6 fabric agent: link telemetry for Neutron (PLAN-LINK-STATE-TE)
 After=clos-routes.service network-online.target
 Wants=network-online.target
 [Service]
-ExecStart=/usr/bin/python3 -I /usr/local/sbin/srv6-fabric-agent.py --links /etc/srv6-fabric-agent.links $1
+ExecStart=/usr/bin/python3 -I /usr/local/sbin/srv6-fabric-agent.py --links /etc/srv6-fabric-agent.links --aggregates $1
 ${1:+LoadCredential=neutron:/etc/srv6-fabric-agent/credentials}
 Restart=always
 RestartSec=2
 DynamicUser=yes
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
 Nice=10
 [Install]
 WantedBy=multi-user.target
@@ -320,10 +325,10 @@ do_check() {
                    exit $f'
         if on $n "$cmd"; then echo "$n: links and loopbacks ok"; else echo "$n: FAIL"; bad=1; fi
     done
-    echo "path ml1 -> ml5 (traceroute over the fabric):"
-    on ml1 "tracepath -6 -n -m 6 fd00:cc::5 2>/dev/null | head -8" || true
-    echo "path ml1 -> ml5 over IPv4:"
-    on ml1 "tracepath -4 -n -m 6 10.255.0.5 2>/dev/null | head -8" || true
+    echo "path OVS1 -> OVS3 (traceroute over the fabric):"
+    on OVS1 "tracepath -6 -n -m 6 fd00:cc::3 2>/dev/null | head -8" || true
+    echo "path OVS1 -> OVS3 over IPv4:"
+    on OVS1 "tracepath -4 -n -m 6 10.255.0.3 2>/dev/null | head -8" || true
     return $bad
 }
 

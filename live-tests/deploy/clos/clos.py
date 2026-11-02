@@ -234,15 +234,15 @@ def te_topology(nodes, links):
 def selftest():
     nodes, links = load()
     assert len(links) == 24 and len(nodes) == 14
-    r = dict(routes('ml1', nodes, links))
-    assert [d for _, d in r['fc00:0:5::/48']] == ['l1', 'l2'], r['fc00:0:5::/48']
-    assert [d for _, d in r['fc00:0:4::/48']] == ['l1', 'l2']          # intra-rack via both leaves
+    r = dict(routes('OVS1', nodes, links))
+    assert [d for _, d in r['fc00:0:3::/48']] == ['l1', 'l2'], r['fc00:0:3::/48']
+    assert [d for _, d in r['fc00:0:2::/48']] == ['l1', 'l2']          # intra-rack via both leaves
     r = dict(routes('s1', nodes, links))
-    assert [d for _, d in r['fc00:0:5::/48']] == ['l3', 'l4']
+    assert [d for _, d in r['fc00:0:3::/48']] == ['l3', 'l4']
     r = dict(routes('l1', nodes, links))
-    assert [d for _, d in r['fc00:0:5::/48']] == ['s1', 's2']
-    assert [d for _, d in r['fd00:cc::1/128']] == ['ml1']
-    assert [d for _, d in r['fd01:d::/64']] == ['s1', 's2']             # link l3-ml5
+    assert [d for _, d in r['fc00:0:3::/48']] == ['s1', 's2']
+    assert [d for _, d in r['fd00:cc::1/128']] == ['OVS1']
+    assert [d for _, d in r['fd01:d::/64']] == ['s1', 's2']             # link l3-OVS3
     # every node reaches every prefix that is not its own
     for n in nodes:
         for p, hops in routes(n, nodes, links):
@@ -251,30 +251,30 @@ def selftest():
     adj = adjacency(links)
     def count(u, dst, d):
         return 1 if u == dst else sum(count(v, dst, d) for v in adj[u] if d[v] == d[u] - 1)
-    assert count('ml1', 'ml5', distances(adj, ['ml5'])) == 8
-    assert count('ml4', 'ml6', distances(adj, ['ml6'])) == 8
-    assert count('ml1', 'ml7', distances(adj, ['ml7'])) == 8           # rack A -> rack C
-    assert count('ml7', 'ml8', distances(adj, ['ml8'])) == 2           # intra-rack C
-    assert nodes['ml6']['vms'] == ['ale-ml6', 'ale-ovn6'] and nodes['s1']['vms'] == ['ale-s1']
-    r = dict(routes('ml1', nodes, links))
-    assert [d for _, d in r['10.255.0.5/32']] == ['l1', 'l2'], r['10.255.0.5/32']
-    assert [v for v, _ in r['10.255.0.5/32']] == ['10.254.9.1', '10.254.10.1']
-    assert [d for _, d in dict(routes('s1', nodes, links))['10.255.0.6/32']] == ['l3', 'l4']
+    assert count('OVS1', 'OVS3', distances(adj, ['OVS3'])) == 8
+    assert count('OVS2', 'OVS4', distances(adj, ['OVS4'])) == 8
+    assert count('OVS1', 'OVS5', distances(adj, ['OVS5'])) == 8           # rack A -> rack C
+    assert count('OVS5', 'OVS6', distances(adj, ['OVS6'])) == 2           # intra-rack C
+    assert nodes['OVS4']['vms'] == ['ubuntu-ovs4', 'ubuntu-ovn4'] and nodes['s1']['vms'] == ['ale-s1']
+    r = dict(routes('OVS1', nodes, links))
+    assert [d for _, d in r['10.255.0.3/32']] == ['l1', 'l2'], r['10.255.0.3/32']
+    assert [v for v, _ in r['10.255.0.3/32']] == ['10.254.9.1', '10.254.10.1']
+    assert [d for _, d in dict(routes('s1', nodes, links))['10.255.0.4/32']] == ['l3', 'l4']
     assert v4_lo(nodes['s1']) == '10.255.0.161' and v4_lo(nodes['l4']) == '10.255.0.180'
     s = boot_script('l1', nodes, links)
     assert 'nic 52:54:00:c1:01:02 s1 fd01:1::2 10.254.1.2' in s and 'action End flavors next-csid' in s
     assert 'nflen 16 dev clos0' in s           # the SID survives any fabric NIC going down
-    assert 'r4 10.255.0.1/32 nexthop via 10.254.9.2 dev ml1' in s and 'ip_forward=1' in s
-    assert 'ip_forward' not in boot_script('ml1', nodes, links)
+    assert 'r4 10.255.0.1/32 nexthop via 10.254.9.2 dev OVS1' in s and 'ip_forward=1' in s
+    assert 'ip_forward' not in boot_script('OVS1', nodes, links)
     sh = shape_script(links)
     assert 'fe:54:00:c1:01:01' in sh and 'rate 100mbit' in sh and 'rate 1000mbit' in sh
     assert sh.count('tbf rate') == 2 * len(links) and 'tbf' not in shape_script(links, off=True)
     te = te_topology(nodes, links)
-    assert 'node ale-ml1 fc00:0:1::/48' in te and 'node s1 fc00:0:a1::/48' in te
-    assert 'link s1 l1 100' in te and 'link l1 ale-ml1 1000' in te
-    assert 'seg6local' not in boot_script('ml1', nodes, links)
+    assert 'node ubuntu-ovs1 fc00:0:1::/48' in te and 'node s1 fc00:0:a1::/48' in te
+    assert 'link s1 l1 100' in te and 'link l1 ubuntu-ovs1 1000' in te
+    assert 'seg6local' not in boot_script('OVS1', nodes, links)
     al = agent_links('l1', nodes, links).splitlines()[2:]
-    assert al == ['s1 l1 s1', 's2 l1 s2', 'ml1 l1 ale-ml1', 'ml4 l1 ale-ml4'], al
+    assert al == ['s1 l1 s1', 's2 l1 s2', 'OVS1 l1 ubuntu-ovs1', 'OVS2 l1 ubuntu-ovs2'], al
     assert len(agent_links('s1', nodes, links).splitlines()) == 2 + 6
     print('clos.py self-test ok')
 

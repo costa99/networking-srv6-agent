@@ -83,7 +83,8 @@ class TestResources(testtools.TestCase):
                     '/srv6_te_paths',
                     ('create', 'fetch', 'commit', 'delete', 'list'),
                     ('domain_id', 'destination_host',
-                     'destination_port_id', 'source_host', 'project_id'))
+                     'destination_port_id', 'source_host', 'source_port_id',
+                     'origin', 'project_id'))
 
     def test_update_sends_only_the_change(self):
         path = resources.Srv6TePath.new(id='abc', via_hosts=[])

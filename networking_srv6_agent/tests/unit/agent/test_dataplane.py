@@ -2059,3 +2059,184 @@ class TestUnderlayAutodetect(DataplaneTestCaseBase):
         self.dp.refresh_underlay([LOCATOR2, LOCATOR3])
         self.assertFalse(self.dp.check_mtu(1450))
         self.assertTrue(self.dp.check_mtu(1450, dev='eth1'))
+
+
+class TestSteering(DataplaneTestCaseBase):
+    """Steer tables and rules for source VMs (PLAN-UNRESERVED-STEERING 5).
+
+    The routes carry segments_by_source_port; the VM is on node1 (here),
+    its network net1's gateway port is svp-7-100, and the steer tables
+    start at vrf_table_base + 0x10000 = 75536.
+    """
+
+    GW = 'svp-7-100'
+    BASE = 10000 + 0x10000
+
+    def setUp(self):
+        super().setUp()
+        self._with_domain()
+        self.locators = {'node2': LOCATOR2, 'node3': LOCATOR3}
+        self.priv_seg6.list_steer_rules.return_value = []
+        self.priv_seg6.list_seg6_routes.return_value = []
+
+    def _route(self, prefix='10.0.0.5/32', host='node2', vm_host='node1',
+               segments=('fc00:0:3:fff0::',), port='vm1',
+               prefixes=('10.0.1.9/32',)):
+        return {'prefix': prefix, 'host': host, 'port_id': 'p',
+                'segments_by_source_port': {port: {
+                    'host': vm_host, 'network_id': 'net1',
+                    'prefixes': list(prefixes),
+                    'segments': list(segments)}}}
+
+    def _sync(self, *routes, ports=None):
+        self.dp.sync_routes(self.domain_id, list(routes), self.locators,
+                            'node1', gateway_ports={'net1': self.GW}
+                            if ports is None else ports)
+
+    def _calls(self, *names):
+        return [(c[0], c[1]) for c in self.priv_seg6.mock_calls
+                if c[0] in names]
+
+    def test_a_local_vm_gets_a_table_its_route_and_a_rule(self):
+        self._sync(self._route())
+        # the VRF route is untouched by the VM path: direct to node2
+        vrf, steer = self.priv_seg6.replace_seg6_route.call_args_list
+        self.assertEqual(('10.0.0.5/32', ['fc00:0:2:7::']), vrf[0][:2])
+        self.assertEqual(VRF_TABLE, vrf[0][3])
+        self.assertEqual(('10.0.0.5/32', ['fc00:0:3:fff0::', 'fc00:0:2:7::'],
+                          mock.ANY, self.BASE), steer[0][:4])
+        self.priv_seg6.add_steer_rule.assert_called_once_with(
+            '10.0.1.9/32', self.GW, self.BASE, family_v6=False)
+
+    def test_route_and_sid_rule_before_the_steer_rule(self):
+        self.priv_nft.apply_ruleset.return_value = None
+        self.dp.ensure_edge_filter([LOCATOR2, LOCATOR3])
+        self.priv_seg6.reset_mock()
+        self.priv_seg6.list_steer_rules.return_value = []
+        self.priv_seg6.list_seg6_routes.return_value = []
+        self.priv_seg6.list_sid_rules.return_value = []
+        self._sync(self._route())
+        order = [name for name, _a in self._calls(
+            'replace_seg6_route', 'add_sid_rule', 'add_steer_rule')]
+        self.assertEqual(['replace_seg6_route', 'add_sid_rule',
+                          'replace_seg6_route', 'add_sid_rule',
+                          'add_steer_rule'], order)
+        self.assertIn(mock.call(VRF_NAME, 'fc00:0:3:fff0::'),
+                      self.priv_seg6.add_sid_rule.call_args_list)
+
+    def test_the_steer_sid_rule_is_not_pruned(self):
+        # GATE A D2: without the rule the steered flow never connected
+        self.priv_nft.apply_ruleset.return_value = None
+        self.dp.ensure_edge_filter([LOCATOR2, LOCATOR3])
+        self.priv_seg6.list_sid_rules.return_value = [
+            (VRF_NAME, 'fc00:0:2:7::'), (VRF_NAME, 'fc00:0:3:fff0::')]
+        self._sync(self._route())
+        self.priv_seg6.delete_sid_rule.assert_not_called()
+
+    def test_a_vm_on_another_node_or_without_a_gateway_port_here(self):
+        self._sync(self._route(vm_host='node3'))
+        self._sync(self._route(), ports={})
+        self.priv_seg6.add_steer_rule.assert_not_called()
+        self.assertEqual(2, self.priv_seg6.replace_seg6_route.call_count)
+
+    def test_two_addresses_two_rules_one_table(self):
+        self._sync(self._route(prefixes=('10.0.1.9/32', 'fd00::9/128')))
+        self.assertEqual(
+            [mock.call('10.0.1.9/32', self.GW, self.BASE, family_v6=False),
+             mock.call('fd00::9/128', self.GW, self.BASE, family_v6=True)],
+            self.priv_seg6.add_steer_rule.call_args_list)
+
+    def test_two_vms_two_tables(self):
+        self._sync(self._route(),
+                   self._route(prefix='10.0.0.6/32', port='vm2',
+                               prefixes=('10.0.1.10/32',)))
+        self.assertEqual({self.BASE, self.BASE + 1},
+                         {c[0][2] for c in
+                          self.priv_seg6.add_steer_rule.call_args_list})
+
+    def test_a_vms_existing_table_is_reused_after_a_restart(self):
+        self.priv_seg6.list_steer_rules.return_value = [
+            ('10.0.1.9', self.GW, self.BASE + 7, False)]
+        self._sync(self._route())
+        self.assertEqual(self.BASE + 7, self.priv_seg6.replace_seg6_route
+                         .call_args_list[-1][0][3])
+        self.priv_seg6.add_steer_rule.assert_not_called()   # already there
+        self.priv_seg6.delete_steer_rule.assert_not_called()
+
+    def test_tables_of_other_domains_are_skipped(self):
+        self.priv_seg6.list_steer_rules.return_value = [
+            ('10.9.9.9', 'svp-8-100', self.BASE, False)]
+        self._sync(self._route())
+        self.priv_seg6.add_steer_rule.assert_called_once_with(
+            '10.0.1.9/32', self.GW, self.BASE + 1, family_v6=False)
+        self.priv_seg6.delete_steer_rule.assert_not_called()
+
+    def test_a_vm_no_longer_steered_loses_rules_then_table(self):
+        self.priv_seg6.list_steer_rules.return_value = [
+            ('10.0.1.9', self.GW, self.BASE, False),
+            ('fd00::9', self.GW, self.BASE, True)]
+        self._sync({'prefix': '10.0.0.5/32', 'host': 'node2',
+                    'port_id': 'p'})
+        names = [n for n, _a in self._calls(
+            'delete_steer_rule', 'flush_table') if _a[0] == self.BASE or
+            n == 'delete_steer_rule']
+        self.assertEqual(['delete_steer_rule', 'delete_steer_rule',
+                          'flush_table', 'flush_table'], names)
+
+    def test_a_stale_route_and_rule_in_a_kept_table_are_pruned(self):
+        self.priv_seg6.list_steer_rules.return_value = [
+            ('10.0.1.9', self.GW, self.BASE, False),
+            ('10.0.1.8', self.GW, self.BASE, False)]
+        self.priv_seg6.list_seg6_routes.side_effect = \
+            lambda table, family_v6=False: (['10.0.0.5', '10.0.0.99']
+                                            if table == self.BASE and
+                                            not family_v6 else [])
+        self._sync(self._route())
+        self.priv_seg6.delete_steer_rule.assert_called_once_with(
+            '10.0.1.8/32', self.GW, self.BASE, family_v6=False)
+        self.priv_seg6.delete_route.assert_any_call(
+            '10.0.0.99', self.BASE, family_v6=False)
+
+    def test_an_incremental_add_only_adds(self):
+        self.priv_seg6.list_steer_rules.return_value = [
+            ('10.0.1.9', self.GW, self.BASE, False),
+            ('10.0.1.8', self.GW, self.BASE, False)]
+        self.dp.add_routes(self.domain_id, [self._route(prefix='10.0.0.6/32')],
+                           self.locators, 'node1',
+                           gateway_ports={'net1': self.GW})
+        self.assertEqual('10.0.0.6/32', self.priv_seg6.replace_seg6_route
+                         .call_args_list[-1][0][0])
+        self.priv_seg6.delete_steer_rule.assert_not_called()
+        self.priv_seg6.flush_table.assert_not_called()
+
+    def test_unreadable_rules_change_nothing(self):
+        self.priv_seg6.list_steer_rules.side_effect = RuntimeError('boom')
+        self._sync(self._route())
+        self.priv_seg6.add_steer_rule.assert_not_called()
+
+    def test_no_free_table_is_logged(self):
+        self.priv_seg6.list_steer_rules.return_value = [
+            ('10.9.9.%d' % (i % 250), 'svp-8-1', self.BASE + i, False)
+            for i in range(dataplane.constants.STEER_TABLE_SLOTS)]
+        with mock.patch.object(dataplane.LOG, 'error') as error:
+            self._sync(self._route())
+        self.assertIn('no free steer table', error.call_args[0][0])
+        self.priv_seg6.add_steer_rule.assert_not_called()
+
+    def test_deleting_the_domain_removes_its_steering_first(self):
+        self.priv_seg6.list_steer_rules.return_value = [
+            ('10.0.1.9', self.GW, self.BASE, False),
+            ('10.9.9.9', 'svp-8-100', self.BASE + 1, False)]
+        calls = mock.Mock()
+        calls.attach_mock(self.priv_seg6.delete_steer_rule, 'rule')
+        calls.attach_mock(self.priv_seg6.flush_table, 'flush')
+        self.dp.delete_domain(self.domain_id)
+        self.assertEqual(
+            [mock.call.rule('10.0.1.9/32', self.GW, self.BASE,
+                            family_v6=False),
+             mock.call.flush(self.BASE, family_v6=False),
+             mock.call.flush(self.BASE, family_v6=True)],
+            calls.mock_calls[:3])
+        self.assertNotIn(mock.call.rule('10.9.9.9/32', 'svp-8-100',
+                                        self.BASE + 1, family_v6=False),
+                         calls.mock_calls)
