@@ -97,6 +97,10 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         # domain_id -> payload, so handle_port can answer "is this network
         # in a domain?" without an RPC round trip on every port event.
         self.domains = {}
+        # ids of the domains in self.domains that this node does not program:
+        # no port of theirs here (_make_dormant). Kept known, so their
+        # routes_updated cause no resync.
+        self.dormant = set()
         self.locators = {}
         # domain_id -> monotonic time of its domain_deleted (F9)
         self.tombstones = {}
@@ -253,10 +257,11 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                 LOG.exception("SRv6: could not remove domain %s; the kernel "
                               "garbage collector retries it", stale_id)
             self.domains.pop(stale_id, None)
+            self.dormant.discard(stale_id)
         self._collect_kernel_orphans(wanted)
         for payload in wanted.values():
             try:
-                self._apply_domain(payload)
+                self._apply_domain(payload, from_sync=True)
             except Exception:
                 LOG.exception("SRv6: could not apply domain %s; the next "
                               "resync retries it", payload['id'])
@@ -292,13 +297,49 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         domain_id = payload['id']
         function_id = payload['function_id']
         present = self.dataplane.present_function_ids() or set()
-        if domain_id not in self.domains and function_id not in present:
+        programmed = domain_id in self.domains and \
+            domain_id not in self.dormant
+        self.dormant.discard(domain_id)
+        if not programmed and function_id not in present:
+            self.domains.pop(domain_id, None)
             return
         LOG.info("SRv6: domain %s has no network; removing its state on "
                  "this node", domain_id)
         self.dataplane.delete_domain(domain_id, function_id,
                                      payload.get('vrf_table'))
         self.domains.pop(domain_id, None)
+
+    def _is_local(self, payload, present):
+        """Whether a network of the domain has a live port here.
+
+        Any port counts -- an instance, DHCP, a router -- as for the gateway
+        ports. present None (OVSDB unreadable) counts as local: keeping
+        state nobody uses is better than deleting state in use.
+        """
+        return present is None or bool(self._wanted_vlans(payload, present))
+
+    def _make_dormant(self, payload):
+        """Keep the domain known, with none of its state on this node.
+
+        A node with no port in a domain neither sends into it nor receives
+        from it, and a TE waypoint needs only its node-level End SID or uN:
+        the VRF, decap SID, rules and routes would be per-domain state on a
+        node that serves nobody in the domain (M2s, 2026-10-29). State this
+        node held -- programmed until now, or left by an earlier build --
+        is removed.
+        """
+        domain_id = payload['id']
+        function_id = payload['function_id']
+        if domain_id not in self.dormant:
+            programmed = domain_id in self.domains
+            if programmed or function_id in (
+                    self.dataplane.present_function_ids() or set()):
+                LOG.info("SRv6: no port of domain %s on this node; removing "
+                         "its state", domain_id)
+                self.dataplane.delete_domain(domain_id, function_id,
+                                             payload.get('vrf_table'))
+        self.domains[domain_id] = payload
+        self.dormant.add(domain_id)
 
     def _collect_kernel_orphans(self, wanted):
         """Delete VRFs in the kernel that no domain on the server owns.
@@ -414,6 +455,8 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         """
         present = self.dataplane.local_network_vlans()
         for domain_id, payload in list(self.domains.items()):
+            if domain_id in self.dormant:
+                continue
             try:
                 self._reconcile_domain(domain_id, payload, present)
             except Exception:
@@ -426,7 +469,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         return {n['network_id']: n.get('mtu')
                 for n in payload.get('networks') or []}
 
-    def _apply_domain(self, payload):
+    def _apply_domain(self, payload, from_sync=False):
         """Converge this node to the payload. Reconciles, does not accumulate.
 
         The payload is the server's whole view of the domain, so a network
@@ -440,6 +483,11 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         already encoded the new way; every OTHER domain needs a resync,
         which domain_updated does. A full sync needs none: it applies every
         domain after this one anyway.
+
+        A domain with no port on this node is kept dormant (_make_dormant).
+        A programmed one is made dormant only by a full sync (from_sync):
+        between syncs it stays as it is, so a port that leaves and comes
+        back does not tear the domain down and rebuild it.
         """
         domain_id = payload['id']
         # Every server sends it; the fallback only guards a malformed payload.
@@ -454,14 +502,21 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         if not networks:
             self._retire_domain(payload)
             return encoding_changed
+        present = self.dataplane.local_network_vlans()
+        programmed = domain_id in self.domains and \
+            domain_id not in self.dormant
+        if not self._is_local(payload, present) and (
+                from_sync or not programmed):
+            self._make_dormant(payload)
+            return encoding_changed
+        self.dormant.discard(domain_id)
         self.dataplane.ensure_domain(domain_id, payload['function_id'],
                                      payload['behavior'])
         # What to KEEP comes from OVSDB (local_network_vlans): it is right
         # even during a restart, when the in-memory map below is empty.
         # Reconcile before ensuring, or a port (re-)created in this pass
         # could be deleted by it.
-        self._reconcile_domain(domain_id, payload,
-                               self.dataplane.local_network_vlans())
+        self._reconcile_domain(domain_id, payload, present)
         # What to CREATE still comes from the OVS agent's own map: a gateway
         # is made only once the agent has bound the network on this node.
         vlans = {n['network_id']: self._local_vlan_for(n['network_id'])
@@ -534,6 +589,10 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                 self._sync_unless_recent('routes for unknown domain %s'
                                          % domain_id)
                 return
+            if domain_id in self.dormant:
+                # Not programmed here; activation takes the routes from a
+                # full sync, not from this message.
+                return
             try:
                 if remove:
                     self.dataplane.remove_routes(domain_id, remove)
@@ -554,6 +613,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         LOG.info("SRv6: domain_deleted %s", domain_id)
         with self._lock:
             self._tombstone(domain_id)
+            self.dormant.discard(domain_id)
             try:
                 self.dataplane.delete_domain(domain_id, function_id,
                                              vrf_table)
@@ -580,12 +640,15 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             # network has just been given (F8). delete_port normally removed
             # it already; this covers a removal the agent never saw.
             self._reconcile_all_gateways()
-            known = False
+            known = activate = False
             for domain_id, payload in self.domains.items():
                 for network in payload.get('networks') or []:
                     if network['network_id'] != network_id:
                         continue
                     known = True
+                    if domain_id in self.dormant:
+                        activate = True
+                        continue
                     local_vlan = self._local_vlan_for(network_id)
                     if local_vlan is None:
                         continue
@@ -597,7 +660,15 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                     except Exception:
                         LOG.exception("SRv6: gateway port for network %s",
                                       network_id)
-            if not known:
+            if activate:
+                # The domain's first port here. Its routes come from the
+                # server's current view: the cached payload missed every
+                # routes_updated while dormant. No F13 hold-off: the
+                # instance has no connectivity until this runs.
+                LOG.info("SRv6: first port of a dormant domain on network "
+                         "%s; resyncing to program it", network_id)
+                self._do_sync_state()
+            elif not known:
                 self._sync_unless_recent('port on unknown network %s'
                                          % network_id)
 

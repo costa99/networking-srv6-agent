@@ -83,6 +83,7 @@ class AgentExtensionTestCaseBase(base.BaseTestCase):
         self.ext.host = HOST
         self.ext.context = mock.Mock()
         self.ext.domains = {}
+        self.ext.dormant = set()
         self.ext.locators = {}
         self.ext.tombstones = {}
         self.ext._last_sync = None
@@ -92,9 +93,11 @@ class AgentExtensionTestCaseBase(base.BaseTestCase):
         self.ext.vlan_manager.get_segments.return_value = {}
         self.ext.dataplane = mock.Mock()
         self.ext.dataplane.present_function_ids.return_value = set()
-        # OVSDB's view of the live ports (network -> VLANs). Empty by
-        # default; a bare Mock would not behave like a dict.
-        self.ext.dataplane.local_network_vlans.return_value = {}
+        # OVSDB's view of the live ports (network -> VLANs): net1, the
+        # network of _attached(), has a port here unless a test says
+        # otherwise, so its domain is programmed rather than dormant. A bare
+        # Mock would not behave like a dict.
+        self.ext.dataplane.local_network_vlans.return_value = {'net1': {100}}
         # A real dataplane answers False when the encoding did not change;
         # a bare Mock would read as a switch on every payload.
         self.ext.dataplane.ensure_encoding.return_value = False
@@ -358,7 +361,11 @@ class TestApplyDomainReconciles(AgentExtensionTestCaseBase):
         node where the domain has nothing else). The old code saw "has
         networks, no VLANs", took it for a VLAN map not built yet, and kept
         the leftover -- which t9 then saw inherited by another network.
+        The domain was programmed here: a fanout keeps it so until the next
+        full sync makes it dormant (TestDormantDomains), and meanwhile no
+        gateway may outlive the port.
         """
+        self.ext.domains[self.domain_id] = _attached(self.domain_id)
         self.ext.dataplane.local_network_vlans.return_value = {}
         self.ext._apply_domain(_payload(self.domain_id,
                                         networks=[_network('net1')]))
@@ -1120,3 +1127,142 @@ class TestUnknownNetworkHoldoff(AgentExtensionTestCaseBase):
         self.cctxt.call.reset_mock()
         self._port_on_unknown_network()
         self.cctxt.call.assert_called_once()
+
+
+class TestDormantDomains(AgentExtensionTestCaseBase):
+    """No port of a domain on this node: known, but nothing programmed.
+
+    M2s (2026-10-29) found every node holding the whole domain -- VRF,
+    routes, decap SID, rules -- even with no port in it.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.ext.dataplane.local_network_vlans.return_value = {}
+
+    def _sync(self, *payloads):
+        self.cctxt.call.return_value = list(payloads)
+        self.ext._sync_state()
+
+    def _dormant(self):
+        self._sync(_attached(self.domain_id))
+        self.assertIn(self.domain_id, self.ext.dormant)
+        self.ext.dataplane.reset_mock()
+        self.cctxt.call.reset_mock()
+
+    def test_known_but_not_programmed(self):
+        self.ext._apply_domain(_attached(self.domain_id))
+        self.ext.dataplane.ensure_domain.assert_not_called()
+        self.ext.dataplane.sync_routes.assert_not_called()
+        self.ext.dataplane.delete_domain.assert_not_called()
+        self.assertIn(self.domain_id, self.ext.domains)
+        self.assertIn(self.domain_id, self.ext.dormant)
+
+    def test_encoding_and_locators_still_apply(self):
+        # Node-level: a portless TE waypoint still needs its uN switched,
+        # and the edge filter and the tunnel source every locator.
+        payload = _attached(self.domain_id,
+                            locators={'node2': 'fc00:0:2::/48'})
+        payload['encoding'] = 'usid'
+        self.ext._apply_domain(payload)
+        self.ext.dataplane.ensure_encoding.assert_called_once_with('usid')
+        self.ext.dataplane.ensure_edge_filter.assert_called_once_with(
+            ['fc00:0:2::/48'])
+        self.ext.dataplane.refresh_underlay.assert_called_once_with(
+            ['fc00:0:2::/48'])
+
+    def test_the_first_port_activates_through_a_sync(self):
+        self._dormant()
+        # handle_port fires after port_bound wrote the port to OVSDB.
+        self.ext.dataplane.local_network_vlans.return_value = {'net1': {100}}
+        # Right after a sync: the F13 hold-off must not delay activation.
+        self.ext.handle_port(self.ext.context,
+                             {'network_id': 'net1', 'port_id': 'p1'})
+        self.cctxt.call.assert_called_once()
+        self.ext.dataplane.ensure_domain.assert_called_once_with(
+            self.domain_id, 7, 'End.DT46')
+        self.ext.dataplane.sync_routes.assert_called_once()
+        self.assertNotIn(self.domain_id, self.ext.dormant)
+
+    def test_routes_updated_neither_programs_nor_resyncs(self):
+        self._dormant()
+        self.ext.routes_updated(
+            self.ext.context, domain_id=self.domain_id,
+            add=[{'prefix': '10.0.0.5/32', 'host': 'node2',
+                  'port_id': 'p5'}],
+            remove=[{'prefix': '10.0.0.6/32'}])
+        self.ext.dataplane.add_routes.assert_not_called()
+        self.ext.dataplane.remove_routes.assert_not_called()
+        self.cctxt.call.assert_not_called()
+
+    def test_domain_updated_only_replaces_the_cache(self):
+        self._dormant()
+        newer = _attached(self.domain_id, routes=[
+            {'prefix': '10.0.0.5/32', 'host': 'node2', 'port_id': 'p5'}])
+        self.ext.domain_updated(self.ext.context, domain=newer)
+        self.assertIs(newer, self.ext.domains[self.domain_id])
+        self.ext.dataplane.ensure_domain.assert_not_called()
+        self.ext.dataplane.delete_domain.assert_not_called()
+
+    def test_domain_deleted_forgets_it(self):
+        self._dormant()
+        self.ext.domain_deleted(self.ext.context, domain_id=self.domain_id,
+                                function_id=7, vrf_table=10007)
+        self.assertNotIn(self.domain_id, self.ext.domains)
+        self.assertNotIn(self.domain_id, self.ext.dormant)
+        self.assertIn(self.domain_id, self.ext.tombstones)
+
+    def test_detaching_the_last_network_of_a_dormant_domain(self):
+        self._dormant()
+        self.ext._apply_domain(_payload(self.domain_id, networks=[]))
+        self.ext.dataplane.delete_domain.assert_not_called()
+        self.assertNotIn(self.domain_id, self.ext.domains)
+        self.assertNotIn(self.domain_id, self.ext.dormant)
+
+    def test_a_programmed_domain_stays_until_the_next_sync(self):
+        # D1: a fanout leaves it programmed (a port can come back, a live
+        # migration flaps it); the next full sync makes it dormant.
+        self.ext.domains[self.domain_id] = _attached(self.domain_id)
+        self.ext.domain_updated(self.ext.context,
+                                domain=_attached(self.domain_id))
+        self.ext.dataplane.ensure_domain.assert_called_once()
+        self.ext.dataplane.delete_domain.assert_not_called()
+        self._sync(_attached(self.domain_id))
+        self.ext.dataplane.delete_domain.assert_called_once_with(
+            self.domain_id, 7, 10007)
+        self.assertIn(self.domain_id, self.ext.dormant)
+
+    def test_a_port_back_before_the_sync_keeps_it(self):
+        self.ext.domains[self.domain_id] = _attached(self.domain_id)
+        self.ext.dataplane.local_network_vlans.return_value = {'net1': {100}}
+        self._sync(_attached(self.domain_id))
+        self.ext.dataplane.delete_domain.assert_not_called()
+        self.assertNotIn(self.domain_id, self.ext.dormant)
+
+    def test_a_restart_removes_what_an_older_build_left(self):
+        # An agent before this change programmed every domain everywhere.
+        self.ext.dataplane.present_function_ids.return_value = {7}
+        self._sync(_attached(self.domain_id))
+        self.ext.dataplane.delete_domain.assert_called_once_with(
+            self.domain_id, 7, 10007)
+        self.ext.dataplane.ensure_domain.assert_not_called()
+
+    def test_a_restart_keeps_an_active_domain(self):
+        self.ext.dataplane.present_function_ids.return_value = {7}
+        self.ext.dataplane.local_network_vlans.return_value = {'net1': {100}}
+        self._sync(_attached(self.domain_id))
+        self.ext.dataplane.delete_domain.assert_not_called()
+        self.ext.dataplane.ensure_domain.assert_called_once()
+
+    def test_unreadable_ovsdb_programs_it(self):
+        # Keeping unused state beats deleting state in use.
+        self.ext.dataplane.local_network_vlans.return_value = None
+        self._sync(_attached(self.domain_id))
+        self.ext.dataplane.ensure_domain.assert_called_once()
+        self.ext.dataplane.delete_domain.assert_not_called()
+        self.assertNotIn(self.domain_id, self.ext.dormant)
+
+    def test_gateway_reconcile_skips_it(self):
+        self._dormant()
+        self.ext.delete_port(self.ext.context, {'port_id': 'p1'})
+        self.ext.dataplane.reconcile_gateway_ports.assert_not_called()
