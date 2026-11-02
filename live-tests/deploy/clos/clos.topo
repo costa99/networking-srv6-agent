@@ -1,0 +1,50 @@
+# Clos test bed topology (PLAN-CLOS-TESTBED.md): the one source of truth for the
+# libvirt networks, the NICs, the addresses and the static routes (clos.py).
+#
+# node <name> <role> <id> <vm> <mgmt address> [<ovn vm> <ovn mgmt address>]
+#   id    hex: locator fc00:0:<id>::/48 and loopback fd00:cc::<id>/128. Hosts keep
+#         the locator their SRv6 agent already uses (fc00:0:N, N = node number).
+#   role  spine | leaf | host. clos.py installs the uN only on spine and leaf; on a
+#         host the SRv6 agent installs it.
+#   mgmt  spine/leaf: fixed lease on libvirt's NAT network "default" (reach it with
+#         ssh -J stack@10.47.7.66); host: its LAN address.
+#   ovn   a host slot is shared by the ML2 VM and the OVN cloud's VM (PLAN-PATH-
+#         COMPUTATION U6): same NICs (same MACs), links and addresses; only one
+#         cloud runs at a time. CLOS_CLOUD=ovn makes clos.py/clos.sh use them.
+node s1  spine a1 ale-s1  192.168.122.11
+node s2  spine a2 ale-s2  192.168.122.12
+node l1  leaf  b1 ale-l1  192.168.122.21
+node l2  leaf  b2 ale-l2  192.168.122.22
+node l3  leaf  b3 ale-l3  192.168.122.23
+node l4  leaf  b4 ale-l4  192.168.122.24
+node ml1 host  1  ale-ml1 10.47.7.151 ale-ovn1 10.47.7.141
+node ml4 host  4  ale-ml4 10.47.7.154 ale-ovn4 10.47.7.144
+node ml5 host  5  ale-ml5 10.47.7.155 ale-ovn5 10.47.7.145
+node ml6 host  6  ale-ml6 10.47.7.156 ale-ovn6 10.47.7.146
+
+# link <a> <b> <capacity Mbit/s>
+# Capacity per direction, enforced by tc tbf on mac-server's two taps of the link
+# (clos.sh shape, PLAN-PATH-COMPUTATION step 3). Spine-leaf 100 Mbit/s: below what
+# the tenant VMs can send (TCP 0.4-2.4 Gbit/s, UDP ~110 Mbit/s per VM), so the
+# fabric, not a VM, is the bottleneck. Host links 1000.
+# Link i (1-based, in this order) is fd01:<i>::/64, a = ::1, b = ::2; its libvirt
+# network is clos-<a><b> on bridge br-<a><b>. The capacity is not enforced yet
+# (D8): it is for tc and the path computation's TE database later.
+link s1 l1  100
+link s1 l2  100
+link s1 l3  100
+link s1 l4  100
+link s2 l1  100
+link s2 l2  100
+link s2 l3  100
+link s2 l4  100
+link l1 ml1 1000
+link l2 ml1 1000
+link l1 ml4 1000
+link l2 ml4 1000
+link l3 ml5 1000
+link l4 ml5 1000
+# rack B's second host (PLAN-PATH-COMPUTATION U3); appended so links 1-e keep
+# their prefixes and MACs
+link l3 ml6 1000
+link l4 ml6 1000
