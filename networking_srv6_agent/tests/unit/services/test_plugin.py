@@ -41,6 +41,7 @@ from oslo_config import cfg
 from oslo_utils import uuidutils
 
 from networking_srv6_agent.api.definitions import srv6 as srv6_def
+from networking_srv6_agent.common import config
 from networking_srv6_agent.db import srv6_db
 from networking_srv6_agent.db import te_db
 from networking_srv6_agent import extensions as srv6_extensions
@@ -129,6 +130,21 @@ class Srv6RestTestCase(test_db_plugin.NeutronDbPluginV2TestCase,
 
 
 class TestDomainApi(Srv6RestTestCase):
+
+    def test_a_project_gets_ten_domains_by_default(self):
+        # audit 2026-11-02b finding 1: srv6_domain fell back to
+        # default_quota (unlimited), so one project could take every id of
+        # the shared function id pool
+        for n in range(10):
+            self._domain(project_id='tenant-q', name='q%d' % n)
+        res = self._domain(expected=409, project_id='tenant-q', name='q10')
+        self.assertEqual('OverQuota', res['NeutronError']['type'])
+        self._domain(project_id='tenant-other')        # per project
+
+    def test_the_domain_quota_is_read_from_config(self):
+        self.config(group=config.QUOTAS_GROUP, quota_srv6_domain=1)
+        self._domain(project_id='tenant-q')
+        self._domain(expected=409, project_id='tenant-q', name='second')
 
     def test_create_allocates_but_hides_the_sid_from_the_tenant(self):
         domain = self._domain()
@@ -634,6 +650,65 @@ class TestSyncState(PluginUnitTestCaseBase):
         self.plugin.handle_sync_state(self.ctx, 'node1', 'fc00:0:1::/48')
         args = self.srv6_db.set_host_locator.call_args[0]
         self.assertEqual(('node1', 'fc00:0:1::/48'), args[1:3])
+
+    # --- one locator per node (audit 2026-11-02b finding 2) -------------
+    def _registered(self, alive):
+        self.srv6_db.get_host_locators.return_value = {
+            'node1': 'fc00:0:1::/48', 'node2': 'fc00:0:2::/48'}
+        self.core.get_agents.return_value = [{'host': 'node2',
+                                              'alive': alive}]
+
+    def test_a_locator_a_live_node_holds_is_refused(self):
+        # a local.conf copied from node2: node3's VMs would be routed
+        # into node2's SID space, silently
+        self._registered(alive=True)
+        with mock.patch.object(plugin.LOG, 'error') as error:
+            self.assertRaises(rpc.Srv6SyncRefused,
+                              self.plugin.handle_sync_state,
+                              self.ctx, 'node3', 'fc00:0:2::/48')
+        self.srv6_db.set_host_locator.assert_not_called()
+        self.assertIn('node2', error.call_args[0][1]['o'])
+        self.core.get_agents.assert_called_once_with(
+            self.admin_ctx, filters={'agent_type': [n_const.AGENT_TYPE_OVS],
+                                     'host': ['node2']})
+
+    def test_an_overlapping_locator_is_refused_too(self):
+        # full SIDs: locators need not be /48, so one can nest in another
+        # (in usid mode a /64 is refused anyway, as not F3216)
+        self.plugin.encoding = plugin.constants.ENCODING_ENCAP
+        self._registered(alive=True)
+        self.assertRaises(rpc.Srv6SyncRefused, self.plugin.handle_sync_state,
+                          self.ctx, 'node3', 'fc00:0:2:1::/64')
+
+    def test_a_dead_node_s_locator_is_taken_over(self):
+        # node2 reinstalled as node3 with its old locator: the row of
+        # node2 never expires, and must not lock node3 out
+        self._registered(alive=False)
+        self.plugin.handle_sync_state(self.ctx, 'node3', 'fc00:0:2::/48')
+        self.srv6_db.delete_host_locator.assert_called_once_with(
+            self.admin_ctx, 'node2')
+        self.assertEqual(('node3', 'fc00:0:2::/48'),
+                         self.srv6_db.set_host_locator.call_args[0][1:3])
+
+    def test_unknowable_liveness_refuses(self):
+        self._registered(alive=False)
+        self.core.get_agents.side_effect = RuntimeError('db down')
+        self.assertRaises(rpc.Srv6SyncRefused, self.plugin.handle_sync_state,
+                          self.ctx, 'node3', 'fc00:0:2::/48')
+        self.srv6_db.delete_host_locator.assert_not_called()
+
+    def test_a_fabric_node_s_locator_is_refused(self):
+        self.plugin.fabric_locators = {'s1': 'fc00:0:a1::/48'}
+        self.assertRaises(rpc.Srv6SyncRefused, self.plugin.handle_sync_state,
+                          self.ctx, 'node3', 'fc00:0:a1::/48')
+
+    def test_one_s_own_locator_and_a_distinct_one_are_fine(self):
+        self._registered(alive=True)
+        self.plugin.fabric_locators = {'node2': 'fc00:0:2::/48'}
+        self.plugin.handle_sync_state(self.ctx, 'node2', 'fc00:0:2::/48')
+        self.plugin.handle_sync_state(self.ctx, 'node3', 'fc00:0:3::/48')
+        self.assertEqual(2, self.srv6_db.set_host_locator.call_count)
+        self.srv6_db.delete_host_locator.assert_not_called()
 
     def test_missing_locator_still_returns_state(self):
         self.srv6_db.get_function_id.return_value = 7

@@ -1821,6 +1821,62 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                  constants.TOPIC_SRV6_PLUGIN)
         return self.conn.consume_in_threads()
 
+    def _agent_alive(self, admin_context, host):
+        """Whether host's Open vSwitch agent is alive; True if unknowable.
+
+        Unknowable (no get_agents, or it fails) counts as alive, so the
+        caller refuses rather than takes a locator away from a live node.
+        """
+        try:
+            agents = self._core_plugin().get_agents(
+                admin_context, filters={'agent_type': [n_const.AGENT_TYPE_OVS],
+                                        'host': [host]})
+        except Exception:
+            LOG.exception("SRv6: cannot read the agent liveness of %s", host)
+            return True
+        return any(agent['alive'] for agent in agents)
+
+    def _claim_locator(self, admin_context, host, locator):
+        """Refuse a locator that overlaps another node's (audit 2026-11-02b).
+
+        Two nodes with one locator get one SID space: every route to the
+        second node's VMs leads into the first node's, the underlay
+        delivers it there, and nothing complains. So a locator overlapping
+        a fabric node's (topology_file) or a registered host's whose agent
+        is alive is refused: the agent logs the failed sync and retries.
+        A registered host whose agent is down (or gone) loses its row
+        instead: the rows never expire, and a node reinstalled under a new
+        name with its old locator must be able to come back.
+        """
+        mine = ipaddress.IPv6Network(locator, strict=False)
+        registered = srv6_db.get_host_locators(admin_context)
+        others = {**self.fabric_locators, **registered}
+        for other, theirs in sorted(others.items()):
+            if other == host or not theirs:
+                continue
+            try:
+                overlap = mine.overlaps(
+                    ipaddress.IPv6Network(theirs, strict=False))
+            except ValueError:
+                continue
+            if not overlap:
+                continue
+            if other in registered and not self._agent_alive(admin_context,
+                                                             other):
+                LOG.warning("SRv6: %(h)s reports locator %(l)s, which "
+                            "overlaps %(o)s's %(t)s; %(o)s's agent is down, "
+                            "so its locator row is removed and %(h)s takes "
+                            "it", {'h': host, 'l': locator, 'o': other,
+                                   't': theirs})
+                srv6_db.delete_host_locator(admin_context, other)
+                continue
+            LOG.error("SRv6 agent on %(h)s reported locator %(l)s, which "
+                      "overlaps the locator %(t)s of %(o)s; refusing its "
+                      "sync. Give every node its own locator.",
+                      {'h': host, 'l': locator, 'o': other, 't': theirs})
+            raise rpc.Srv6SyncRefused(
+                "locator %s overlaps %s of %s" % (locator, theirs, other))
+
     def handle_sync_state(self, context, host, locator, capabilities=None):
         """Register a locator and return every domain's full state.
 
@@ -1853,6 +1909,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 # Not []: the agent would remove every domain it holds.
                 raise rpc.Srv6SyncRefused(
                     "unusable locator %s: %s" % (locator, e))
+            self._claim_locator(admin_context, host, locator)
             locator_changed = srv6_db.set_host_locator(
                 admin_context, host, locator,
                 datetime.datetime.now(datetime.timezone.utc))

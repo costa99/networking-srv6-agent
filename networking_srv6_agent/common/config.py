@@ -184,8 +184,26 @@ srv6_agent_opts = [
 ]
 
 
+# Neutron's own group, where it looks up quota_<resource> for every
+# registered quota resource; without this option srv6_domain fell back to
+# default_quota, unlimited (audit 2026-11-02b finding 1).
+QUOTAS_GROUP = 'QUOTAS'
+
+quota_opts = [
+    cfg.IntOpt(
+        'quota_srv6_domain',
+        default=10,
+        help=_("Number of SRv6 domains allowed per project. Every domain "
+               "takes a SID function id from a pool all projects share "
+               "(function_id_ranges, 4096 ids at most), so without a limit "
+               "one project could take them all. A negative value means "
+               "unlimited.")),
+]
+
+
 def register_server_opts(conf=cfg.CONF):
     conf.register_opts(srv6_server_opts, SRV6_SERVER_GROUP)
+    conf.register_opts(quota_opts, QUOTAS_GROUP)
 
 
 def register_agent_opts(conf=cfg.CONF):
@@ -195,4 +213,5 @@ def register_agent_opts(conf=cfg.CONF):
 def list_opts():
     """Entry point for oslo-config-generator."""
     return [(SRV6_SERVER_GROUP, srv6_server_opts),
-            (SRV6_AGENT_GROUP, srv6_agent_opts)]
+            (SRV6_AGENT_GROUP, srv6_agent_opts),
+            (QUOTAS_GROUP.lower(), quota_opts)]

@@ -224,6 +224,12 @@ def set_host_locator(context, host, locator, when):
     return changed
 
 
+@db_api.CONTEXT_WRITER
+def delete_host_locator(context, host):
+    """Forget a host's locator row (a dead node whose locator moved on)."""
+    context.session.query(SRv6HostLocator).filter_by(host=host).delete()
+
+
 @db_api.CONTEXT_READER
 def get_host_locators(context):
     """{host: locator} for every node that has ever registered."""

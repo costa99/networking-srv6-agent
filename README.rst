@@ -16,6 +16,18 @@ run; under linuxbridge it refuses to initialise. Kernel 5.x or newer with
 ``CONFIG_IPV6_SEG6_LWTUNNEL``, and an IPv6-routable underlay.
 
 
+Limits
+------
+
+Every SRv6 domain takes a SID function id from a pool all projects share
+(``[srv6] function_id_ranges``, 4096 ids at most), so a project may create 10
+domains by default. Change it with ``[quotas] quota_srv6_domain`` (negative:
+unlimited), or per project through Neutron's quota API
+(``PUT /v2.0/quotas/<project>`` with ``srv6_domain``). Every agent needs a
+locator of its own: the server refuses a sync whose locator overlaps the
+locator of another live node or of a ``topology_file`` node.
+
+
 Command line
 ------------
 
