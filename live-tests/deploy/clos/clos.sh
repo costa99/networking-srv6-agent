@@ -1,15 +1,16 @@
 #!/bin/bash
 # clos.sh <action> [node...]   -- the Clos underlay of PLAN-CLOS-TESTBED.md
 #
-# Builds and checks a 2-spine / 4-leaf routed fabric of small VMs on mac-server
-# (10.47.7.66) under the ML2 cloud's hosts ale-ml1/4/5. clos.topo is the only
-# input; clos.py derives the networks, MACs, addresses and routes from it.
+# Builds and checks a 2-spine / 6-leaf routed fabric of small VMs on mac-server
+# (10.47.7.66) under the ML2 cloud's hosts ale-ml1/4/5/6/7/8 (racks l1/l2,
+# l3/l4, l5/l6). clos.topo is the only input; clos.py derives the networks,
+# MACs, addresses and routes from it.
 # Every action is idempotent.
 #
 #   nets     one isolated libvirt network per link (bridge br-<a><b>, MTU 9000)
 #   fabric   the spine/leaf VMs: disk, cloud-init seed, fixed NAT lease, all NICs;
 #            wait for SSH, then push
-#   hosts    attach the fabric NICs to every host VM of both clouds (ale-ml1/4/5/6
+#   hosts    attach the fabric NICs to every host VM of both clouds (ale-ml1/4/5/6/7/8
 #            and ale-ovn1/4/5/6 share a slot's NICs; persistent, live too if the
 #            VM runs), and any NIC a fabric VM lacks after links were added to
 #            clos.topo; then push to the running ones

@@ -50,7 +50,7 @@ def load(path=TOPO):
 
 
 def v4_lo(node):
-    """IPv4 loopback: the id read as hex (hosts 1-6, spines a1/a2 = 161/162, leaves b1-b4 = 177-180)."""
+    """IPv4 loopback: the id read as hex (hosts 1-8, spines a1/a2 = 161/162, leaves b1-b6 = 177-182)."""
     return '10.255.0.%d' % int(node['id'], 16)
 
 
@@ -233,7 +233,7 @@ def te_topology(nodes, links):
 
 def selftest():
     nodes, links = load()
-    assert len(links) == 16 and len(nodes) == 10
+    assert len(links) == 24 and len(nodes) == 14
     r = dict(routes('ml1', nodes, links))
     assert [d for _, d in r['fc00:0:5::/48']] == ['l1', 'l2'], r['fc00:0:5::/48']
     assert [d for _, d in r['fc00:0:4::/48']] == ['l1', 'l2']          # intra-rack via both leaves
@@ -253,6 +253,8 @@ def selftest():
         return 1 if u == dst else sum(count(v, dst, d) for v in adj[u] if d[v] == d[u] - 1)
     assert count('ml1', 'ml5', distances(adj, ['ml5'])) == 8
     assert count('ml4', 'ml6', distances(adj, ['ml6'])) == 8
+    assert count('ml1', 'ml7', distances(adj, ['ml7'])) == 8           # rack A -> rack C
+    assert count('ml7', 'ml8', distances(adj, ['ml8'])) == 2           # intra-rack C
     assert nodes['ml6']['vms'] == ['ale-ml6', 'ale-ovn6'] and nodes['s1']['vms'] == ['ale-s1']
     r = dict(routes('ml1', nodes, links))
     assert [d for _, d in r['10.255.0.5/32']] == ['l1', 'l2'], r['10.255.0.5/32']
@@ -273,7 +275,7 @@ def selftest():
     assert 'seg6local' not in boot_script('ml1', nodes, links)
     al = agent_links('l1', nodes, links).splitlines()[2:]
     assert al == ['s1 l1 s1', 's2 l1 s2', 'ml1 l1 ale-ml1', 'ml4 l1 ale-ml4'], al
-    assert len(agent_links('s1', nodes, links).splitlines()) == 2 + 4
+    assert len(agent_links('s1', nodes, links).splitlines()) == 2 + 6
     print('clos.py self-test ok')
 
 
