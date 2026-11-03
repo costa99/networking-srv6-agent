@@ -41,7 +41,6 @@ _attr_map = (
     ('source_host', 'Source Host', column_util.LIST_BOTH),
     ('source_port_id', 'Source Port', column_util.LIST_LONG_ONLY),
     ('via_hosts', 'Via Hosts', column_util.LIST_BOTH),
-    ('bandwidth', 'Bandwidth (Mbit/s)', column_util.LIST_BOTH),
     ('status', 'Status', column_util.LIST_BOTH),
     ('origin', 'Origin', column_util.LIST_LONG_ONLY),
     ('segments', 'Segments', column_util.LIST_LONG_ONLY),
@@ -130,14 +129,6 @@ class CreateTePath(command.ShowOne):
         _add_via_host_argument(
             parser, _("Waypoint host, in traversal order (repeat option "
                       "for more hosts). Without it the path is direct"))
-        parser.add_argument(
-            '--bandwidth',
-            metavar='<Mbit/s>',
-            type=int,
-            help=_("Reserve this many Mbit/s on every link of the path: the "
-                   "server computes the waypoints over its underlay topology "
-                   "and refuses the path (409) when no route has room. Needs "
-                   "--source-host; excludes --via-host"))
         return parser
 
     def take_action(self, parsed_args):
@@ -161,8 +152,6 @@ class CreateTePath(command.ShowOne):
         # Only send waypoints if the user gave some.
         if parsed_args.via_hosts is not None:
             attrs['via_hosts'] = parsed_args.via_hosts
-        if parsed_args.bandwidth is not None:
-            attrs['bandwidth'] = parsed_args.bandwidth
         # Create the path and print it.
         return _show(client._create(resources.Srv6TePath, **attrs))
 

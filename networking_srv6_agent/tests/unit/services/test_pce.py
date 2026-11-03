@@ -19,6 +19,7 @@ spine-leaf links 100 Mbit/s, host links 1000, hosts ml1/ml4 dual-homed to
 l1/l2 (rack A), ml5/ml6 to l3/l4 (rack B).
 """
 
+import collections
 import os
 import tempfile
 
@@ -55,6 +56,15 @@ link l4 ml5 1000
 link l3 ml6 1000
 link l4 ml6 1000
 """
+
+
+def _used(paths):
+    """{(a, b): Mbit/s} that [(node path, Mbit/s)] put on each link."""
+    used = collections.Counter()
+    for path, bw in paths:
+        for link in pce.links_of(path):
+            used[link] += bw
+    return used
 
 
 class PceTestCase(base.BaseTestCase):
@@ -112,7 +122,7 @@ class TestCompute(PceTestCase):
                          pce.compute(self.cap, {}, 'ml1', 'ml4', 500))
 
     def test_the_least_used_spine_wins(self):
-        used = pce.reserved([(['ml1', 'l1', 's1', 'l3', 'ml5'], 60)])
+        used = _used([(['ml1', 'l1', 's1', 'l3', 'ml5'], 60)])
         path = pce.compute(self.cap, used, 'ml1', 'ml5', 10)
         # l1-s1 has 40 left, every other uplink 100: the widest avoids it
         self.assertNotIn(('l1', 's1'), pce.links_of(path))
@@ -123,10 +133,10 @@ class TestCompute(PceTestCase):
         paths = []
         for src, dst in (('ml1', 'ml5'), ('ml4', 'ml6'),
                          ('ml1', 'ml5'), ('ml4', 'ml6')):
-            path = pce.compute(self.cap, pce.reserved(paths), src, dst, 60)
+            path = pce.compute(self.cap, _used(paths), src, dst, 60)
             self.assertIsNotNone(path)
             paths.append((path, 60))
-        used = pce.reserved(paths)
+        used = _used(paths)
         spine = {k: v for k, v in used.items() if 's' in k[0] + k[1]
                  and 'ml' not in k[0] + k[1]}
         self.assertTrue(all(v <= 100 for v in spine.values()), spine)
@@ -135,21 +145,21 @@ class TestCompute(PceTestCase):
     def test_fill_then_reject(self):
         paths = []
         for _ in range(4):                        # 4 x 100 Mbit/s uplinks
-            path = pce.compute(self.cap, pce.reserved(paths), 'ml1', 'ml5', 90)
+            path = pce.compute(self.cap, _used(paths), 'ml1', 'ml5', 90)
             self.assertIsNotNone(path)
             paths.append((path, 90))
         self.assertIsNone(
-            pce.compute(self.cap, pce.reserved(paths), 'ml1', 'ml5', 90))
+            pce.compute(self.cap, _used(paths), 'ml1', 'ml5', 90))
         # what is left still fits a small one
         self.assertIsNotNone(
-            pce.compute(self.cap, pce.reserved(paths), 'ml1', 'ml5', 10))
+            pce.compute(self.cap, _used(paths), 'ml1', 'ml5', 10))
 
     def test_directions_are_independent(self):
         paths = [(p, 100) for p in (['ml1', 'l1', 's1', 'l3', 'ml5'],
                                     ['ml1', 'l1', 's2', 'l3', 'ml5'],
                                     ['ml1', 'l2', 's1', 'l4', 'ml5'],
                                     ['ml1', 'l2', 's2', 'l4', 'ml5'])]
-        used = pce.reserved(paths)
+        used = _used(paths)
         self.assertIsNone(pce.compute(self.cap, used, 'ml1', 'ml5', 1))
         # the reverse direction has not been touched
         self.assertIsNotNone(pce.compute(self.cap, used, 'ml5', 'ml1', 100))

@@ -28,7 +28,8 @@ import collections
 import os
 import sys
 
-TOPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'clos.topo')
+# CLOS_TOPO: a variant of the topology (e.g. one spine slowed down, PLAN-MODE-EVALUATION B6)
+TOPO = os.environ.get('CLOS_TOPO') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'clos.topo')
 
 
 def load(path=TOPO):

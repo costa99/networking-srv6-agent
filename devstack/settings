@@ -18,12 +18,9 @@ SRV6_UNDERLAY_INTERFACE=${SRV6_UNDERLAY_INTERFACE:-}
 SRV6_FUNCTION_ID_RANGES=${SRV6_FUNCTION_ID_RANGES:-0xe000:0xefff}
 # usid (RFC 9800 microSID, USID-PLAN.md; the default) or encap (full SIDs).
 SRV6_DATAPLANE_ENCODING=${SRV6_DATAPLANE_ENCODING:-usid}
-# Optional, server: the underlay topology file for bandwidth-reserved TE paths
-# ([srv6] topology_file, PLAN-PATH-COMPUTATION). Unset: no computed paths.
+# Optional, server: the underlay topology file ([srv6] topology_file): link
+# state and automatic steering. Unset: neither.
 SRV6_TOPOLOGY_FILE=${SRV6_TOPOLOGY_FILE:-}
-# Server: the share of every topology link that reservations may fill; the
-# rest stays free for traffic without a reservation ([srv6] reservable_fraction).
-SRV6_RESERVABLE_FRACTION=${SRV6_RESERVABLE_FRACTION:-0.8}
 
 # EVERY node: the agent derives a domain's table from the same base as the
 # server. A compute-only node that lacked it would silently use the default

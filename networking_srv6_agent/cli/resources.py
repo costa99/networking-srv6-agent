@@ -114,7 +114,6 @@ class Srv6LinkState(resource.Resource):
     delivered_mbps = resource.Body('delivered_mbps')
     peak_mbps = resource.Body('peak_mbps')
     capacity_mbps = resource.Body('capacity_mbps')
-    reserved_mbps = resource.Body('reserved_mbps')
     drops = resource.Body('drops')
     measured_at = resource.Body('measured_at')
     age = resource.Body('age', type=int)
@@ -189,8 +188,6 @@ class Srv6TePath(resource.Resource):
     origin = resource.Body('origin')
     #: Traversal order. An update replaces the whole list.
     via_hosts = resource.Body('via_hosts', type=list)
-    # Mbit/s reserved on every link; the server then computes via_hosts.
-    bandwidth = resource.Body('bandwidth', type=int)
     #: What the server resolved on read: via End SIDs, then the decap SID.
     segments = resource.Body('segments', type=list)
     #: What the ingress pushes: the same SIDs, or microSID containers.

@@ -100,10 +100,6 @@ class TestCreate(SourcePortTestCase):
         self._refused('exclude each other', destination_host='node2',
                       source_host='node3')
 
-    def test_not_with_bandwidth(self):
-        self._refused('does not reserve', destination_host='node2',
-                      bandwidth=10)
-
     def test_not_to_itself(self):
         self._refused('its own destination', destination_port_id=VM)
 
@@ -248,7 +244,6 @@ class TestVmMovesAndGoes(SourcePortTestCase):
         self.push = push.start()
         self.addCleanup(push.stop)
         self.admin = self.ctx.elevated.return_value
-        self.te_db.delete_moved_reservations.return_value = []
 
     def _moved(self, old, new):
         before = dict(self.ports[VM], status='ACTIVE',

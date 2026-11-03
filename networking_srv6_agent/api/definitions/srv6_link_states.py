@@ -28,8 +28,8 @@ delivered). The batch is stored as a whole or refused as a whole; the
 server stamps it with its own clock (measured_at), never the reporter's.
 
 GET returns one entry per directed link of the topology file, computed
-from the stored measurements, its capacity and the reservations on it: the
-read-only attributes below. The id is "<from>:<to>".
+from the stored measurements and its capacity: the read-only attributes
+below. The id is "<from>:<to>".
 """
 
 from neutron_lib.api import converters
@@ -41,7 +41,7 @@ NAME = 'SRv6 link states'
 ALIAS = 'srv6-link-states'
 DESCRIPTION = ("Measured load and state of every underlay link, posted by "
                "the fabric nodes")
-UPDATED_TIMESTAMP = '2026-11-01T00:00:00-00:00'
+UPDATED_TIMESTAMP = '2026-11-03T00:00:00-00:00'
 API_PREFIX = ''
 IS_SHIM_EXTENSION = False
 IS_STANDARD_ATTR_EXTENSION = False
@@ -77,9 +77,7 @@ RESOURCE_ATTRIBUTE_MAP = {
         # sender's when it reports, the receiver's otherwise).
         'delivered_mbps': dict(_out),
         'peak_mbps': dict(_out),            # highest mbps in the window
-        # from the topology file and the reservations (the books)
-        'capacity_mbps': dict(_out),
-        'reserved_mbps': dict(_out),
+        'capacity_mbps': dict(_out),        # from the topology file
         'measured_at': dict(_out),
         'age': dict(_out),                  # seconds since measured_at
         'stale': dict(_out),

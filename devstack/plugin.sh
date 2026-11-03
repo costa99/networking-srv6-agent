@@ -37,7 +37,6 @@ elif [[ "$1" == "stack" && "$2" == "post-config" ]]; then
         neutron_service_plugin_class_add srv6
         iniset $NEUTRON_CONF srv6 function_id_ranges $SRV6_FUNCTION_ID_RANGES
         iniset $NEUTRON_CONF srv6 dataplane_encoding $SRV6_DATAPLANE_ENCODING
-        iniset $NEUTRON_CONF srv6 reservable_fraction $SRV6_RESERVABLE_FRACTION
         if [[ -n "$SRV6_TOPOLOGY_FILE" ]]; then
             iniset $NEUTRON_CONF srv6 topology_file $SRV6_TOPOLOGY_FILE
         fi

@@ -99,8 +99,8 @@ def build(locators, domains, ports, te_paths, path_url, links=()):
     for ls in links:
         cap, mbps = ls.get('capacity_mbps'), ls.get('mbps')
         link = {k: ls.get(k) for k in (
-            'up', 'mbps', 'delivered_mbps', 'peak_mbps', 'reserved_mbps',
-            'capacity_mbps', 'age', 'stale')}
+            'up', 'mbps', 'delivered_mbps', 'peak_mbps', 'capacity_mbps',
+            'age', 'stale')}
         link.update({'from': ls.get('from_node'), 'to': ls.get('to_node'),
                      'load': (round(mbps / cap, 4)
                               if cap and mbps is not None else None)})

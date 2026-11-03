@@ -93,7 +93,6 @@ class TestCreateTePath(_Base):
             'Source Port': None,
             'Origin': None,
             'Via Hosts': common.PathColumn(['node2']),
-            'Bandwidth (Mbit/s)': None,
             'Status': 'ACTIVE',
             'Segments': common.PathColumn(SEGMENTS),
             'Encoded Segments': common.PathColumn(SEGMENTS),
@@ -115,15 +114,6 @@ class TestCreateTePath(_Base):
         self.network._create.assert_called_once_with(
             TE, domain_id=base.DOMAIN_ID, destination_host='node3',
             source_host='node1', via_hosts=['node2'])
-
-    def test_bandwidth_is_sent(self):
-        self.run_cmd(self.cmd, ['--domain', 'red',
-                                '--destination-host', 'node3',
-                                '--source-host', 'node1',
-                                '--bandwidth', '60'])
-        self.network._create.assert_called_once_with(
-            TE, domain_id=base.DOMAIN_ID, destination_host='node3',
-            source_host='node1', bandwidth=60)
 
     def test_both_selectors(self):
         self.assertParserFails(self.cmd, [
@@ -149,12 +139,12 @@ class TestListTePath(_Base):
         self.network._list.assert_called_once_with(TE)
         self.assertEqual(('ID', 'Domain ID', 'Destination Host',
                           'Destination Port', 'Source Host', 'Via Hosts',
-                          'Bandwidth (Mbit/s)', 'Status'),
+                          'Status'),
                          headers)
         self.assertEqual(
             [(base.TE_PATH_ID, base.DOMAIN_ID, None, base.PORT_ID,
               te_path.SourceHostColumn(None),
-              common.PathColumn(['node2']), None, 'ACTIVE')],
+              common.PathColumn(['node2']), 'ACTIVE')],
             list(rows))
 
     def test_long_with_filters(self):

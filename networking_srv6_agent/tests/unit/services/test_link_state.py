@@ -31,8 +31,8 @@ from networking_srv6_agent.tests.unit.services import test_plugin
 
 LS = 'srv6_link_states'
 T0 = datetime.datetime(2026, 11, 1, 12, 0, 0)
-CAPACITY = {('s1', 'l1'): 80, ('l1', 's1'): 80,
-            ('l1', 'ml1'): 800, ('ml1', 'l1'): 800}
+CAPACITY = {('s1', 'l1'): 100, ('l1', 's1'): 100,
+            ('l1', 'ml1'): 1000, ('ml1', 'l1'): 1000}
 
 
 def _m(reporter, a, b, mbps=10.0, up=True, drops=0):
@@ -44,8 +44,7 @@ class LinkStateRestTestCase(test_plugin.Srv6RestTestCase):
 
     def setUp(self):
         super().setUp()
-        self.srv6.capacity = dict(CAPACITY)            # x fraction 0.8
-        self.srv6.link_capacity = {k: v * 5 // 4 for k, v in CAPACITY.items()}
+        self.srv6.capacity = dict(CAPACITY)
         self.now = T0
         clock = mock.patch('oslo_utils.timeutils.utcnow',
                            side_effect=lambda *a, **kw: self.now)
@@ -265,11 +264,8 @@ class TestView(LinkStateRestTestCase):
                          (entry['stale'], entry['up'], entry['mbps'],
                           entry['measured_at'], entry['age']))
 
-    def test_capacity_and_reserved_next_to_the_measurement(self):
-        books = {('l1', 's1'): 60}
-        with mock.patch.object(self.srv6, '_books', return_value=books):
-            view = self._list()
-        self.assertEqual((100, 60), (view['l1', 's1']['capacity_mbps'],
-                                     view['l1', 's1']['reserved_mbps']))
-        self.assertEqual((1000, 0), (view['ml1', 'l1']['capacity_mbps'],
-                                     view['ml1', 'l1']['reserved_mbps']))
+    def test_capacity_next_to_the_measurement(self):
+        view = self._list()
+        self.assertEqual(CAPACITY[('l1', 's1')],
+                         view['l1', 's1']['capacity_mbps'])
+        self.assertNotIn('reserved_mbps', view['l1', 's1'])

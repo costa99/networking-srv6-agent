@@ -166,7 +166,6 @@ class BuildTests(helpers.TestCase):
              ('l1', 'ale-node3'): 'unknown', ('ale-node3', 'l1'): 'unknown'},
             {k: v['level'] for k, v in links.items()})
         self.assertEqual(0.6, links['l1', 's1']['load'])
-        self.assertEqual(40, links['l1', 's1']['reserved_mbps'])
         self.assertIsNone(links['ale-node3', 'l1']['load'])
 
     def test_level_thresholds(self):

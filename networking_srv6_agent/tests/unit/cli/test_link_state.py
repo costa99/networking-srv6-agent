@@ -23,7 +23,7 @@ def _entry():
     return resources.Srv6LinkState.existing(
         id='l1:s1', from_node='l1', to_node='s1', reporter='l1', up=True,
         mbps=150.0, delivered_mbps=100.0, peak_mbps=156.6, drops=0,
-        reserved_mbps=60, capacity_mbps=100,
+        capacity_mbps=100,
         measured_at=AT, age=3, stale=False)
 
 
@@ -35,10 +35,10 @@ class TestListLinkState(base.TestCommand):
             link_state.ListLinkState(self.app, None), [])
         self.network._list.assert_called_once_with(resources.Srv6LinkState)
         self.assertEqual(('From', 'To', 'Up', 'Mbit/s', 'Delivered', 'Peak',
-                          'Reserved', 'Capacity', 'Age (s)', 'Stale'),
+                          'Capacity', 'Age (s)', 'Stale'),
                          headers)
         self.assertEqual(
-            [('l1', 's1', True, 150.0, 100.0, 156.6, 60, 100, 3, False)],
+            [('l1', 's1', True, 150.0, 100.0, 156.6, 100, 3, False)],
             list(rows))
 
     def test_long_adds_reporter_drops_and_time(self):

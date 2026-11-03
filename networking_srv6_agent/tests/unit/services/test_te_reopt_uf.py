@@ -146,6 +146,16 @@ class TestSteer(SteerTestCase):
         [auto] = self._autos()
         self.assertEqual(self.vms[2], auto[te_def.SOURCE_PORT_ID])
 
+    def test_te_auto_fit_1_drops_the_margin(self):
+        # same loads: 40 + 50 <= 100, so the largest pair moves after all
+        self._conf(te_auto_fit=1.0)
+        self._pair(0, 1, 50)
+        self._pair(2, 3, 25)
+        self._congest_s1(also={S2: 40})
+        self.reopt.check()
+        [auto] = self._autos()
+        self.assertEqual(self.vms[0], auto[te_def.SOURCE_PORT_ID])
+
     def test_no_room_anywhere_nothing_moves(self):
         self._pair(0, 1, 50)
         self._pair(2, 3, 40)
@@ -173,27 +183,64 @@ class TestSteer(SteerTestCase):
         self.reopt.check()
         self.assertEqual([], self._autos())
 
-    def test_unreserved_pairs_move_before_reservations(self):
-        other = self._domain()['id']
-        [held] = self._on_s1(20)                      # another domain's
-        self._pair(0, 1, 40)
-        self._pair(2, 3, 30)
-        self._congest_s1()
-        self.reopt.check()
-        self.assertEqual(1, len(self._autos()))
-        self.assertEqual(test_te_reopt.VIA_S1, self._via(held))
-        self.assertTrue(other)
 
-    def test_the_budget_is_shared_with_reservations(self):
-        # 95 - 20 = 75 is still above 70, but the one move is spent
-        self._conf(te_reopt_max_moves=1)
-        [held] = self._on_s1(20)
-        self._pair(0, 1, 20)
-        self._pair(2, 3, 20)
-        self._congest_s1()
+class TestTrigger(SteerTestCase):
+    """When a link counts as congested (te_reopt_high, te_reopt_samples)."""
+
+    def setUp(self):
+        super().setUp()
+        self._pair(0, 1, 50)
+        self._pair(2, 3, 40)
+
+    def test_two_samples_are_not_enough(self):
+        self._samples(2, {S1: 95})
+        self.reopt.check()
+        self.assertEqual([], self._autos())
+
+    def test_one_sample_below_breaks_the_run(self):
+        for mbps in (95, 50, 95, 95):
+            self._sample({S1: mbps})
+        self.reopt.check()
+        self.assertEqual([], self._autos())
+
+    def test_at_or_below_high_never_moves(self):
+        self._samples(5, {S1: 90})                       # not above 90
+        self.reopt.check()
+        self.assertEqual([], self._autos())
+
+    def test_stale_samples_are_not_congestion(self):
+        self._samples(3, {S1: 95})
+        self._at(self.t + 16)                            # la went silent
+        self.reopt.check()
+        self.assertEqual([], self._autos())
+
+    def test_high_is_read_from_config(self):
+        self._conf(te_reopt_high=0.96)
+        self._samples(3, {S1: 95})
+        self.reopt.check()
+        self.assertEqual([], self._autos())
+
+    def test_samples_is_read_from_config(self):
+        self._conf(te_reopt_samples=2)
+        self._samples(2, {S1: 95})
         self.reopt.check()
         self.assertEqual(1, len(self._autos()))
-        self.assertEqual(test_te_reopt.VIA_S1, self._via(held))
+
+    def test_a_congested_link_with_no_pair_is_logged(self):
+        self.pairs = []
+        self._samples(3, {S1: 95})
+        with mock.patch.object(te_reopt.LOG, 'info') as info:
+            self.reopt.check()
+        self.assertEqual([], self._autos())
+        self.assertIn('no VM pair to steer', info.call_args[0][0])
+
+    def test_an_outage_of_the_collection_steers_nothing(self):
+        self._samples(3, {S1: 95})
+        self._at(self.t + 16)                   # every reporter silent
+        with mock.patch.object(te_reopt.LOG, 'error') as error:
+            self.reopt.check()
+        self.assertIn('outage', error.call_args[0][0])
+        self.assertEqual([], self._autos())
 
 
 class TestHoldDownAndMoves(SteerTestCase):

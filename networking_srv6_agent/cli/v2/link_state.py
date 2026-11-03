@@ -17,8 +17,7 @@
 Admin-only and read-only: the measured state of each directed underlay link,
 as the fabric nodes posted it (PLAN-LINK-STATE-TE). Mbit/s is the load the
 sender offered, Delivered what the receiver got, Peak the highest load in
-the server's link_state_window, Reserved what bandwidth reservations hold on
-the link, Capacity the topology file's.
+the server's link_state_window, Capacity the topology file's.
 """
 
 from osc_lib.command import command
@@ -35,7 +34,6 @@ _attr_map = (
     ('mbps', 'Mbit/s', column_util.LIST_BOTH),
     ('delivered_mbps', 'Delivered', column_util.LIST_BOTH),
     ('peak_mbps', 'Peak', column_util.LIST_BOTH),
-    ('reserved_mbps', 'Reserved', column_util.LIST_BOTH),
     ('capacity_mbps', 'Capacity', column_util.LIST_BOTH),
     ('age', 'Age (s)', column_util.LIST_BOTH),
     ('stale', 'Stale', column_util.LIST_BOTH),

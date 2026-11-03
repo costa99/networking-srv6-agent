@@ -261,17 +261,3 @@ def get_domain_ids_for_network(context, network_id):
     return [row.domain_id for row in
             context.session.query(SRv6DomainNetAssociation.domain_id)
             .filter_by(network_id=network_id).all()]
-
-
-@db_api.CONTEXT_WRITER
-def lock_all_domains(context):
-    """Lock every domain row until the caller's transaction ends.
-
-    The mutex of TE bandwidth admission: reservations are shared by all
-    domains, so one domain's row is not enough. Rows that always exist (a
-    path needs its domain), taken in primary key order by every caller, so
-    concurrent admissions queue instead of deadlocking. A no-op on SQLite
-    (unit tests), which has no FOR UPDATE.
-    """
-    context.session.query(SRv6Domain.id).order_by(
-        SRv6Domain.id).with_for_update().all()

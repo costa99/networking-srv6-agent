@@ -10,13 +10,12 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Online constrained path computation for bandwidth-reserved TE paths.
+"""Constrained path computation for the server's automatic paths (U-f).
 
-One request at a time (source, destination, bandwidth): drop every directed
+One request at a time (source, destination, demand): drop every directed
 link whose residual capacity is below the demand, then take the path with
-the fewest hops and, among those, the widest bottleneck -- CSPF with
-admission, Tier 1 of the research notes (PLAN-PATH-COMPUTATION). No path
-means the request is rejected; nothing is ever over-committed.
+the fewest hops and, among those, the widest bottleneck -- CSPF, Tier 1 of
+the research notes (PLAN-PATH-COMPUTATION). No path: nothing is moved.
 
 The underlay comes from a static topology file, read once:
 
@@ -85,9 +84,9 @@ def links_of(path):
 def compute(cap, used, src, dst, bw):
     """The widest of the shortest paths with room for bw, or None.
 
-    cap: {(a, b): Mbit/s}; used: {(a, b): Mbit/s already reserved}.
+    cap: {(a, b): Mbit/s}; used: {(a, b): Mbit/s already in use}.
     Returns the full node path [src, ..., dst]: every hop is pinned, so the
-    links a reservation occupies are known exactly.
+    links the traffic takes are known exactly.
 
     Dijkstra on the label (hops, -bottleneck): both only get worse along a
     path, so the first time dst is popped its label is optimal. Ties go to
@@ -152,12 +151,3 @@ def shortest_links(cap, src, dst):
                     step.add(a)
         frontier = step - {src}
     return links
-
-
-def reserved(paths):
-    """{(a, b): Mbit/s} reserved by [(node path, Mbit/s)]."""
-    used = collections.Counter()
-    for path, bw in paths:
-        for link in links_of(path):
-            used[link] += bw
-    return used

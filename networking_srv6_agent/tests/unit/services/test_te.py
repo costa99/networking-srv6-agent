@@ -28,20 +28,14 @@ from unittest import mock
 import fixtures
 
 from neutron_lib.api.definitions import portbindings
-from neutron_lib.callbacks import events
-from neutron_lib.callbacks import registry
-from neutron_lib.callbacks import resources
 from neutron_lib import exceptions as n_exc
 from oslo_db import exception as db_exc
 from oslo_utils import uuidutils
 
 from networking_srv6_agent.api.definitions import srv6_te as te_def
 from networking_srv6_agent.common import config
-from networking_srv6_agent.db import domain_db
 from networking_srv6_agent.db import srv6_db
-from networking_srv6_agent.db import te_db
 from networking_srv6_agent.services import plugin
-from networking_srv6_agent.services import te_liveness
 from networking_srv6_agent.tests.unit.services import test_plugin
 
 
@@ -1072,88 +1066,8 @@ class TestLivenessWorker(TePluginTestCaseBase):
         self.assertEqual([], self.plugin.get_workers())
 
 
-class TestStaleReservations(TePluginTestCaseBase):
-    """The safety net: a port that moved without the callback seeing it."""
-
-    def _held(self, *rows):
-        self.te_db.get_bandwidth_paths.return_value = [
-            {'destination_port_id': port_id, 'reserved_host': host}
-            for port_id, host in rows]
-
-    def _sweep(self, port_host):
-        port = test_plugin._port(id='p1', **{portbindings.HOST_ID: port_host})
-        self.core.get_ports.return_value = [port]
-        with mock.patch.object(self.plugin,
-                               '_release_moved_reservations') as release:
-            self.plugin._release_stale_reservations(self.ctx)
-        return release, port
-
-    def test_a_port_on_another_host_is_released(self):
-        self._held(('p1', 'node2'))
-        release, port = self._sweep('node3')
-        release.assert_called_once_with(self.ctx, port)
-        self.core.get_ports.assert_called_once_with(
-            self.ctx, filters={'id': ['p1']})
-
-    def test_an_unbound_port_is_released(self):
-        self._held(('p1', 'node2'))
-        self.assertTrue(self._sweep('')[0].called)
-
-    def test_a_port_still_on_its_host_is_left_alone(self):
-        self._held(('p1', 'node2'))
-        self._sweep('node2')[0].assert_not_called()
-
-    def test_the_domains_that_lost_a_reservation_are_pushed(self):
-        # audit 2026-11-02 finding 3: no route update follows the safety
-        # net, so without the push the head-end kept the deleted path
-        self._held(('p1', 'node2'), ('p2', 'node2'))
-        self.core.get_ports.return_value = [
-            test_plugin._port(id=p, **{portbindings.HOST_ID: 'node3'})
-            for p in ('p1', 'p2')]
-        with mock.patch.object(
-                self.plugin, '_release_moved_reservations',
-                side_effect=[[{'domain_id': 'd1'}, {'domain_id': 'd2'}],
-                             [{'domain_id': 'd1'}]]), \
-                mock.patch.object(self.plugin, '_push_domain_by_id') as push:
-            self.plugin._release_stale_reservations(self.ctx)
-        # once per domain
-        self.assertEqual([mock.call(self.ctx, 'd1'),
-                          mock.call(self.ctx, 'd2')], push.call_args_list)
-
-    def test_nothing_released_nothing_pushed(self):
-        self._held(('p1', 'node2'))
-        self.core.get_ports.return_value = [
-            test_plugin._port(id='p1', **{portbindings.HOST_ID: 'node3'})]
-        with mock.patch.object(self.plugin, '_release_moved_reservations',
-                               return_value=[]), \
-                mock.patch.object(self.plugin, '_push_domain_by_id') as push:
-            self.plugin._release_stale_reservations(self.ctx)
-        push.assert_not_called()
-
-    def test_host_reservations_need_no_port_lookup(self):
-        self._held((None, 'node2'))
-        self.plugin._release_stale_reservations(self.ctx)
-        self.core.get_ports.assert_not_called()
-
-    def test_the_worker_runs_it_whatever_the_liveness_part_does(self):
-        monitor = te_liveness.TeLivenessMonitor(self.plugin)
-        with mock.patch.object(monitor, '_check',
-                               side_effect=RuntimeError('db down')), \
-                mock.patch.object(self.plugin,
-                                  '_release_stale_reservations') as net:
-            monitor.check()                         # never raises
-        net.assert_called_once()
-
-    def test_a_failing_sweep_never_stops_the_worker(self):
-        monitor = te_liveness.TeLivenessMonitor(self.plugin)
-        with mock.patch.object(monitor, '_check'), \
-                mock.patch.object(self.plugin, '_release_stale_reservations',
-                                  side_effect=RuntimeError('db down')):
-            monitor.check()                         # never raises
-
-
 # ----------------------------------------------------------------------
-# bandwidth-reserved paths (PLAN-PATH-COMPUTATION)
+# the underlay topology (PLAN-PATH-COMPUTATION)
 # ----------------------------------------------------------------------
 # node1 -- la ==== s1, s2 ==== lb -- node2: two spines between two leaves,
 # 100 Mbit/s spine links, 1000 to the hosts. Set on the plugin instance, as
@@ -1167,238 +1081,26 @@ for _a, _b, _c in (('node1', 'la', 1000), ('node2', 'lb', 1000),
     CAPACITY[(_a, _b)] = CAPACITY[(_b, _a)] = _c
 
 
-class TestTeBandwidthApi(TeRestTestCase):
-    """POST with bandwidth: hops computed, reserved, refused when full."""
+class TestTopologyApi(TeRestTestCase):
+    """With a topology file: fabric waypoints; no bandwidth attribute."""
 
     def setUp(self):
         super().setUp()
         self.srv6.fabric_locators = dict(FABRIC)
         self.srv6.capacity = dict(CAPACITY)
 
-    def _reserve(self, expected=201, domain=None, **attrs):
-        body = dict({'destination_host': 'node2', 'source_host': 'node1',
-                     'bandwidth': 60}, **attrs)
-        if domain:
-            body['domain_id'] = domain
-        return self._path(expected, **body)
+    def test_an_operator_path_may_name_a_fabric_node(self):
+        path = self._host_path(via_hosts=['s2'])
+        self.assertNotIn('bandwidth', path)
+        self.assertEqual(['fc00:0:c2:fff0::', self._decap()],
+                         path['segments'])
 
-    def test_the_hops_are_computed_and_pinned(self):
-        path = self._reserve()
-        self.assertEqual(['la', 's1', 'lb'], path['via_hosts'])
-        self.assertEqual(60, path['bandwidth'])
-        self.assertEqual('ACTIVE', path['status'])
-        self.assertEqual(['fc00:0:a:fff0::', 'fc00:0:c1:fff0::',
-                          'fc00:0:b:fff0::', self._decap()], path['segments'])
+    def test_bandwidth_is_no_longer_an_attribute(self):
+        res = self._path(400, destination_host='node2', source_host='node1',
+                         bandwidth=60)
+        self.assertIn('bandwidth', self._message(res))
 
-    def test_the_second_reservation_takes_the_other_spine_then_409(self):
-        # one path per (domain, destination, source): one domain each
-        self._reserve()
-        second = self._reserve(domain=self._domain()['id'])
-        self.assertEqual(['la', 's2', 'lb'], second['via_hosts'])
-        res = self._reserve(expected=409, domain=self._domain()['id'])
-        self.assertIn('60 Mbit/s', self._message(res))
-        # what is left on each spine still fits a smaller one
-        self.assertEqual(40, self._reserve(domain=self._domain()['id'],
-                                           bandwidth=40)['bandwidth'])
-
-    def test_admission_reads_the_reservations_under_the_lock(self):
-        # Concurrent creates over-committed a link when the read and the
-        # insert were two steps (Phase C): the lock must come first.
-        order = []
-        lock, read = domain_db.lock_all_domains, te_db.get_bandwidth_paths
-        with mock.patch.object(domain_db, 'lock_all_domains',
-                               side_effect=lambda c: order.append('lock') or
-                               lock(c)), \
-                mock.patch.object(te_db, 'get_bandwidth_paths',
-                                  side_effect=lambda c: order.append('read') or
-                                  read(c)):
-            self._reserve()
-            self._host_path()                     # no bandwidth: no lock
-        # every read of the books (the admission's and the live-capacity
-        # view's) after the lock
-        self.assertEqual('lock', order[0])
-        self.assertEqual({'read'}, set(order[1:]))
-        self.assertEqual(1, order.count('lock'))
-
-    def test_a_deleted_reservation_frees_its_links(self):
-        first = self._reserve()
-        self._reserve(domain=self._domain()['id'])
-        self._delete_path(first['id'])
-        self._reserve(domain=self._domain()['id'])
-
-    def test_refused_without_a_source(self):
-        res = self._reserve(expected=400, source_host=None)
-        self.assertIn('source_host', self._message(res))
-
-    def _bind(self, port_host):
-        """The harness binds no host: get_port reports port_host['host']."""
-        core = self.srv6._core_plugin()
-        real = core.get_port
-
-        def get_port(context, port_id, fields=None):
-            return dict(real(context, port_id),
-                        **{portbindings.HOST_ID: port_host['host']})
-        patcher = mock.patch.object(core, 'get_port', side_effect=get_port)
-        self.addCleanup(patcher.stop)
-        return patcher.start()
-
-    def test_a_port_reservation_holds_for_the_host_it_was_made_on(self):
-        self._bind({'host': 'node2'})
-        port = self._vm_port()
-        path = self._reserve(destination_host=None,
-                             destination_port_id=port['id'])
-        self.assertEqual(['la', 's1', 'lb'], path['via_hosts'])
-        held = te_db.get_bandwidth_paths(self.admin_ctx)
-        self.assertEqual(['node2'], [p['reserved_host'] for p in held])
-
-    def test_a_reservation_to_an_unbound_port_is_refused(self):
-        port = self._vm_port()                    # the harness binds no host
-        res = self._reserve(expected=400, destination_host=None,
-                            destination_port_id=port['id'])
-        self.assertIn('bound port', self._message(res))
-
-    def test_the_books_never_ask_where_a_port_is_now(self):
-        # They are built from reserved_host: a port that moved cannot make
-        # them charge a link that does not exist (review of 0e282a3).
-        get_port = self._bind({'host': 'node2'})
-        port = self._vm_port()
-        self._reserve(destination_host=None, destination_port_id=port['id'])
-        get_port.reset_mock()
-        self._reserve(domain=self._domain()['id'])        # to node2 by host
-        get_port.assert_not_called()
-
-    def test_refused_with_via_hosts(self):
-        res = self._reserve(expected=400, via_hosts=['s1'])
-        self.assertIn('exclude each other', self._message(res))
-
-    def test_refused_without_a_topology(self):
-        self.srv6.capacity = {}
-        res = self._reserve(expected=400)
-        self.assertIn('topology_file', self._message(res))
-
-    def test_refused_for_a_host_outside_the_topology(self):
-        srv6_db.set_host_locator(self.admin_ctx, 'node3', LOC3,
-                                 datetime.datetime.now(datetime.timezone.utc))
-        res = self._reserve(expected=400, destination_host='node3')
-        self.assertIn('node3 is not a node', self._message(res))
-
-    def test_bad_bandwidth_values_are_refused(self):
-        for value in (0, -5, 'lots'):
-            self._reserve(expected=400, bandwidth=value)
-
-    def test_the_hops_of_a_reservation_cannot_be_put(self):
-        path = self._reserve()
-        res = self._update(path['id'], expected=400, via_hosts=['la'])
-        self.assertIn('computed', self._message(res))
-
-    # --- a reservation to a port ends when the port changes host (D0) -------
-    def _move(self, port, old, new):
-        """The port update a migration, or an unbinding, delivers.
-
-        Published through Neutron's callback registry, as ML2 does when it
-        commits a binding: the test then also proves the plugin is
-        subscribed (a misplaced @registry.receives once subscribed the
-        wrong method, and only the live testbed noticed).
-        """
-        before, after = (dict(port, status='ACTIVE',
-                              **{portbindings.HOST_ID: host})
-                         for host in (old, new))
-        registry.publish(resources.PORT, events.AFTER_UPDATE, self,
-                         payload=events.DBEventPayload(
-                             self.admin_ctx, resource_id=port['id'],
-                             states=(before, after)))
-
-    def _fill(self, port):
-        """100 to the port (la s1 lb) and 100 to node2 (la s2 lb): full."""
-        held = self._reserve(destination_host=None, bandwidth=100,
-                             destination_port_id=port['id'])
-        self._reserve(domain=self._domain()['id'], bandwidth=100)
-        self._reserve(expected=409, domain=self._domain()['id'],
-                      bandwidth=100)
-        return held
-
-    def test_a_migration_deletes_the_reservation_and_frees_its_links(self):
-        where = {'host': 'node2'}
-        self._bind(where)
-        port = self._vm_port()
-        held = self._fill(port)
-        where['host'] = 'node3'
-        with mock.patch.object(plugin.LOG, 'warning') as warning:
-            self._move(port, 'node2', 'node3')
-        self._show(held['id'], expected=404, as_admin=True)
-        self.assertEqual(['la', 's1', 'lb'], self._reserve(
-            domain=self._domain()['id'], bandwidth=100)['via_hosts'])
-        self.assertEqual(('node2', 'node3'),
-                         (warning.call_args[0][1]['old'],
-                          warning.call_args[0][1]['new']))
-
-    def test_an_unbound_port_loses_its_reservation(self):
-        self._bind({'host': 'node2'})
-        port = self._vm_port()
-        held = self._reserve(destination_host=None,
-                             destination_port_id=port['id'])
-        self._move(port, 'node2', '')
-        self._show(held['id'], expected=404, as_admin=True)
-
-    def test_only_a_change_of_host_ends_a_reservation(self):
-        self._bind({'host': 'node2'})
-        port = self._vm_port()
-        held = self._reserve(destination_host=None,
-                             destination_port_id=port['id'])
-        self._move(port, 'node2', 'node2')
-        self.assertEqual(60, self._show(held['id'],
-                                        as_admin=True)['bandwidth'])
-
-    def test_only_reservations_to_the_moved_port_end(self):
-        self._bind({'host': 'node2'})
-        port = self._vm_port()
-        self._reserve(destination_host=None, destination_port_id=port['id'])
-        operator = self._path(destination_port_id=port['id'],
-                              via_hosts=['node1'])
-        to_host = self._reserve(domain=self._domain()['id'])
-        self._move(port, 'node2', 'node3')
-        self._show(operator['id'], as_admin=True)        # follows the VM
-        self._show(to_host['id'], as_admin=True)         # a host stays put
-
-    def test_a_port_delete_frees_its_reservation(self):
-        # destination_port_id is ON DELETE CASCADE: no plugin code needed
-        self._bind({'host': 'node2'})
-        port = self._vm_port()
-        self._fill(port)
-        self._delete('ports', port['id'])
-        self._reserve(domain=self._domain()['id'], bandwidth=100)
-
-    def test_the_safety_net_releases_a_move_the_callback_missed(self):
-        where = {'host': 'node2'}
-        self._bind(where)
-        port = self._vm_port()
-        held = self._reserve(destination_host=None,
-                             destination_port_id=port['id'])
-        where['host'] = 'node3'             # moved; no port event delivered
-        core = self.srv6._core_plugin()
-        real = core.get_ports
-
-        def get_ports(context, filters=None, **kwargs):
-            return [dict(p, **{portbindings.HOST_ID: where['host']})
-                    for p in real(context, filters=filters)]
-        with mock.patch.object(core, 'get_ports', side_effect=get_ports):
-            te_liveness.TeLivenessMonitor(self.srv6).check()
-        self._show(held['id'], expected=404, as_admin=True)
-
-    def test_a_failed_release_never_breaks_the_port_update(self):
-        self._bind({'host': 'node2'})
-        port = self._vm_port()
-        with mock.patch.object(te_db, 'delete_moved_reservations',
-                               side_effect=RuntimeError('db down')), \
-                mock.patch.object(self.srv6, '_notify_port') as notify, \
-                mock.patch.object(plugin.LOG, 'exception') as logged:
-            self._move(port, 'node2', 'node3')
-        logged.assert_called_once()
-        self.assertTrue(notify.called)      # the routes still follow the VM
-
-    # --- reservable_fraction: read with the topology file -------------------
-    def _load(self, fraction):
-        """Write FABRIC + CAPACITY as a topology file, load it as at start."""
+    def test_the_capacity_is_the_files(self):
         path = os.path.join(self.useFixture(fixtures.TempDir()).path, 'topo')
         with open(path, 'w') as f:
             for name, loc in dict(FABRIC, node1=LOC1, node2=LOC2).items():
@@ -1406,47 +1108,12 @@ class TestTeBandwidthApi(TeRestTestCase):
             for (a, b), mbps in CAPACITY.items():
                 if a < b:
                     f.write('link %s %s %d\n' % (a, b, mbps))
-        self.config(group=config.SRV6_SERVER_GROUP, topology_file=path,
-                    reservable_fraction=fraction)
+        self.config(group=config.SRV6_SERVER_GROUP, topology_file=path)
         self.srv6._load_topology()
-
-    def test_the_reservable_fraction_caps_every_link(self):
-        self._load(0.8)
-        self.assertEqual(80, self.srv6.capacity[('la', 's1')])
-        self.assertEqual(800, self.srv6.capacity[('node1', 'la')])
-        res = self._reserve(expected=409, bandwidth=81)
-        self.assertIn('81 Mbit/s', self._message(res))
-        self.assertEqual(80, self._reserve(bandwidth=80)['bandwidth'])
-
-    def test_a_fraction_of_one_reserves_the_whole_link(self):
-        self._load(1.0)
-        self.assertEqual(100, self.srv6.capacity[('la', 's1')])
-        self._reserve(bandwidth=100)
-
-    def test_a_bad_fraction_stops_the_plugin(self):
-        for value in (0, -0.5, 1.5):
-            self.config(group=config.SRV6_SERVER_GROUP,
-                        reservable_fraction=value)
-            self.assertRaises(n_exc.InvalidConfigurationOption,
-                              self.srv6._load_topology)
-
-    def test_a_lowered_fraction_evicts_nothing(self):
-        self._load(1.0)
-        held = self._reserve(bandwidth=60)              # la s1 lb
-        self._load(0.5)                                 # s1 links now 50
-        with mock.patch.object(plugin.LOG, 'warning') as warning:
-            second = self._reserve(domain=self._domain()['id'],
-                                   bandwidth=45)
-        self.assertEqual(
-            60, self._show(held['id'], as_admin=True)['bandwidth'])
-        self.assertEqual(['la', 's2', 'lb'], second['via_hosts'])
-        self.assertIn('la>s1', warning.call_args[0][1]['l'])
-
-    def test_an_operator_path_may_name_a_fabric_node(self):
-        path = self._host_path(via_hosts=['s2'])
-        self.assertIsNone(path['bandwidth'])
-        self.assertEqual(['fc00:0:c2:fff0::', self._decap()],
-                         path['segments'])
+        self.assertEqual(CAPACITY, self.srv6.capacity)
+        self.assertEqual(FABRIC, {n: loc for n, loc in
+                                  self.srv6.fabric_locators.items()
+                                  if n in FABRIC})
 
 
 class TestFabricLocators(TePluginTestCaseBase):

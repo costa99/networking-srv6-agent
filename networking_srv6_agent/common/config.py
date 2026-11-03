@@ -73,28 +73,16 @@ srv6_server_opts = [
                "about agent_down_time plus this interval; lower "
                "agent_down_time to fail over faster. 0 turns the check "
                "off: a dead waypoint then blackholes its paths until an "
-               "admin re-steers them. The same check also deletes a "
-               "bandwidth reservation whose port left the host it was "
-               "made for without the server noticing; 0 turns that off "
-               "too.")),
+               "admin re-steers them.")),
     cfg.StrOpt(
         'topology_file',
-        help=_("Optional underlay topology for bandwidth-reserved TE paths, "
-               "read once at server start. Lines 'node <name> <locator>' "
-               "(fabric nodes and hosts; a host's name is its Neutron host "
-               "name) and 'link <a> <b> <Mbit/s>' (capacity per direction). "
-               "With it, a TE path created with 'bandwidth' gets its hops "
-               "computed by the server, and fabric nodes may be named in "
-               "via_hosts. Unset: 'bandwidth' is refused.")),
-    cfg.FloatOpt(
-        'reservable_fraction',
-        default=0.8,
-        help=_("Share of every link of topology_file that bandwidth "
-               "reservations may fill, more than 0 and at most 1. The rest "
-               "is left to traffic without a reservation, which the server "
-               "never counts. Lowering it evicts no reservation: a link "
-               "already above the new limit refuses new ones until enough "
-               "are deleted.")),
+        help=_("Optional underlay topology, read once at server start. "
+               "Lines 'node <name> <locator>' (fabric nodes and hosts; a "
+               "host's name is its Neutron host name) and 'link <a> <b> "
+               "<Mbit/s>' (capacity per direction). With it, fabric nodes "
+               "may be named in via_hosts, fabric agents may post link "
+               "state, and the TE re-optimisation steers heavy VM pairs "
+               "off congested links.")),
     cfg.IntOpt(
         'link_state_stale_after',
         default=15,
@@ -117,21 +105,21 @@ srv6_server_opts = [
         default=10,
         min=0,
         help=_("Seconds between passes of the TE re-optimisation, which "
-               "moves bandwidth reservations off congested links, as the "
-               "fabric nodes measure them (srv6_link_states). 0 turns it "
-               "off. Needs topology_file.")),
+               "steers heavy VM pairs off congested links, as the fabric "
+               "nodes measure them (srv6_link_states). 0 turns it off. "
+               "Needs topology_file and te_auto_steering.")),
     cfg.FloatOpt(
         'te_reopt_high',
         default=0.9,
         help=_("A link whose measured load is above this share of its "
-               "reservable capacity (capacity x reservable_fraction) for "
-               "te_reopt_samples measurements in a row is congested.")),
+               "capacity for te_reopt_samples measurements in a row is "
+               "congested.")),
     cfg.FloatOpt(
         'te_reopt_low',
         default=0.7,
         help=_("Moves off a congested link stop once its load, minus the "
-               "reservations moved, is at most this share of its "
-               "reservable capacity. Below te_reopt_high (hysteresis).")),
+               "VM pairs moved, is at most this share of its capacity. "
+               "Below te_reopt_high (hysteresis).")),
     cfg.IntOpt(
         'te_reopt_samples',
         default=3,
@@ -143,23 +131,23 @@ srv6_server_opts = [
         'te_reopt_hold_down',
         default=60,
         min=0,
-        help=_("Seconds during which a reservation that was moved is not "
-               "moved again by the re-optimisation (a failure still moves "
-               "it).")),
+        help=_("Seconds during which a VM pair that was moved or released "
+               "is not moved again by the re-optimisation.")),
     cfg.IntOpt(
         'te_reopt_max_moves',
         default=2,
         min=1,
-        help=_("Reservations moved per re-optimisation pass at most.")),
-    # --- U-f: steering heavy unreserved VM pairs (PLAN-UNRESERVED-STEERING)
+        help=_("Automatic paths created, moved or released per "
+               "re-optimisation pass at most.")),
+    # --- U-f: steering heavy VM pairs (PLAN-UNRESERVED-STEERING)
     cfg.BoolOpt(
         'te_auto_steering',
         default=True,
-        help=_("Let the TE re-optimisation steer heavy unreserved traffic: "
-               "on a congested link, the largest VM pair the fabric nodes "
+        help=_("Let the TE re-optimisation steer heavy traffic: on a "
+               "congested link, the largest VM pair the fabric nodes "
                "measured (srv6_aggregate_loads) gets a path of its own "
-               "(origin auto) onto links with room, before any reservation "
-               "is moved; the path is released when the pair goes idle or "
+               "(origin auto) onto links with room; the path is released "
+               "when the pair goes idle or "
                "the default routes have room again. Acts only with a "
                "topology_file and fabric agents that report VM pairs "
                "(--aggregates).")),
@@ -167,8 +155,19 @@ srv6_server_opts = [
         'te_auto_min_share',
         default=0.1,
         help=_("A VM pair is steered only if it carries at least this share "
-               "of the congested link's reservable capacity (the elephant "
+               "of the congested link's capacity (the elephant "
                "threshold); a steered pair below it on its path is idle.")),
+    cfg.FloatOpt(
+        'te_auto_fit',
+        default=0.7,
+        min=0,
+        max=1,
+        help=_("What-if check for a steered VM pair: every link of its new "
+               "path must stay at or below this share of its capacity with "
+               "the pair's measured rate added. 1 means only 'fits' (the "
+               "path computation's own check): "
+               "a TCP pair's measured rate is its share of the congested "
+               "link, not its demand, so a margin mostly refuses moves.")),
     cfg.IntOpt(
         'te_auto_release_after',
         default=120,

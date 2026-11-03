@@ -12,38 +12,33 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Move traffic off congested links: reservations and unreserved VM pairs.
-
-PLAN-LINK-STATE-TE U-d (reservations), PLAN-UNRESERVED-STEERING U-f (pairs).
+"""Move heavy VM pairs off congested links (PLAN-UNRESERVED-STEERING U-f).
 
 Each pass reads the measured link state (srv6_link_states) and:
 
 1. finds the congested links: the last te_reopt_samples measurements of the
-   link all above te_reopt_high of its reservable capacity, and all newer
+   link all above te_reopt_high of its capacity, and all newer
    than the last move off it (a move must show in the data before the link
    is judged again);
 2. releases (U-f, step 7) the automatic paths no longer needed: a pair idle
    for te_auto_release_after, or one whose default routes would now all
    stay at or below te_reopt_low with its rate added (the worst case: ECMP
    may hash it onto any of them); never inside the hold-down;
-3. on the hottest link first, moves (U-f, step 6) the largest unreserved VM
-   pairs the fabric measured on it (srv6_aggregate_loads): a pair of at
-   least te_auto_min_share of the link, that no user path or reservation
-   covers, gets a path of its own (origin auto) or has its auto path moved;
+3. on the hottest link first, moves (U-f, step 6) the largest VM pairs the
+   fabric measured on it (srv6_aggregate_loads): a pair of at least
+   te_auto_min_share of the link, that no user path covers, gets a path of
+   its own (origin auto) or has its auto path moved;
    a link that carries one pair only is left (moving it only moves the
    congestion, Chang & Wang's "more than one flow"). The new path must
-   pass the what-if check: every link of it at or below te_reopt_low after
+   pass the what-if check: every link of it at or below te_auto_fit after
    adding the pair (nobody there is pushed towards congestion);
-4. then, if the link is still above low, moves the largest reservations
-   crossing it, as before (U-d), so the fewest moves clear it;
 
 until its load minus what was moved is at most te_reopt_low (hysteresis),
-te_reopt_max_moves moves were made in this pass (budget, shared by every
-kind of move and release), skipping anything moved within
-te_reopt_hold_down (damping). A path moves through the plugin under the
-admission lock, onto a path with room where every link holds
-max(reserved, measured) (L4) minus the mover's own traffic, avoiding every
-congested and dead link; in place, make-before-break. No room: it stays.
+te_reopt_max_moves moves were made in this pass (budget, shared by moves
+and releases), skipping anything moved within te_reopt_hold_down
+(damping). A path moves onto a path with room where every link holds its
+measured load (L4) minus the mover's own traffic, avoiding every congested
+and dead link; in place, make-before-break. No room: it stays.
 
 The memory of moves (hold-down, last move per link, idle since) is this
 process's: one worker, like the liveness monitor; a restart forgets it,
@@ -89,7 +84,7 @@ def _pairs(view):
 
 
 def _covered(pair, paths):
-    """Whether a user path or reservation decides this pair's route.
+    """Whether a user path decides this pair's route.
 
     Any rank: a path of the pair's domain to its destination port or node,
     from its source port, its source node, or any source. An auto path is
@@ -116,7 +111,7 @@ class TeReoptimiser:
 
     def __init__(self, plugin):
         self._plugin = plugin
-        self._moved = {}          # reservation id or pair -> its last move
+        self._moved = {}          # pair -> its last move
         self._link_moved = {}     # (a, b) -> time of the last move off it
         self._idle_since = {}     # auto path id -> first idle pass
         # pair -> (when, {link: Mbit/s}) it was just placed on: not in the
@@ -150,116 +145,76 @@ class TeReoptimiser:
 
     def _check(self, ctx):
         plugin, conf = self._plugin, self._plugin.conf
-        if not plugin.capacity:
+        if not plugin.capacity or not conf.te_auto_steering:
             return
         silent, outage = plugin._silent_fabric(ctx)
         if outage:
-            return                      # the liveness monitor logs it
+            LOG.error("SRv6 TE: no fabric node has posted link state for "
+                      "%ss: treated as an outage of the collection, not of "
+                      "the fabric; nothing is steered",
+                      conf.link_state_stale_after)
+            return
         congested = self._congested(ctx)
-        auto = conf.te_auto_steering
         now = timeutils.utcnow()
         hold = now - datetime.timedelta(seconds=conf.te_reopt_hold_down)
         # an entry at or before `hold` no longer holds anything down: drop
-        # it, or every reservation ever moved stays here (audit 2026-11-02 6)
+        # it, or every pair ever moved stays here (audit 2026-11-02 6)
         self._moved = {k: t for k, t in self._moved.items() if t > hold}
         seen = now - datetime.timedelta(seconds=conf.link_state_window)
         self._pending = {k: v for k, v in self._pending.items()
                          if v[0] > seen}
         dead = plugin._dead_links(ctx, silent)
         measured = plugin._measured_load(ctx)
-        pairs = _pairs(plugin._aggregate_view(ctx)) if auto else {}
-        moves = 0
-        if auto:
-            moves = self._release(ctx, pairs, congested, dead, measured, now,
-                                  hold)
+        pairs = _pairs(plugin._aggregate_view(ctx))
+        moves = self._release(ctx, pairs, congested, dead, measured, now,
+                              hold)
         if not congested:
             return
         cap = {link: mbps for link, mbps in plugin.capacity.items()
                if link not in dead and link not in congested}
-        paths = te_db.get_all_te_paths(ctx) if auto else []
+        paths = te_db.get_all_te_paths(ctx)
         for link in sorted(congested, key=lambda k: (
                 -congested[k] / plugin.capacity[k], k)):    # hottest first
             if moves >= conf.te_reopt_max_moves:
                 break
             load, limit = congested[link], conf.te_reopt_low * \
                 plugin.capacity[link]
-            crossing = sorted(
-                (p for p in te_db.get_bandwidth_paths(ctx)
-                 if link in pce.links_of(te_db.reservation_hops(p))),
-                key=lambda p: (-p[te_def.BANDWIDTH], p['id']))
-            steered = 0
-            if auto:
-                steered, load = self._steer_pairs(
-                    ctx, link, load, limit, pairs, paths, bool(crossing),
-                    cap, measured, now, hold,
-                    conf.te_reopt_max_moves - moves)
-                moves += steered
-            if not crossing and not steered:
+            steered, load = self._steer_pairs(
+                ctx, link, load, limit, pairs, paths, cap, now, hold,
+                conf.te_reopt_max_moves - moves)
+            moves += steered
+            if not steered:
                 LOG.info("SRv6 TE re-optimisation: %(l)s carries %(m).1f "
-                         "Mbit/s with nothing movable on it (no reservation"
-                         "%(u)s)", {'l': '%s>%s' % link, 'm': load,
-                                    'u': ', no unreserved VM pair to steer'
-                                    if auto else ''})
-            for p in crossing:
-                if moves >= conf.te_reopt_max_moves or load <= limit:
-                    break
-                if self._moved.get(p['id'], hold) > hold:
-                    continue                # hold-down
-                old, path = plugin._reroute_reservation(
-                    ctx, p['id'], cap, measured=measured)
-                if old is None or path is None:
-                    LOG.info("SRv6 TE re-optimisation: no path with room "
-                             "for reservation %(id)s (%(bw)d Mbit/s) off "
-                             "%(l)s; it stays",
-                             {'id': p['id'], 'bw': p[te_def.BANDWIDTH],
-                              'l': '%s>%s' % link})
-                    continue
-                moves += 1
-                load -= p[te_def.BANDWIDTH]
-                self._moved[p['id']] = now
-                for hop in pce.links_of(te_db.reservation_hops(old)):
-                    self._link_moved[hop] = now
-                LOG.warning("SRv6 TE re-optimisation: %(l)s congested "
-                            "(%(m).1f Mbit/s > %(h)s of %(c)d): reservation "
-                            "%(id)s (%(bw)d Mbit/s) moved from %(old)s to "
-                            "%(new)s",
-                            {'l': '%s>%s' % link, 'm': congested[link],
-                             'h': conf.te_reopt_high,
-                             'c': plugin.capacity[link], 'id': p['id'],
-                             'bw': p[te_def.BANDWIDTH],
-                             'old': '-'.join(te_db.reservation_hops(old)),
-                             'new': '-'.join(path)})
+                         "Mbit/s with no VM pair to steer",
+                         {'l': '%s>%s' % link, 'm': load})
 
     # ------------------------------------------------------------------
-    # U-f: unreserved VM pairs (PLAN-UNRESERVED-STEERING steps 6-7)
+    # U-f: VM pairs (PLAN-UNRESERVED-STEERING steps 6-7)
     # ------------------------------------------------------------------
     def _used(self, ctx, own, key=None):
-        """{link: Mbit/s held}: max(reserved, measured), own traffic off.
+        """{link: Mbit/s held}: the measured load, own traffic off.
 
         own: {link: Mbit/s} of the pair being placed, as the fabric
-        measured it: exact, where a reservation's move can only subtract
-        its reserved bandwidth (L10). Plus what the other pairs placed in
+        measured it (L10). Plus what the other pairs placed in
         the last link_state_window add to their new links (_pending): the
         fabric has not shown it yet. Counting it twice for a while once it
         shows only makes the check stricter, never over-commits a link.
         """
         plugin = self._plugin
-        used = plugin._books(ctx)
-        for link, mbps in plugin._measured_load(ctx).items():
-            used[link] = max(used.get(link, 0),
-                             max(0, mbps - own.get(link, 0)))
+        used = {link: max(0, mbps - own.get(link, 0))
+                for link, mbps in plugin._measured_load(ctx).items()}
         for other, (_when, links) in self._pending.items():
             if other != key:
                 for link, mbps in links.items():
                     used[link] = used.get(link, 0) + mbps
         return used
 
-    def _steer_pairs(self, ctx, link, load, limit, pairs, paths,
-                     reservations, cap, measured, now, hold, budget):
-        """Move the largest unreserved pairs off one link. (moves, load)."""
+    def _steer_pairs(self, ctx, link, load, limit, pairs, paths, cap, now,
+                     hold, budget):
+        """Move the largest pairs off one link. (moves, load)."""
         plugin, conf = self._plugin, self._plugin.conf
         on_link = [pr for pr in pairs.values() if link in pr['links']]
-        if len(on_link) <= 1 and not reservations:
+        if len(on_link) <= 1:
             if on_link:
                 LOG.info("SRv6 TE re-optimisation: %(l)s carries one VM pair "
                          "only; moving it would move the congestion",
@@ -292,7 +247,7 @@ class TeReoptimiser:
                                e['destination_host'], pr['rate'])
             if path is None or not all(
                     used.get(hop, 0) + pr['rate'] <=
-                    conf.te_reopt_low * plugin.capacity[hop]
+                    conf.te_auto_fit * plugin.capacity[hop]
                     for hop in pce.links_of(path)):
                 LOG.info("SRv6 TE re-optimisation: no path with room for VM "
                          "pair %(s)s>%(d)s (%(r).1f Mbit/s) off %(l)s; it "

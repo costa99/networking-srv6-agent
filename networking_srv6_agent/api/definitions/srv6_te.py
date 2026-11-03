@@ -62,7 +62,7 @@ NAME = 'SRv6 traffic engineering'
 ALIAS = 'srv6-te'
 DESCRIPTION = ("Admin-only SRv6 paths that steer a domain's traffic toward a "
                "compute node, or a single port, through explicit waypoints")
-UPDATED_TIMESTAMP = '2026-11-02T00:00:00-00:00'
+UPDATED_TIMESTAMP = '2026-11-03T00:00:00-00:00'
 API_PREFIX = ''
 IS_SHIM_EXTENSION = False
 IS_STANDARD_ATTR_EXTENSION = False
@@ -77,7 +77,6 @@ SOURCE_HOST = 'source_host'
 SOURCE_PORT_ID = 'source_port_id'
 ORIGIN = 'origin'
 VIA_HOSTS = 'via_hosts'
-BANDWIDTH = 'bandwidth'
 SEGMENTS = 'segments'
 ENCODED_SEGMENTS = 'encoded_segments'
 STATUS = 'status'
@@ -141,7 +140,7 @@ RESOURCE_ATTRIBUTE_MAP = {
                       'is_filter': True,
                       'enforce_policy': True},
         # One VM's traffic only, at the node it is bound to; excludes
-        # source_host and bandwidth. Create-only like the selectors.
+        # source_host. Create-only like the selectors.
         SOURCE_PORT_ID: {'allow_post': True, 'allow_put': False,
                          'default': None,
                          'validate': {'type:uuid_or_none': None},
@@ -159,21 +158,6 @@ RESOURCE_ATTRIBUTE_MAP = {
                     'convert_to': converters.convert_to_list,
                     'validate': {
                         'type:list_of_unique_strings': HOST_FIELD_SIZE},
-                    'is_visible': True,
-                    'enforce_policy': True},
-        # Mbit/s to reserve on every link of the path (PLAN-PATH-COMPUTATION).
-        # Set: the plugin computes via_hosts itself over the underlay
-        # topology ([srv6] topology_file) -- fewest hops, then the widest
-        # bottleneck among links with room -- or answers 409 when no path
-        # has room. Needs source_host (the ingress the path starts at) and no
-        # via_hosts. To a port, the reservation holds for the host the port
-        # is bound to when it is made, and is deleted when the port changes
-        # host or is deleted. Create-only: a different reservation is a
-        # different path.
-        BANDWIDTH: {'allow_post': True, 'allow_put': False,
-                    'default': None,
-                    'convert_to': converters.convert_to_int_if_not_none,
-                    'validate': {'type:range_or_none': [1, 10 ** 7]},
                     'is_visible': True,
                     'enforce_policy': True},
         # [<via End SIDs>..., <destination decap SID>], or [] when the path

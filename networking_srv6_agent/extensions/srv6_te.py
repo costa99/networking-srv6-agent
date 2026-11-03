@@ -42,11 +42,6 @@ class Srv6TePathExists(n_exc.Conflict):
                 "%(selector)s")
 
 
-class Srv6TePathNoCapacity(n_exc.Conflict):
-    message = _("No path from %(source)s to %(destination)s has "
-                "%(bandwidth)d Mbit/s free on every link")
-
-
 class Srv6_te(api_extensions.APIExtensionDescriptor):
 
     api_definition = te_def

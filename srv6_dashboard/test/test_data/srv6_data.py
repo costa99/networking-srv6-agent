@@ -145,16 +145,16 @@ def data(TEST):
     # --- link states: hosts ale and ale-node3 under leaf l1, spine s1 above,
     # one directed link at each level the page colours (PLAN-LINK-STATE-TE)
 
-    def link(a, b, cap, mbps, up=True, stale=False, reserved=0):
+    def link(a, b, cap, mbps, up=True, stale=False):
         return {'id': '%s:%s' % (a, b), 'from_node': a, 'to_node': b,
                 'reporter': 'l1', 'up': up, 'mbps': mbps,
                 'delivered_mbps': mbps, 'peak_mbps': mbps, 'drops': 0,
-                'capacity_mbps': cap, 'reserved_mbps': reserved,
+                'capacity_mbps': cap,
                 'measured_at': '2026-11-01T12:00:00', 'age': 2,
                 'stale': stale}
     for ls in (link('ale', 'l1', 1000, 30.0),               # ok
                link('l1', 'ale', 1000, 950.0),              # congested
-               link('l1', 's1', 100, 60.0, reserved=40),    # busy
+               link('l1', 's1', 100, 60.0),                 # busy
                link('s1', 'l1', 100, 0.0, up=False),        # down
                link('l1', 'ale-node3', 1000, 5.0, stale=True),   # unknown
                link('ale-node3', 'l1', 1000, None)):        # unknown

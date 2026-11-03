@@ -467,69 +467,6 @@ class TestSourceSelector(Srv6TeDbTestCase):
             te_db.get_te_paths_for_domain(self.ctx, other_domain))
 
 
-class TestBandwidth(Srv6TeDbTestCase):
-    """The reservation column (PLAN-PATH-COMPUTATION)."""
-
-    def test_an_operator_path_reserves_nothing(self):
-        path = self._create_path()
-        self.assertIsNone(path['bandwidth'])
-        self.assertEqual([], te_db.get_bandwidth_paths(self.ctx))
-
-    def test_a_reservation_round_trips(self):
-        path = te_db.create_te_path(
-            self.ctx, self.domain_id,
-            {'project_id': 'test-project', 'destination_host': 'ml5',
-             'source_host': 'ml1', 'via_hosts': ['l1', 's2', 'l3'],
-             'bandwidth': 60})
-        self.assertEqual(60, path['bandwidth'])
-        self.assertEqual(60, te_db.get_te_path(self.ctx, path['id'])[
-            'bandwidth'])
-
-    def test_the_reserved_host_is_kept(self):
-        te_db.create_te_path(
-            self.ctx, self.domain_id,
-            {'project_id': 'test-project', 'destination_host': 'ml5',
-             'source_host': 'ml1', 'via_hosts': ['l1', 's2', 'l3'],
-             'bandwidth': 60, 'reserved_host': 'ml5'})
-        self.assertEqual(['ml5'], [p['reserved_host'] for p in
-                                   te_db.get_bandwidth_paths(self.ctx)])
-
-    def test_reservations_of_every_domain_are_listed(self):
-        # the links are shared by all domains, so is the accounting
-        other = self._create_domain()
-        for domain, dest in ((self.domain_id, 'ml5'), (other, 'ml6')):
-            te_db.create_te_path(
-                self.ctx, domain,
-                {'project_id': 'test-project', 'destination_host': dest,
-                 'source_host': 'ml1', 'via_hosts': ['l1', 's1', 'l3'],
-                 'bandwidth': 40})
-        self._create_path()                         # no reservation
-        got = te_db.get_bandwidth_paths(self.ctx)
-        self.assertEqual(['ml5', 'ml6'],
-                         sorted(p['destination_host'] for p in got))
-        ml5 = [p for p in got if p['destination_host'] == 'ml5'][0]
-        # id and domain_id: a reservation is moved or deleted by id, and its
-        # domain re-pushed (PLAN-LINK-STATE-TE G3)
-        self.assertEqual(self.domain_id, ml5.pop('domain_id'))
-        self.assertTrue(ml5.pop('id'))
-        self.assertEqual({'source_host': 'ml1',
-                          'via_hosts': ['l1', 's1', 'l3'],
-                          'destination_host': 'ml5',
-                          'destination_port_id': None, 'bandwidth': 40,
-                          'reserved_host': None}, ml5)
-
-    def test_reservation_hops_end_at_the_reserved_host(self):
-        # one definition for the books, the failure reroute and the
-        # re-optimisation (audit 2026-11-02 finding 4)
-        port_path = {'source_host': 'ml1', 'via_hosts': ['l1', 's1', 'l3'],
-                     'destination_host': None, 'reserved_host': 'ml5'}
-        self.assertEqual(['ml1', 'l1', 's1', 'l3', 'ml5'],
-                         te_db.reservation_hops(port_path))
-        # a row from before reserved_host existed: all were to a host
-        old_row = dict(port_path, destination_host='ml6', reserved_host=None)
-        self.assertEqual('ml6', te_db.reservation_hops(old_row)[-1])
-
-
 class TestSourcePort(Srv6TeDbTestCase):
     """Paths limited to one source VM (PLAN-UNRESERVED-STEERING step 4)."""
 

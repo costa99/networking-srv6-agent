@@ -93,14 +93,6 @@ class SRv6TePath(model_base.BASEV2, model_base.HasId):
     # 'user', or 'auto' for a path the server made itself (U-f)
     origin = sa.Column(sa.String(16), nullable=False, default='user',
                        server_default='user')
-    # Mbit/s reserved on every link of the path; NULL for an operator-chosen
-    # path. When set, the plugin computed via_hosts itself (services/pce.py)
-    # and the hops pin every link, so the reservation is exact.
-    bandwidth = sa.Column(sa.Integer, nullable=True)
-    # The host the reserved hops end at, fixed at admission. The books are
-    # built from it, never from where a port is now: after a migration the
-    # hops still end at this host's leaf. NULL for an operator path.
-    reserved_host = sa.Column(sa.String(255), nullable=True)
 
     # order_by is what makes a read return TRAVERSAL order rather than
     # whatever order the rows happen to come back in.
@@ -170,7 +162,6 @@ def _make_te_path_dict(path_db, fields=None):
         'source_port_id': path_db.source_port_id,
         'origin': path_db.origin,
         'via_hosts': [hop.via_host for hop in path_db.hops],
-        'bandwidth': path_db.bandwidth,
         'segments': [],
         'encoded_segments': [],
         'status': None,
@@ -225,9 +216,7 @@ def create_te_path(context, domain_id, te_path):
         source_host=te_path.get('source_host') or '',
         source_port_id=te_path.get('source_port_id'),
         source_port_key=te_path.get('source_port_id') or '',
-        origin=te_path.get('origin') or 'user',
-        bandwidth=te_path.get('bandwidth'),
-        reserved_host=te_path.get('reserved_host'))
+        origin=te_path.get('origin') or 'user')
     context.session.add(path_db)
     context.session.flush()
     _set_hops(context, path_db, te_path.get('via_hosts'))
@@ -327,56 +316,6 @@ def get_domain_ids_for_source_port(context, port_id):
     return sorted({d for (d,) in context.session.query(
         SRv6TePath.domain_id).filter(
             SRv6TePath.source_port_id == port_id).all()})
-
-
-@db_api.CONTEXT_WRITER
-def delete_moved_reservations(context, port_id, host):
-    """Delete the reservations to port_id that do not hold for host.
-
-    A reservation's hops were computed for its reserved_host; once the port
-    is elsewhere (or unbound: host None) they no longer lead to it, and the
-    reservation ends (PLAN-RESERVATION-FOLLOWS-INSTANCE, decision D0).
-    Returns the deleted paths as dicts, for the caller's log.
-    """
-    gone = []
-    for path_db in context.session.query(SRv6TePath).filter(
-            SRv6TePath.destination_port_id == port_id,
-            SRv6TePath.bandwidth.isnot(None)).all():
-        if path_db.reserved_host != host:
-            gone.append(dict(_make_te_path_dict(path_db),
-                             reserved_host=path_db.reserved_host))
-            context.session.delete(path_db)
-    return gone
-
-
-def reservation_hops(path):
-    """The node path a reservation holds: [source, via..., reserved host].
-
-    path is a get_bandwidth_paths dict. The end is the host the hops were
-    computed for, never where a port is now; rows from before
-    reserved_host existed are all to a host. The one definition the books,
-    the failure reroute and the re-optimisation share.
-    """
-    end = path['reserved_host'] or path['destination_host']
-    return [path['source_host']] + path['via_hosts'] + [end]
-
-
-@db_api.CONTEXT_READER
-def get_bandwidth_paths(context):
-    """Every reservation, in every domain: the links are shared by all.
-
-    [{'id', 'domain_id', 'source_host', 'via_hosts', 'destination_host',
-      'destination_port_id', 'bandwidth', 'reserved_host'}]
-    """
-    return [{'id': p.id, 'domain_id': p.domain_id,
-             'source_host': p.source_host,
-             'via_hosts': [hop.via_host for hop in p.hops],
-             'destination_host': p.destination_host,
-             'destination_port_id': p.destination_port_id,
-             'bandwidth': p.bandwidth,
-             'reserved_host': p.reserved_host}
-            for p in context.session.query(SRv6TePath).filter(
-                SRv6TePath.bandwidth.isnot(None)).all()]
 
 
 @db_api.CONTEXT_READER

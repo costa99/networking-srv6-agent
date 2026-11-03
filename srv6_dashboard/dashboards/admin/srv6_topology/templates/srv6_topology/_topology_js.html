@@ -223,7 +223,6 @@
       (link.level === 'down' ? 'DOWN, ' : '') +
       fmt(link.mbps) + ' of ' + fmt(link.capacity_mbps, ' Mbit/s') +
       (link.load === null ? '' : ' (' + Math.round(100 * link.load) + ' %)') +
-      ', reserved ' + fmt(link.reserved_mbps) +
       ', delivered ' + fmt(link.delivered_mbps) +
       ', peak ' + fmt(link.peak_mbps) +
       (link.stale ? ', stale' : ', ' + fmt(link.age, ' s') + ' old');
@@ -296,7 +295,7 @@
     if (!links.length) {
       var tr0 = htmlEl('tr', null, linkRows);
       htmlEl('td', 'No link state: the server has no topology_file.', tr0,
-             {colspan: 8});
+             {colspan: 7});
       return;
     }
     links.forEach(function (link) {
@@ -307,7 +306,6 @@
       htmlEl('td', link.load === null ? '–' :
              Math.round(100 * link.load) + ' %', tr);
       htmlEl('td', fmt(link.mbps), tr);
-      htmlEl('td', fmt(link.reserved_mbps), tr);
       htmlEl('td', fmt(link.capacity_mbps), tr);
       htmlEl('td', fmt(link.delivered_mbps), tr);
       htmlEl('td', fmt(link.peak_mbps), tr);

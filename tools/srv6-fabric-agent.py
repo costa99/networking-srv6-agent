@@ -17,12 +17,12 @@
 
 Runs on each spine and leaf of the underlay (a Linux switch, as SONiC is;
 on the test bed, Linux VMs). It tells Neutron what the fabric really
-carries, so that the SRv6 path computation can see more than its own
-reservations (PLAN-LINK-STATE-TE). It reads only what the kernel already
-counts: every period, one read of /proc/net/dev (bytes, packets and drops
-of every interface) and of /sys/class/net/<if>/operstate. It turns them
-into one report covering each neighbour link, in both directions, as seen
-from this node:
+carries, so that the server can see congested links and steer heavy VM
+pairs off them (PLAN-LINK-STATE-TE, PLAN-UNRESERVED-STEERING). It reads
+only what the kernel already counts: every period, one read of
+/proc/net/dev (bytes, packets and drops of every interface) and of
+/sys/class/net/<if>/operstate. It turns them into one report covering
+each neighbour link, in both directions, as seen from this node:
 
   seen=tx  this node -> neighbour: what this node offered to the link
   seen=rx  neighbour -> this node: what the link delivered
