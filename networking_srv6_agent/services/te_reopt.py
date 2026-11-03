@@ -128,11 +128,11 @@ class TeReoptimiser:
             LOG.exception("SRv6 TE re-optimisation failed; trying again at "
                           "the next interval")
 
-    def _congested(self, ctx):
+    def _congested(self, ctx, hist):
         """{(a, b): latest Mbit/s} of the links congested now."""
         plugin, conf = self._plugin, self._plugin.conf
         out = {}
-        for link, series in plugin._load_series(ctx).items():
+        for link, series in plugin._load_series(ctx, hist).items():
             last = series[-conf.te_reopt_samples:]
             cap = plugin.capacity.get(link)
             since = self._link_moved.get(link)
@@ -154,7 +154,12 @@ class TeReoptimiser:
                       "the fabric; nothing is steered",
                       conf.link_state_stale_after)
             return
-        congested = self._congested(ctx)
+        # the link-state history once per pass, for every caller below: it
+        # was read 3 times idle and once more per candidate move, most of
+        # the pass's CPU (PLAN-C4-OPTIMISATION O1)
+        hist = plugin._history(ctx)
+        view = plugin._link_state_view(ctx, hist)
+        congested = self._congested(ctx, hist)
         now = timeutils.utcnow()
         hold = now - datetime.timedelta(seconds=conf.te_reopt_hold_down)
         # an entry at or before `hold` no longer holds anything down: drop
@@ -163,8 +168,8 @@ class TeReoptimiser:
         seen = now - datetime.timedelta(seconds=conf.link_state_window)
         self._pending = {k: v for k, v in self._pending.items()
                          if v[0] > seen}
-        dead = plugin._dead_links(ctx, silent)
-        measured = plugin._measured_load(ctx)
+        dead = plugin._dead_links(ctx, silent, view)
+        measured = plugin._measured_load(ctx, view)
         pairs = _pairs(plugin._aggregate_view(ctx))
         moves = self._release(ctx, pairs, congested, dead, measured, now,
                               hold)
@@ -173,15 +178,22 @@ class TeReoptimiser:
         cap = {link: mbps for link, mbps in plugin.capacity.items()
                if link not in dead and link not in congested}
         paths = te_db.get_all_te_paths(ctx)
+        moved = {}      # pair -> the pair, moved earlier in this pass
         for link in sorted(congested, key=lambda k: (
                 -congested[k] / plugin.capacity[k], k)):    # hottest first
             if moves >= conf.te_reopt_max_moves:
                 break
-            load, limit = congested[link], conf.te_reopt_low * \
-                plugin.capacity[link]
+            # a pair moved off an earlier link has left this one too: two
+            # elephants sharing two links were both moved, one per link
+            # (PLAN-C4-OPTIMISATION X3)
+            load = congested[link] - sum(pr['links'].get(link, 0.0)
+                                         for pr in moved.values())
+            limit = conf.te_reopt_low * plugin.capacity[link]
+            if load <= limit:
+                continue
             steered, load = self._steer_pairs(
-                ctx, link, load, limit, pairs, paths, cap, now, hold,
-                conf.te_reopt_max_moves - moves)
+                ctx, link, load, limit, pairs, paths, cap, measured, now,
+                hold, conf.te_reopt_max_moves - moves, moved)
             moves += steered
             if not steered:
                 LOG.info("SRv6 TE re-optimisation: %(l)s carries %(m).1f "
@@ -191,27 +203,30 @@ class TeReoptimiser:
     # ------------------------------------------------------------------
     # U-f: VM pairs (PLAN-UNRESERVED-STEERING steps 6-7)
     # ------------------------------------------------------------------
-    def _used(self, ctx, own, key=None):
+    def _used(self, measured, own, key=None):
         """{link: Mbit/s held}: the measured load, own traffic off.
 
-        own: {link: Mbit/s} of the pair being placed, as the fabric
-        measured it (L10). Plus what the other pairs placed in
+        measured: the pass's _measured_load. own: {link: Mbit/s} of the
+        pair being placed, as the fabric measured it (L10). Plus what the
+        other pairs placed in
         the last link_state_window add to their new links (_pending): the
         fabric has not shown it yet. Counting it twice for a while once it
         shows only makes the check stricter, never over-commits a link.
         """
-        plugin = self._plugin
         used = {link: max(0, mbps - own.get(link, 0))
-                for link, mbps in plugin._measured_load(ctx).items()}
+                for link, mbps in measured.items()}
         for other, (_when, links) in self._pending.items():
             if other != key:
                 for link, mbps in links.items():
                     used[link] = used.get(link, 0) + mbps
         return used
 
-    def _steer_pairs(self, ctx, link, load, limit, pairs, paths, cap, now,
-                     hold, budget):
-        """Move the largest pairs off one link. (moves, load)."""
+    def _steer_pairs(self, ctx, link, load, limit, pairs, paths, cap,
+                     measured, now, hold, budget, moved):
+        """Move the largest pairs off one link. (moves, load).
+
+        moved: {pair key: pair} of this pass, updated with every move.
+        """
         plugin, conf = self._plugin, self._plugin.conf
         on_link = [pr for pr in pairs.values() if link in pr['links']]
         if len(on_link) <= 1:
@@ -242,7 +257,7 @@ class TeReoptimiser:
             if existing is None and not self._room_for_another(
                     e, autos, host_of):
                 continue
-            used = self._used(ctx, pr['links'], key)
+            used = self._used(measured, pr['links'], key)
             path = pce.compute(cap, used, e['source_host'],
                                e['destination_host'], pr['rate'])
             if path is None or not all(
@@ -259,6 +274,7 @@ class TeReoptimiser:
             if placed is None:
                 continue
             autos[key] = placed
+            moved[key] = pr
             self._pending[key] = (now, {hop: pr['rate']
                                         for hop in pce.links_of(path)})
             moves += 1

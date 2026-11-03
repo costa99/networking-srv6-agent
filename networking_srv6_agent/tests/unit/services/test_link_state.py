@@ -81,7 +81,7 @@ class TestIngestion(LinkStateRestTestCase):
         self.assertEqual({'l1:s1', 's1:l1'}, {r['id'] for r in res})
         self.assertEqual({T0.isoformat()}, {r['measured_at'] for r in res})
         rows = link_state_db.get_link_states(self.admin_ctx)
-        self.assertEqual([T0, T0], [r['measured_at'] for r in rows])
+        self.assertEqual([T0, T0], [r.measured_at for r in rows])
 
     def test_the_time_is_stored_in_whole_seconds(self):
         # MySQL DATETIME rounds a fraction (.7 would be stored as T0 + 1)
@@ -89,7 +89,7 @@ class TestIngestion(LinkStateRestTestCase):
         res = self._post(self._l1_batch())[LS]
         self.assertEqual(T0.isoformat(), res[0]['measured_at'])
         self.assertEqual(T0, link_state_db.get_link_states(
-            self.admin_ctx)[0]['measured_at'])
+            self.admin_ctx)[0].measured_at)
 
     def test_a_single_measurement_without_the_list(self):
         req = self.new_create_request(
@@ -155,7 +155,7 @@ class TestIngestion(LinkStateRestTestCase):
         rows = link_state_db.get_link_states(self.admin_ctx)
         self.assertEqual(
             sorted([('l1', 61), ('l1', 61), ('s1', 0), ('s1', 0)]),
-            sorted((r['reporter'], (r['measured_at'] - T0).seconds)
+            sorted((r.reporter, (r.measured_at - T0).seconds)
                    for r in rows))
 
     def test_rows_inside_two_windows_are_kept(self):
@@ -180,6 +180,21 @@ class TestView(LinkStateRestTestCase):
                          (down['mbps'], down['delivered_mbps'],
                           down['reporter']))
         self.assertEqual((0, False, True), (up['age'], up['stale'], up['up']))
+
+    def test_a_history_read_once_gives_the_same_view_and_series(self):
+        # PLAN-C4-OPTIMISATION O1: the re-optimisation passes one history
+        # to every caller instead of each reading its own
+        self._post(self._l1_batch(tx=150.0, rx=60.0))
+        self._post([_m('s1', 'l1', 's1', 100.0), _m('s1', 's1', 'l1', 61.0)])
+        self._at(5)
+        self._post(self._l1_batch(tx=120.0, rx=40.0))
+        hist = self.srv6._history(self.admin_ctx)
+        self.assertEqual(self.srv6._link_state_view(self.admin_ctx),
+                         self.srv6._link_state_view(self.admin_ctx, hist))
+        self.assertEqual(self.srv6._load_series(self.admin_ctx),
+                         self.srv6._load_series(self.admin_ctx, hist))
+        series = self.srv6._load_series(self.admin_ctx, hist)
+        self.assertEqual([150.0, 120.0], [m for _t, m in series[('l1', 's1')]])
 
     def test_a_link_one_end_reports_has_that_end_only(self):
         self._post([_m('l1', 'ml1', 'l1', 30.0)])     # the host runs no agent

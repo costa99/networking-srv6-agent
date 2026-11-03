@@ -728,7 +728,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         """{(from, to, reporter): [row, ...]}, each oldest first."""
         hist = collections.defaultdict(list)
         for r in link_state_db.get_link_states(context):   # oldest first
-            hist[(r['from_node'], r['to_node'], r['reporter'])].append(r)
+            hist[(r.from_node, r.to_node, r.reporter)].append(r)
         return hist
 
     @staticmethod
@@ -741,10 +741,13 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         -- for the view (admission, the API) and the re-optimisation alike.
         """
         ends = [h for h in (hist.get((a, b, a)), hist.get((a, b, b))) if h]
-        return ends, [h for h in ends if h[-1]['measured_at'] >= fresh]
+        return ends, [h for h in ends if h[-1].measured_at >= fresh]
 
-    def _link_state_view(self, context):
+    def _link_state_view(self, context, hist=None):
         """{(from, to): entry} of every link of the topology file.
+
+        hist: a _history already read (the re-optimisation reads it once
+        per pass); None reads it now.
 
         capacity_mbps is the file's capacity, shown next to what is
         measured (U-a). A link nobody has reported yet has null
@@ -764,7 +767,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         fresh = now - datetime.timedelta(
             seconds=self.conf.link_state_stale_after)
         start = now - datetime.timedelta(seconds=self.conf.link_state_window)
-        hist = self._history(context)
+        hist = self._history(context) if hist is None else hist
         view = {}
         for a, b in sorted(self.capacity):
             entry = {'id': '%s:%s' % (a, b), 'from_node': a, 'to_node': b,
@@ -777,22 +780,22 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                      'peak_mbps', 'measured_at', 'age')), stale=True)
                 continue
             main = live[0] if live else max(
-                ends, key=lambda h: h[-1]['measured_at'])
+                ends, key=lambda h: h[-1].measured_at)
             last = main[-1]
             rx = hist.get((a, b, b))
             entry.update({
-                'reporter': last['reporter'],
-                'up': (all(h[-1]['up'] for h in live) if live
-                       else last['up']),
-                'mbps': last['mbps'],
-                'drops': last['drops'],
-                'delivered_mbps': (rx[-1]['mbps'] if rx and
-                                   rx[-1]['measured_at'] >= fresh else None),
-                'peak_mbps': max((r['mbps'] for r in main
-                                  if r['measured_at'] > start and
-                                  r['mbps'] is not None), default=None),
-                'measured_at': last['measured_at'].isoformat(),
-                'age': int((now - last['measured_at']).total_seconds()),
+                'reporter': last.reporter,
+                'up': (all(h[-1].up for h in live) if live
+                       else last.up),
+                'mbps': last.mbps,
+                'drops': last.drops,
+                'delivered_mbps': (rx[-1].mbps if rx and
+                                   rx[-1].measured_at >= fresh else None),
+                'peak_mbps': max((r.mbps for r in main
+                                  if r.measured_at > start and
+                                  r.mbps is not None), default=None),
+                'measured_at': last.measured_at.isoformat(),
+                'age': int((now - last.measured_at).total_seconds()),
                 'stale': not live,
             })
         return view
@@ -1448,22 +1451,22 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 for link, entry in view.items()
                 if not entry['stale'] and entry['peak_mbps'] is not None}
 
-    def _load_series(self, context):
+    def _load_series(self, context, hist=None):
         """{(a, b): [(measured_at, mbps), ...]} oldest first, per link.
 
         The same end as the view's mbps: the sender's (offered load) if
         fresh, else the receiver's if fresh; a link with neither is not
-        here. What the re-optimisation judges congestion on.
+        here. What the re-optimisation judges congestion on. hist: as in
+        _link_state_view.
         """
         fresh = timeutils.utcnow() - datetime.timedelta(
             seconds=self.conf.link_state_stale_after)
-        hist = self._history(context)
+        hist = self._history(context) if hist is None else hist
         series = {}
         for a, b in self.capacity:
             _ends, live = self._ends(hist, a, b, fresh)
             if live:
-                series[(a, b)] = [(r['measured_at'], r['mbps'])
-                                  for r in live[0]]
+                series[(a, b)] = [(r.measured_at, r.mbps) for r in live[0]]
         return series
 
     def _place_auto_path(self, context, pair, node_path, existing=None):

@@ -24,6 +24,7 @@ test_aggregate_load. The ports are real, for the auto paths' foreign keys.
 from unittest import mock
 
 from networking_srv6_agent.api.definitions import srv6_te as te_def
+from networking_srv6_agent.db import link_state_db
 from networking_srv6_agent.db import te_db
 from networking_srv6_agent.services import pce
 from networking_srv6_agent.services import te_reopt
@@ -348,6 +349,64 @@ class TestRelease(SteerTestCase):
             self.reopt.check()
         self.assertNotIn(self.vms[0], [c[0][1]['source_port_id']
                                        for c in place.call_args_list])
+
+
+class TestReadOnce(SteerTestCase):
+    """PLAN-C4-OPTIMISATION O1: the history is read once per pass."""
+
+    def test_one_history_read_for_a_pass_with_several_moves(self):
+        # three candidates, two moves: today's code read it 3 + 3 times
+        self._conf(te_reopt_max_moves=3, te_reopt_low=0.4)
+        self._pair(0, 1, 30)
+        self._pair(2, 3, 30)
+        self._pair(1, 2, 30)
+        self._congest_s1(98)
+        with mock.patch.object(link_state_db, 'get_link_states',
+                               wraps=link_state_db.get_link_states) as read:
+            self.reopt.check()
+        self.assertGreaterEqual(len(self._autos()), 2)
+        self.assertEqual(1, read.call_count)
+
+
+class TestSharedLinks(SteerTestCase):
+    """Two elephants share two congested links (PLAN-C4-OPTIMISATION X3)."""
+
+    S1B = ('s1', 'lb')
+
+    def _serial_pair(self, src, dst, mbps):
+        """A pair whose whole rate crosses la>s1 and s1>lb (one path)."""
+        for link in (S1, self.S1B, ('lb', 'node2')):
+            self.pairs.append({
+                'from_node': link[0], 'to_node': link[1], 'mbps': float(mbps),
+                'domain_id': self.domain['id'],
+                'source_port_id': self.vms[src],
+                'destination_port_id': self.vms[dst],
+                'source_host': 'node1', 'destination_host': 'node2',
+                'steered': False})
+
+    def _congest_both(self, mbps=98):
+        """la>s1 (la reports) and s1>lb (s1 reports) above high, 3 samples."""
+        for _ in range(3):
+            self._sample({S1: mbps})
+            items = [{'reporter': 's1', 'from_node': a, 'to_node': b,
+                      'up': True, 'drops': 0,
+                      'mbps': float(mbps) if (a, b) == self.S1B else 0.0}
+                     for a, b in sorted(self.srv6.capacity) if a == 's1']
+            req = self.new_create_request(test_te_reopt.LS,
+                                          {test_te_reopt.LS: items},
+                                          as_admin=True)
+            self._check(req.get_response(self.ext_api), 201)
+
+    def test_a_pair_moved_off_one_link_relieves_the_other(self):
+        # 98 - 50 = 48 <= 56 on la>s1, and the same 50 left s1>lb: one
+        # move, not one per link (fit 1.0: the second would have fitted)
+        self._conf(te_auto_fit=1.0)
+        self._serial_pair(0, 1, 50)
+        self._serial_pair(2, 3, 48)
+        self._congest_both()
+        self.reopt.check()
+        [auto] = self._autos()
+        self.assertEqual(self.vms[0], auto[te_def.SOURCE_PORT_ID])
 
 
 class TestShortestLinks(test_te_reopt.ReoptTestCase):
