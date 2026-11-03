@@ -17,7 +17,7 @@
 What a pass does with VM pairs is in test_te_reopt_uf. The two-spine
 fabric of test_te (node1 - la - s1|s2 - lb - node2; spine
 links 100 Mbit/s, host links 1000; capacity used as is, so te_reopt_high
-0.9 is 90 Mbit/s on a spine link). Measurements are posted through the
+0.72 is 72 Mbit/s on a spine link). Measurements are posted through the
 API as leaf la's agent would, one batch per 5 s of the mocked clock, and
 the re-optimiser's pass is run by hand.
 """

@@ -204,9 +204,13 @@ class TestTrigger(SteerTestCase):
         self.assertEqual([], self._autos())
 
     def test_at_or_below_high_never_moves(self):
-        self._samples(5, {S1: 90})                       # not above 90
+        # the default high 0.72: 72 Mbit/s is not above it, 73 is
+        self._samples(5, {S1: 72})
         self.reopt.check()
         self.assertEqual([], self._autos())
+        self._samples(3, {S1: 73})
+        self.reopt.check()
+        self.assertEqual(1, len(self._autos()))
 
     def test_stale_samples_are_not_congestion(self):
         self._samples(3, {S1: 95})
