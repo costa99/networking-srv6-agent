@@ -1368,6 +1368,17 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 % source_port_id)
         source_port = self._validate_destination_port(
             admin_context, domain, source_port_id, te_def.SOURCE_PORT_ID)
+        if port and source_port['network_id'] == port['network_id']:
+            # One L2 segment across nodes: the guest reaches its peer by
+            # ARP over the tunnel, never through the gateway into the VRF.
+            raise te_ext.Srv6TePathInvalid(
+                reason=_("source_port_id %(s)s and destination_port_id %(d)s "
+                         "are both on network %(n)s: traffic inside a "
+                         "network is switched over the tunnel, not routed "
+                         "through the domain, so the path would steer "
+                         "nothing")
+                % {'s': source_port_id, 'd': port['id'],
+                   'n': port['network_id']})
         bound = source_port.get(portbindings.HOST_ID)
         if not bound:
             raise te_ext.Srv6TePathInvalid(

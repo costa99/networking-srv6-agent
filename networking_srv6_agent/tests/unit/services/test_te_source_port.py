@@ -45,7 +45,8 @@ class SourcePortTestCase(test_te.TePluginTestCaseBase):
     def setUp(self):
         super().setUp()
         self.ports = {VM: _port(VM, 'node1', ips=('10.0.0.9', 'fd00::9')),
-                      DST: _port(DST, 'node2', ips=('10.0.0.5',)),
+                      DST: _port(DST, 'node2', network='net2',
+                                 ips=('10.0.0.5',)),
                       OTHER: _port(OTHER, 'node3', network='net9')}
 
         def get_port(context, port_id, fields=None):
@@ -60,7 +61,7 @@ class TestCreate(SourcePortTestCase):
     def setUp(self):
         super().setUp()
         self.domain_db.get_domain.return_value = test_plugin._domain(
-            id='d1', project_id='owner', networks=['net1'])
+            id='d1', project_id='owner', networks=['net1', 'net2'])
         self.te_db.create_te_path.side_effect = \
             lambda ctx, domain_id, body: test_te._db_path(
                 domain_id=domain_id, project_id=body['project_id'],
@@ -106,6 +107,11 @@ class TestCreate(SourcePortTestCase):
     def test_a_vm_that_does_not_exist(self):
         self._refused('does not exist', destination_host='node2',
                       source_port_id='gone')
+
+    def test_a_destination_on_the_same_network(self):
+        # switched over the tunnel, never routed into the VRF
+        self.ports[DST]['network_id'] = 'net1'
+        self._refused('both on network net1', destination_port_id=DST)
 
     def test_a_vm_of_another_network(self):
         self._refused('not attached', destination_host='node2',
@@ -309,7 +315,10 @@ class TestRest(test_te.TeRestTestCase):
     def setUp(self):
         super().setUp()
         self.vm = self._vm_port()
-        self.dst = self._vm_port()
+        # another network: inside one, traffic never reaches the VRF
+        self.net2 = self._network()
+        self._assoc(self.domain['id'], self.net2['id'])
+        self.dst = self._vm_port(self.net2)
         core = self.srv6._core_plugin()
         real = core.get_port
         self.bound = {self.vm['id']: 'node1', self.dst['id']: 'node2'}
@@ -343,6 +352,13 @@ class TestRest(test_te.TeRestTestCase):
         res = self._path(expected=409, destination_port_id=self.dst['id'],
                          source_port_id=self.vm['id'])
         self.assertIn('from port %s' % self.vm['id'], self._message(res))
+
+    def test_a_destination_on_the_same_network_is_refused(self):
+        same = self._vm_port()
+        self.bound[same['id']] = 'node2'
+        res = self._path(expected=400, destination_port_id=same['id'],
+                         source_port_id=self.vm['id'])
+        self.assertIn('both on network', self._message(res))
 
     def test_origin_cannot_be_posted(self):
         self._path(expected=400, destination_host='node2', origin='auto')

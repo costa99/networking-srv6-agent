@@ -27,6 +27,14 @@ unlimited), or per project through Neutron's quota API
 locator of its own: the server refuses a sync whose locator overlaps the
 locator of another live node or of a ``topology_file`` node.
 
+A domain routes only the traffic *between* its networks. Inside one network
+the instances share an L2 segment stretched over the nodes' tunnels, so
+traffic between two of them, even on different nodes, is switched over VXLAN
+and never enters the domain: no SRv6, and no TE path applies to it. A TE path
+whose ``source_port_id`` and ``destination_port_id`` are on the same network
+is refused. A path toward a node or from a source node is accepted, and
+steers only the traffic that comes from, or goes to, other networks.
+
 
 Command line
 ------------

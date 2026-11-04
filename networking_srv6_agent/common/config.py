@@ -56,11 +56,12 @@ srv6_server_opts = [
                "the server, then the agents.")),
     cfg.IntOpt(
         'vrf_table_base',
-        default=10000,
+        default=0,
         help=_("The VRF routing table for a domain is vrf_table_base plus its "
-               "function id. Derived, never allocated. Must be high enough "
-               "to avoid the well-known tables (main=254, local=255) and any "
-               "table another agent on the node uses.")),
+               "function id. Derived, never allocated. With the default 0 "
+               "the table is the function id itself (0xe000-0xefff, far "
+               "from main=254 and local=255); raise it only if another "
+               "agent on the node uses tables in that range.")),
     cfg.IntOpt(
         'te_liveness_interval',
         default=15,

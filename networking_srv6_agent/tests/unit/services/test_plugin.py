@@ -208,7 +208,7 @@ class TestDomainApi(Srv6RestTestCase):
                                                   domain['id']))
         # D5: the id was read before the delete destroyed it.
         self.agent_rpc.domain_deleted.assert_called_once_with(
-            mock.ANY, domain['id'], fid, 10000 + fid)
+            mock.ANY, domain['id'], fid, fid)
 
     def test_pool_exhaustion_rolls_the_domain_back(self):
         """One writer around create + allocate.
@@ -479,7 +479,11 @@ class PluginUnitTestCaseBase(base.BaseTestCase):
 
 class TestPayload(PluginUnitTestCaseBase):
 
+    def test_vrf_table_is_the_function_id_by_default(self):
+        self.assertEqual(7, self.plugin._vrf_table(7))
+
     def test_vrf_table_is_the_base_plus_the_function_id(self):
+        cfg.CONF.set_override('vrf_table_base', 10000, group='srv6')
         self.assertEqual(10007, self.plugin._vrf_table(7))
 
     def test_payload_shape(self):
@@ -497,7 +501,7 @@ class TestPayload(PluginUnitTestCaseBase):
         payload = self.plugin._build_domain_payload(self.ctx, domain)
         self.assertEqual(domain['id'], payload['id'])
         self.assertEqual(7, payload['function_id'])
-        self.assertEqual(10007, payload['vrf_table'])
+        self.assertEqual(7, payload['vrf_table'])
         self.assertEqual('End.DT46', payload['behavior'])
         self.assertEqual({'node1': 'fc00:0:1::/48'}, payload['locators'])
         self.assertEqual(1450, payload['networks'][0]['mtu'])
@@ -598,7 +602,7 @@ class TestDeleteOrdering(PluginUnitTestCaseBase):
 
     def test_the_function_id_is_read_before_the_delete(self):
         # A real int: a MagicMock id would record its own arithmetic
-        # (10000 + id) in the same call list.
+        # (base + id) in the same call list.
         self.srv6_db.get_function_id.return_value = 7
         calls = mock.Mock()
         calls.attach_mock(self.srv6_db.get_function_id, 'get_function_id')
@@ -614,7 +618,7 @@ class TestDeleteOrdering(PluginUnitTestCaseBase):
         self.srv6_db.release_function_id.return_value = None
         self.plugin.delete_srv6_domain(self.ctx, 'd1')
         self.agent_rpc.domain_deleted.assert_called_once_with(
-            self.ctx, 'd1', 7, 10007)
+            self.ctx, 'd1', 7, 7)
 
     def test_no_id_means_nothing_to_name(self):
         self.srv6_db.get_function_id.return_value = None
