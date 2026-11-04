@@ -1334,6 +1334,17 @@ class TestSidRules(DataplaneTestCaseBase):
         self.assertEqual([(self.RED, 'fc00:0:2:7::'),
                           (self.RED, 'fc00:0:3:7::')], self._added())
 
+    def test_the_rule_comes_before_the_route(self):
+        # Make before break (B4, 2026-11-04): a route re-steered through a
+        # new first segment dropped its packets in the VRF until the rule
+        # toward that segment followed, ~0.4 s per drain on the Clos.
+        self.dp.add_routes(self.domain_id,
+                           [self._route('10.0.0.5/32', 'node2')],
+                           self.locators, 'node1')
+        names = [c[0] for c in self.priv_seg6.mock_calls]
+        self.assertLess(names.index('add_sid_rule'),
+                        names.index('replace_seg6_route'))
+
     def test_a_local_route_needs_no_rule(self):
         self.dp.add_routes(self.domain_id,
                            [self._route('10.0.0.5/32', 'node1')],
@@ -1645,8 +1656,9 @@ class TestEndSidRules(DataplaneTestCaseBase):
         self.dp.ensure_edge_filter([LOCATOR2])
         self._add(self._route('10.0.0.5/32', ['fc00:0:2:fff0::']),
                   self._route('10.0.0.6/32'))
-        self.assertEqual([(self.RED, 'fc00:0:2:7::'),
-                          (self.RED, 'fc00:0:2:fff0::')], self._rules())
+        # added in route order, each before its route (make before break)
+        self.assertEqual([(self.RED, 'fc00:0:2:fff0::'),
+                          (self.RED, 'fc00:0:2:7::')], self._rules())
 
     def test_a_leading_own_end_sid_is_not_the_rule(self):
         self.dp.ensure_edge_filter([LOCATOR3])
@@ -2144,7 +2156,9 @@ class TestSteering(DataplaneTestCaseBase):
         self._sync(self._route())
         order = [name for name, _a in self._calls(
             'replace_seg6_route', 'add_sid_rule', 'add_steer_rule')]
-        self.assertEqual(['replace_seg6_route', 'add_sid_rule',
+        # the VRF route's rule before the VRF route; the steer table's
+        # route and rule before the steer rule that sends traffic there
+        self.assertEqual(['add_sid_rule', 'replace_seg6_route',
                           'replace_seg6_route', 'add_sid_rule',
                           'add_steer_rule'], order)
         self.assertIn(mock.call(VRF_NAME, 'fc00:0:3:fff0::'),

@@ -1328,7 +1328,8 @@ class Srv6LinuxDataplane:
         -> MTU, for the per-route check of a steered route.
 
         Also makes sure the domain's VRF may reach the first segment of
-        every route (_ensure_sid_rules); only adds, like the routes.
+        every route (_install_routes adds the rule before the route that
+        needs it); only adds, like the routes.
         Pruning is sync_routes' job.
 
         Returns the normalised prefixes this node should hold an encap
@@ -1341,9 +1342,8 @@ class Srv6LinuxDataplane:
         state = self.domains.get(domain_id)
         if state is None:
             return set()
-        wanted, rule_sids = self._install_routes(state, routes, locators,
-                                                 local_host, mtus)
-        self._ensure_sid_rules(state, rule_sids)
+        wanted, _ = self._install_routes(state, routes, locators,
+                                         local_host, mtus)
         # A source VM's path that covers a new destination: add it to the
         # VM's steer table now; only a full sync removes anything.
         self._sync_steering(state, routes, locators, local_host,
@@ -1392,8 +1392,12 @@ class Srv6LinuxDataplane:
             segments, mode, rule_sid, dev = self._encap(
                 state, prefix, locators[host],
                 self._segments_for(route, local_host))
-            if rule_sid:
+            if rule_sid and rule_sid not in rule_sids:
                 rule_sids.add(rule_sid)
+                # make before break: the VRF must reach the new first
+                # segment before the route points there, or a re-steered
+                # route drops its packets until the caller adds the rule
+                self._ensure_sid_rules(state, [rule_sid])
             if not dev:
                 continue
             self._check_route_mtu(prefix,
@@ -1740,7 +1744,6 @@ class Srv6LinuxDataplane:
             return
         wanted, rule_sids = self._install_routes(state, routes, locators,
                                                  local_host, mtus)
-        self._ensure_sid_rules(state, rule_sids)
         self._remove_unwanted_routes(domain_id, wanted)
         # The steer tables' SIDs are wanted too, or the line below would
         # remove the rule a steered VM's outer packet needs (GATE A, D2).
