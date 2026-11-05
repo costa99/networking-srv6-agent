@@ -829,6 +829,25 @@ class TestPortEvents(PortEventsTestCaseBase):
         self.assertEqual('node1', self.agent_rpc.routes_updated.call_args_list[
             0][1]['remove'][0]['host'])
 
+    def test_a_port_going_down_is_withdrawn(self):
+        port = _port(status=n_const.PORT_STATUS_DOWN)
+        self.plugin.registry_port_updated(
+            None, None, None,
+            self._payload(port, dict(port, status=n_const.PORT_STATUS_ACTIVE)))
+        self.assertIn('remove', self.agent_rpc.routes_updated.call_args[1])
+
+    def test_a_live_migrating_port_going_down_keeps_its_route(self):
+        # N9: nova's pre-migration DOWN, and the activation's DOWN on the
+        # destination; the VM still runs, so no withdrawal either time
+        for profile in ({'migrating_to': 'node2'}, {}):
+            port = _port(status=n_const.PORT_STATUS_DOWN,
+                         **{portbindings.PROFILE: profile})
+            original = dict(port, status=n_const.PORT_STATUS_ACTIVE,
+                            **{portbindings.PROFILE: {'migrating_to': 'node2'}})
+            self.plugin.registry_port_updated(None, None, None,
+                                              self._payload(port, original))
+        self.agent_rpc.routes_updated.assert_not_called()
+
     def test_a_deleted_port_is_withdrawn(self):
         self.plugin.registry_port_deleted(None, None, None,
                                           self._payload(_port()))

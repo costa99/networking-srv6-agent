@@ -23,6 +23,8 @@ test_aggregate_load. The ports are real, for the auto paths' foreign keys.
 
 from unittest import mock
 
+from neutron.tests import base
+
 from networking_srv6_agent.api.definitions import srv6_te as te_def
 from networking_srv6_agent.db import link_state_db
 from networking_srv6_agent.db import te_db
@@ -131,12 +133,24 @@ class TestSteer(SteerTestCase):
         self.assertEqual(2, len(self._autos()))
 
     def test_a_pair_a_user_path_covers_is_never_steered(self):
-        self._path(destination_host='node2', via_hosts=['node1'])
+        user = self._path(destination_host='node2', via_hosts=['node1'])
         self._pair(0, 1, 50)
         self._pair(2, 3, 40)
         self._congest_s1()
         self.reopt.check()
         self.assertEqual([], self._autos())
+        self.assertEqual(['node1'], self._via(user))      # left as it was
+
+    def test_a_user_path_to_one_port_covers_only_that_port(self):
+        user = self._path(destination_port_id=self.vms[1],
+                          via_hosts=['node1'])
+        self._pair(0, 1, 50)                            # covered
+        self._pair(2, 3, 40)                            # not covered
+        self._congest_s1()
+        self.reopt.check()
+        [auto] = self._autos()
+        self.assertEqual(self.vms[3], auto[te_def.DESTINATION_PORT_ID])
+        self.assertEqual(['node1'], self._via(user))
 
     def test_the_what_if_check_keeps_the_target_below_low(self):
         # s2 holds 40: 40 + 50 > 70, so pair 0>1 cannot go; 40 + 25 <= 70
@@ -333,6 +347,18 @@ class TestRelease(SteerTestCase):
         self.reopt.check()
         self.assertEqual(1, len(self._autos()))
 
+    def test_a_release_leaves_user_paths(self):
+        self._steered()
+        user = self._path(destination_port_id=self.vms[2],
+                          via_hosts=['node1'])
+        self.pairs = []
+        self._pair(0, 1, 30, links=(S2,))
+        self.t += 60
+        self._samples(1, {S2: 30})
+        self.reopt.check()
+        self.assertEqual([], self._autos())
+        self.assertEqual(['node1'], self._via(user))
+
     def test_released_pair_not_re_steered_inside_the_hold_down(self):
         self._steered()
         self.pairs = []
@@ -470,3 +496,48 @@ class TestNoPileUp(SteerTestCase):
         self._samples(3, {S1: 98})
         self.reopt.check()
         self.assertNotIn(placed, self.reopt._pending)
+
+
+class TestCovered(base.BaseTestCase):
+    """te_reopt._covered: which user paths keep a pair off auto steering."""
+
+    PAIR = {'entry': {'domain_id': 'd1', 'source_port_id': 'vm-a',
+                      'destination_port_id': 'vm-b', 'source_host': 'node1',
+                      'destination_host': 'node2'}}
+
+    def _covered(self, **path):
+        p = dict({'domain_id': 'd1', te_def.ORIGIN: te_def.ORIGIN_USER,
+                  te_def.DESTINATION_PORT_ID: None,
+                  te_def.DESTINATION_HOST: None,
+                  te_def.SOURCE_PORT_ID: None, te_def.SOURCE_HOST: None},
+                 **path)
+        return te_reopt._covered(self.PAIR, [p])
+
+    def test_destination_port_or_node_from_any_source(self):
+        self.assertTrue(self._covered(destination_port_id='vm-b'))
+        self.assertTrue(self._covered(destination_host='node2'))
+
+    def test_another_destination(self):
+        self.assertFalse(self._covered(destination_port_id='vm-c'))
+        self.assertFalse(self._covered(destination_host='node3'))
+
+    def test_from_its_source_port_only(self):
+        self.assertTrue(self._covered(destination_host='node2',
+                                      source_port_id='vm-a'))
+        self.assertFalse(self._covered(destination_host='node2',
+                                       source_port_id='vm-x'))
+
+    def test_from_its_source_node_only(self):
+        self.assertTrue(self._covered(destination_host='node2',
+                                      source_host='node1'))
+        self.assertFalse(self._covered(destination_host='node2',
+                                       source_host='node3'))
+
+    def test_another_domain(self):
+        self.assertFalse(self._covered(domain_id='d2',
+                                       destination_host='node2'))
+
+    def test_an_auto_path_never_covers(self):
+        self.assertFalse(self._covered(origin=te_def.ORIGIN_AUTO,
+                                       destination_port_id='vm-b',
+                                       source_port_id='vm-a'))

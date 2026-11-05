@@ -1759,6 +1759,12 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 LOG.exception("SRv6: could not push domain %s after port %s "
                               "moved", domain_id, port['id'])
 
+    @staticmethod
+    def _migrating(*ports):
+        """Nova marks a live migration with migrating_to in the profile."""
+        return any('migrating_to' in (p.get(portbindings.PROFILE) or {})
+                   for p in ports)
+
     @registry.receives(resources.PORT, [events.AFTER_UPDATE])
     def registry_port_updated(self, resource, event, trigger, payload=None):
         context = payload.context
@@ -1773,7 +1779,14 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             if is_active and not was_active:
                 self._notify_port(context, port)
             elif was_active and not is_active:
-                self._notify_port(context, original, removed=True)
+                if self._migrating(original, port):
+                    # N9: nova takes the port DOWN while the VM still runs on
+                    # its source; the add when it is ACTIVE on the
+                    # destination replaces the route in one step.
+                    LOG.debug("SRv6: port %s is live-migrating, route kept",
+                              port.get('id'))
+                else:
+                    self._notify_port(context, original, removed=True)
             elif is_active:
                 # A live port that moved host: withdraw the old SID, then
                 # advertise the new one. Order matters -- the reverse would
