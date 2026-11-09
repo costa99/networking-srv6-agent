@@ -595,6 +595,29 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 self._check_no_overlap(admin_context, domain, network_id,
                                        [cidr])
 
+    @registry.receives(resources.SUBNET, [events.AFTER_CREATE,
+                                          events.AFTER_UPDATE,
+                                          events.AFTER_DELETE])
+    def _push_domain_of_changed_subnet(self, resource, event, trigger,
+                                       payload=None):
+        """Tell the nodes: the payload carries each network's subnets.
+
+        Without it a node that already holds the domain kept its cached
+        subnets, and a new subnet had no gateway address until the next
+        resync. Never raises: the subnet change has already committed.
+        """
+        network_id = (payload.latest_state or {}).get('network_id')
+        if not network_id:
+            return
+        try:
+            admin_context = payload.context.elevated()
+            for domain_id in domain_db.get_domain_ids_for_network(
+                    admin_context, network_id):
+                self._push_domain_by_id(admin_context, domain_id)
+        except Exception:
+            LOG.exception("SRv6: could not push the domain of network %s "
+                          "after a subnet change", network_id)
+
     @registry.receives(resources.ROUTER_INTERFACE, [events.BEFORE_CREATE])
     def _refuse_router_interface_on_domain_network(self, resource, event,
                                                    trigger, payload=None):

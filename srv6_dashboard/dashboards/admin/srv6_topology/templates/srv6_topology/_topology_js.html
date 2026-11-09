@@ -32,8 +32,6 @@
   /* Not green/amber: those are the TE paths' colours. */
   var LEVEL_COLOR = {ok: '#6baed6', busy: '#fd8d3c', congested: '#d62728',
                      down: '#333', unknown: '#bbb'};
-  var LEVEL_TEXT = {ok: 'below 50 %', busy: '50–90 %', congested: '≥ 90 %',
-                    down: 'down', unknown: 'no fresh data'};
   var LINK_GAP = 7, REFRESH_MS = 5000;
   var W = 900, H = 520, CX = W / 2, CY = H / 2 - 10, RADIUS = 175;
   /* the largest circle whose boxes and badges still fit the canvas */
@@ -281,6 +279,12 @@
     htmlEl('span', '- - DEGRADED', st,
            {style: 'color: ' + STATUS_COLOR.DEGRADED});
     if (!data.links.length) { return; }
+    var busy = Math.round(data.levels.busy * 100);
+    var high = Math.round(data.levels.congested * 100);
+    var LEVEL_TEXT = {ok: 'below ' + busy + ' %',
+                      busy: busy + '–' + high + ' %',
+                      congested: '≥ ' + high + ' %',
+                      down: 'down', unknown: 'no fresh data'};
     var lk = htmlEl('div', 'Links (share of capacity): ', legend);
     Object.keys(LEVEL_COLOR).forEach(function (level) {
       var item = htmlEl('span', null, lk,

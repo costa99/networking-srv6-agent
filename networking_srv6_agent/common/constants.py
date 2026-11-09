@@ -145,6 +145,11 @@ STEER_RULE_PRIORITY = 900
 STEER_TABLE_OFFSET = 0x10000
 STEER_TABLE_SLOTS = 4096
 
+# Share of a link's capacity above which it is congested: the default of
+# [srv6] te_reopt_high, and the level the dashboard colours a link red at.
+# The one place to change both.
+TE_REOPT_HIGH_DEFAULT = 0.72
+
 # Where the `local` FIB rule goes (F7). The kernel puts it at 0, ahead of
 # the l3mdev rule at 1000, so a lookup from inside a VRF found every host
 # address first: t9 saw a tenant ping the management address and deliver a

@@ -995,3 +995,28 @@ class TestSubnetGuard(PluginUnitTestCaseBase):
         self.assertEqual(
             [['net2']], [c[1]['filters']['network_id']
                          for c in self.core.get_subnets.call_args_list])
+
+
+class TestSubnetChangePush(PluginUnitTestCaseBase):
+    """A subnet created, updated or deleted on a domain's network."""
+
+    def _changed(self, network_id='net1'):
+        payload = mock.Mock(context=self.ctx,
+                            latest_state={'network_id': network_id})
+        with mock.patch.object(self.plugin, '_push_domain_by_id') as push:
+            self.plugin._push_domain_of_changed_subnet(
+                None, None, None, payload=payload)
+        return push
+
+    def test_the_networks_domain_is_pushed(self):
+        self.domain_db.get_domain_ids_for_network.return_value = ['d1']
+        self.assertEqual(['d1'],
+                         [c[0][1] for c in self._changed().call_args_list])
+
+    def test_a_network_in_no_domain_pushes_nothing(self):
+        self.domain_db.get_domain_ids_for_network.return_value = []
+        self._changed().assert_not_called()
+
+    def test_a_failure_does_not_reach_the_subnet_operation(self):
+        self.domain_db.get_domain_ids_for_network.side_effect = RuntimeError
+        self._changed().assert_not_called()

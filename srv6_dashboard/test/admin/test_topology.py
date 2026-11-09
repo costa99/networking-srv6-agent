@@ -169,8 +169,9 @@ class BuildTests(helpers.TestCase):
         self.assertIsNone(links['ale-node3', 'l1']['load'])
 
     def test_level_thresholds(self):
-        cases = ((49.9, 'ok'), (50.0, 'busy'), (89.9, 'busy'),
-                 (90.0, 'congested'), (120.0, 'congested'))
+        high = topology.CONGESTED * 100      # the link's capacity is 100
+        cases = ((49.9, 'ok'), (50.0, 'busy'), (high - 0.1, 'busy'),
+                 (high, 'congested'), (120.0, 'congested'))
         for mbps, level in cases:
             base = self.srv6_link_states.list()[2].to_dict()
             link = dict(base, mbps=mbps)
@@ -209,7 +210,7 @@ class TopologyViewTests(helpers.BaseAdminViewTests):
 
         self.assertEqual(200, res.status_code)
         body = json.loads(res.content)
-        self.assertEqual(['hosts', 'domains', 'te_paths', 'links'],
+        self.assertEqual(['hosts', 'domains', 'te_paths', 'links', 'levels'],
                          list(body))
         # The three locators, the DEGRADED path's lost waypoint, and the
         # fabric nodes l1 and s1 of the link states.

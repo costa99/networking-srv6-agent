@@ -399,6 +399,18 @@ class TestGatewayPort(DataplaneTestCaseBase):
         self.dp.ensure_gateway_port(self.domain_id, 'net1', 100, self.subnets)
         self.device.addr.add.assert_not_called()
 
+    def test_an_address_of_no_subnet_is_removed(self):
+        # A deleted subnet, or a changed gateway; link-local stays, and the
+        # kernel's spelling of a wanted address is not a difference.
+        self.device.addr.list.return_value = [
+            {'cidr': '10.0.0.1/24'}, {'cidr': '10.0.9.1/24'},
+            {'cidr': 'fe80::1/64'}, {'cidr': 'fd98:1:0::1/64'}]
+        self.dp.ensure_gateway_port(
+            self.domain_id, 'net1', 100, self.subnets + [
+                {'id': 'sub6', 'cidr': 'fd98:1::/64',
+                 'gateway_ip': 'fd98:1::1'}])
+        self.device.addr.delete.assert_called_once_with('10.0.9.1/24')
+
     def test_subnet_without_a_gateway_is_skipped(self):
         self.dp.ensure_gateway_port(
             self.domain_id, 'net1', 100,
@@ -1127,6 +1139,17 @@ class TestRoutes(DataplaneTestCaseBase):
         self.dp.remove_routes(self.domain_id, [self._route()])
         self.priv_seg6.delete_route.assert_called_once_with(
             '10.0.0.5/32', VRF_TABLE, family_v6=False)
+
+    def test_remove_routes_clears_the_domains_steer_tables_too(self):
+        # Another domain's steer table (svp-8-*) is not touched.
+        self.priv_seg6.list_steer_rules.return_value = [
+            ('10.0.1.9', 'svp-7-100', 70001, False),
+            ('10.0.2.9', 'svp-8-100', 70002, False)]
+        self.dp.remove_routes(self.domain_id, [self._route()])
+        self.assertEqual(
+            [mock.call('10.0.0.5/32', VRF_TABLE, family_v6=False),
+             mock.call('10.0.0.5/32', 70001, family_v6=False)],
+            self.priv_seg6.delete_route.call_args_list)
 
     def test_add_routes_reports_what_it_wants(self):
         self.assertEqual(

@@ -111,7 +111,7 @@ srv6_server_opts = [
                "Needs topology_file and te_auto_steering.")),
     cfg.FloatOpt(
         'te_reopt_high',
-        default=0.72,
+        default=constants.TE_REOPT_HIGH_DEFAULT,
         help=_("A link whose measured load is above this share of its "
                "capacity for te_reopt_samples measurements in a row is "
                "congested. Two TCP elephants sharing a link rarely hold "

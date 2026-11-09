@@ -41,9 +41,12 @@ lays out and draws what this returns, it decides nothing.
 
 import collections
 
-# Shares of the link's capacity: the 90 % is te_reopt_high's default, the
-# load the re-optimisation will call congested (PLAN-LINK-STATE-TE L5).
-BUSY, CONGESTED = 0.5, 0.9
+from networking_srv6_agent.common import constants
+
+# Shares of the link's capacity. CONGESTED is the default of [srv6]
+# te_reopt_high, the load the re-optimisation calls congested (a server
+# configured with another value still colours by this one).
+BUSY, CONGESTED = 0.5, constants.TE_REOPT_HIGH_DEFAULT
 
 
 def _level(link):
@@ -175,4 +178,6 @@ def build(locators, domains, ports, te_paths, path_url, links=()):
         'domains': out_domains,
         'te_paths': out_paths,
         'links': sorted(out_links, key=lambda x: (x['from'], x['to'])),
+        # for the legend, so the page states the thresholds used above
+        'levels': {'busy': BUSY, 'congested': CONGESTED},
     }

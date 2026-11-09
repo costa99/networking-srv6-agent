@@ -955,6 +955,30 @@ class Srv6LinuxDataplane:
                 LOG.warning("SRv6: could not add %(c)s to %(p)s: %(e)s",
                             {'c': cidr, 'p': port_name, 'e': e})
 
+        # An address no subnet names any more (subnet deleted, gateway
+        # changed) goes, with its connected route: it would shadow a network
+        # attached later with that range. Compared as addresses, not text;
+        # link-local ones are the kernel's own.
+        wanted = set()
+        for subnet in subnets:
+            if subnet.get('gateway_ip'):
+                wanted.add(ipaddress.ip_interface('%s/%s' % (
+                    subnet['gateway_ip'], subnet['cidr'].split('/')[1])))
+        for cidr in sorted(existing):
+            try:
+                address = ipaddress.ip_interface(cidr)
+            except ValueError:
+                continue
+            if address.is_link_local or address in wanted:
+                continue
+            LOG.info("SRv6: %(c)s on %(p)s is no subnet's gateway any more; "
+                     "removing it", {'c': cidr, 'p': port_name})
+            try:
+                device.addr.delete(cidr)
+            except Exception as e:
+                LOG.warning("SRv6: could not remove %(c)s from %(p)s: %(e)s",
+                            {'c': cidr, 'p': port_name, 'e': e})
+
         # The port NAME embeds the local VLAN, so a network whose VLAN the
         # OVS agent reallocated is programmed under a new name. Without
         # this the old port would be orphaned: overwriting the entry below
@@ -1791,15 +1815,20 @@ class Srv6LinuxDataplane:
         state = self.domains.get(domain_id)
         if state is None:
             return
+        # The source VMs' steer tables too: a path to a deleted port goes
+        # with it and nothing else is pushed, so the route would stay until
+        # the next full sync and capture a reused address.
+        tables = self._steer_tables(state.function_id)[0] or {}
         for route in routes:
             prefix = route['prefix']
-            try:
-                priv_seg6.delete_route(
-                    prefix, state.vrf_table,
-                    family_v6=':' in prefix.split('/')[0])
-            except Exception as e:
-                LOG.debug("SRv6: removing %(p)s: %(e)s",
-                          {'p': prefix, 'e': e})
+            for table in [state.vrf_table] + sorted(tables):
+                try:
+                    priv_seg6.delete_route(
+                        prefix, table,
+                        family_v6=':' in prefix.split('/')[0])
+                except Exception as e:
+                    LOG.debug("SRv6: removing %(p)s from table %(t)s: "
+                              "%(e)s", {'p': prefix, 't': table, 'e': e})
 
     def _check_route_mtu(self, prefix, network_mtu, depth, dev=None):
         """The MTU of one steered route, warned once per (prefix, depth).
