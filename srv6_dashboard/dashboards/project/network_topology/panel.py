@@ -24,7 +24,7 @@ class NetworkTopology(core_panel.NetworkTopology):
 
     Horizon's own panel (same slug, name and permissions), registered in
     its place by enabled/_1420_project_network_topology_panel.py, which
-    shadows Horizon's file of the same name (FEATURE D24). Its urls.py
+    shadows Horizon's file of the same name. Its urls.py
     swaps in two views; every other URL is Horizon's.
     """
 

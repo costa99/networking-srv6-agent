@@ -22,7 +22,7 @@ class Srv6Domains(horizon.Panel):
 
     No permissions or policy_rules: every project member may create and
     attach (policy ADMIN_OR_PROJECT_MEMBER), and Neutron enforces it on
-    every request anyway (FEATURE D5, D9).
+    every request anyway.
     """
 
     name = _("SRv6 Domains")

@@ -10,12 +10,12 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Constrained path computation for the server's automatic paths (U-f).
+"""Constrained path computation for the server's automatic paths.
 
 One request at a time (source, destination, demand): drop every directed
 link whose residual capacity is below the demand, then take the path with
-the fewest hops and, among those, the widest bottleneck -- CSPF, Tier 1 of
-the research notes (PLAN-PATH-COMPUTATION). No path: nothing is moved.
+the fewest hops and, among those, the widest bottleneck -- CSPF. No path:
+nothing is moved.
 
 The underlay comes from a static topology file, read once:
 
@@ -123,7 +123,7 @@ def shortest_links(cap, src, dst):
 
     What default routing may use: the underlay's ECMP spreads traffic over
     all of them, and which one a pair takes can change (a flow label, the
-    head-end's route cache: TECH-DOC-NOTES N7). The U-f release judges the
+    head-end's route cache). The release of an automatic path judges the
     room on all of them (worst case). Empty if dst is unreachable.
     """
     adj, pred = collections.defaultdict(list), collections.defaultdict(list)

@@ -15,7 +15,7 @@
 """openstack srv6 link list
 
 Admin-only and read-only: the measured state of each directed underlay link,
-as the fabric nodes posted it (PLAN-LINK-STATE-TE). Mbit/s is the load the
+as the fabric nodes posted it. Mbit/s is the load the
 sender offered, Delivered what the receiver got, Peak the highest load in
 the server's link_state_window, Capacity the topology file's.
 """

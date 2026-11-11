@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""API definition: measured link state of the underlay (PLAN-LINK-STATE-TE).
+"""API definition: measured link state of the underlay.
 
 Admin-only. A collector (the fabric agent on each spine and leaf) POSTs a
 batch of measurements, one item per directed link it sees:

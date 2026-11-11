@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""The enabled/ files: what devstack copies into Horizon (FEATURE §2.1, §8).
+"""The enabled/ files: what devstack copies into Horizon.
 
 A wrong dotted path in ADD_PANEL does not fail at import: Horizon logs it
 when it applies the panel customization, on a live server. So each file is
@@ -69,8 +69,8 @@ class EnabledFilesTests(helpers.TestCase):
                    for f in glob.glob(os.path.join(_DIR, p))))
 
     def test_topology_file_shadows_horizons(self):
-        # Same name as Horizon's file, so Horizon applies ours instead
-        # (D24). A rename on either side would register both panels.
+        # Same name as Horizon's file, so Horizon applies ours instead.
+        # A rename on either side would register both panels.
         import openstack_dashboard.enabled as core_enabled
         core = {name for __, name, __ in
                 pkgutil.iter_modules(core_enabled.__path__)}

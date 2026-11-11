@@ -16,7 +16,7 @@ SRV6_UNDERLAY_INTERFACE=${SRV6_UNDERLAY_INTERFACE:-}
 # The microSID Local ID Block, valid under both encodings. A custom range
 # must stay inside it with usid; the server refuses to start otherwise.
 SRV6_FUNCTION_ID_RANGES=${SRV6_FUNCTION_ID_RANGES:-0xe000:0xefff}
-# usid (RFC 9800 microSID, USID-PLAN.md; the default) or encap (full SIDs).
+# usid (RFC 9800 microSID; the default) or encap (full SIDs).
 SRV6_DATAPLANE_ENCODING=${SRV6_DATAPLANE_ENCODING:-usid}
 # Optional, server: the underlay topology file ([srv6] topology_file): link
 # state and automatic steering. Unset: neither.
@@ -32,5 +32,5 @@ SRV6_RESYNC_INTERVAL=${SRV6_RESYNC_INTERVAL:-300}
 # The Horizon panels (srv6_dashboard): the enabled files plugin.sh copies into
 # Horizon when the horizon service is enabled. The SRv6 panels, plus
 # _1420_project_network_topology_panel.py, which replaces Horizon's Network
-# Topology panel by sharing its file name (FEATURE-HORIZON-DASHBOARD D24).
+# Topology panel by sharing its file name.
 SRV6_DASHBOARD_ENABLE=${SRV6_DASHBOARD_ENABLE:-$NETWORKING_SRV6_AGENT_DIR/srv6_dashboard/enabled/_[0-9]*_srv6_*panel.py $NETWORKING_SRV6_AGENT_DIR/srv6_dashboard/enabled/_1420_project_network_topology_panel.py}

@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""PLAN-UNRESERVED-STEERING steps 6-7: the re-optimisation steers VM pairs.
+"""The re-optimisation steers VM pairs.
 
 The harness of test_te_reopt: node1 - la - {s1, s2} - lb - node2, 100 Mbit/s
 spine links, la's link state posted every 5 s, the server clock pinned.
@@ -378,7 +378,7 @@ class TestRelease(SteerTestCase):
 
 
 class TestReadOnce(SteerTestCase):
-    """PLAN-C4-OPTIMISATION O1: the history is read once per pass."""
+    """The history is read once per pass."""
 
     def test_one_history_read_for_a_pass_with_several_moves(self):
         # three candidates, two moves: today's code read it 3 + 3 times
@@ -395,7 +395,7 @@ class TestReadOnce(SteerTestCase):
 
 
 class TestSharedLinks(SteerTestCase):
-    """Two elephants share two congested links (PLAN-C4-OPTIMISATION X3)."""
+    """Two elephants share two congested links."""
 
     S1B = ('s1', 'lb')
 
@@ -451,7 +451,7 @@ class TestShortestLinks(test_te_reopt.ReoptTestCase):
 
 
 class TestNoPileUp(SteerTestCase):
-    """Eval 2026-11-02 (c4-on-2): three pairs piled onto spine s2.
+    """Seen live: three pairs piled onto one spine.
 
     Each what-if read the fabric's measurements, which did not show the
     pairs placed a moment before, in the same pass or the previous one.

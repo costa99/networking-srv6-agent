@@ -12,8 +12,8 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-# The tenant's panel: Project > Network > SRv6 Domains (FEATURE §1, §2.1).
-# The number sorts it right after networking-bgpvpn's _1495 (D10).
+# The tenant's panel: Project > Network > SRv6 Domains.
+# The number sorts it right after networking-bgpvpn's _1495.
 
 PANEL = 'srv6'
 PANEL_DASHBOARD = 'project'

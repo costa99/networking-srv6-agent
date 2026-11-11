@@ -22,7 +22,7 @@ heartbeat but none for the heartbeats that stop. This monitor is that timer.
 It keeps no truth of its own: it compares the set of dead waypoints with the
 one it saw last time and, on a difference, pushes the affected domains in
 full. A push is idempotent and the agent swaps its routes atomically, the
-same mechanism as an admin's re-steer (E9), so a repeated or late push is
+same mechanism as an admin's re-steer, so a repeated or late push is
 harmless.
 
 It runs in one process (neutron's PeriodicWorker), so a node's death is one

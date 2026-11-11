@@ -23,8 +23,8 @@ state itself -- that is entirely the agent's job.
 This is the old networking-bgpvpn SRv6 driver with the driver/plugin split
 removed. The precommit/postcommit discipline
 survives without the hook framework: write inside the transaction, fan out
-RPC after it commits, and read anything the commit destroys BEFORE it (delta
-D5 -- a postcommit hook that looked up the function id found it already
+RPC after it commits, and read anything the commit destroys BEFORE it (a
+postcommit hook that looked up the function id found it already
 released, and every agent was silently left holding a stale VRF).
 
 Never decorate the CRUD methods themselves with CONTEXT_WRITER: the fan-out
@@ -284,8 +284,13 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         routes = []
         ports = plugin.get_ports(
             context, filters={'network_id': list(network_ids)})
+        # A port DOWN in the middle of a live migration keeps its route
+        # (N12): a resync in that window must not prune it everywhere.
+        migrating = srv6_db.get_migrating_port_ids(
+            context, [p['id'] for p in ports
+                      if p.get('status') != n_const.PORT_STATUS_ACTIVE])
         for port in ports:
-            if not self._port_is_relevant(port):
+            if not self._port_is_relevant(port, port['id'] in migrating):
                 continue
             host = port.get(portbindings.HOST_ID) or port.get('host')
             if not host:
@@ -303,13 +308,17 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         return routes
 
     @staticmethod
-    def _port_is_relevant(port):
-        """Only real, bound, up workload ports carry tenant traffic."""
+    def _port_is_relevant(port, migrating=False):
+        """Only real, bound, up workload ports carry tenant traffic.
+
+        A live-migrating port is up although its status says DOWN: the VM
+        runs on its source until the move, then on the destination.
+        """
         device_owner = port.get('device_owner', '')
         if device_owner.startswith(n_const.DEVICE_OWNER_NETWORK_PREFIX):
             # DHCP, router and other infrastructure ports are not workloads.
             return False
-        return port.get('status') == n_const.PORT_STATUS_ACTIVE
+        return migrating or port.get('status') == n_const.PORT_STATUS_ACTIVE
 
     def _build_domain_payload(self, context, domain, locators=None,
                               dead_hosts=None):
@@ -391,7 +400,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                             't': self._vrf_table(
                                 domain[srv6_def.SID_FUNCTION])})
         # No RPC: a domain with no network has no presence on any node
-        # (F11: handle_sync_state and the agents now agree).
+        # (handle_sync_state and the agents agree).
         return domain
 
     def get_srv6_domain(self, context, id, fields=None):
@@ -415,7 +424,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         return domain
 
     def delete_srv6_domain(self, context, id):
-        # BEFORE the delete (D5): the allocation FK is ON DELETE SET NULL
+        # BEFORE the delete: the allocation FK is ON DELETE SET NULL
         # and the TE paths' FK is ON DELETE CASCADE, so after the commit
         # there is nothing left to read either from.
         function_id = srv6_db.get_function_id(context, id)
@@ -472,12 +481,13 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             [s['cidr'] for s in self._subnets_of(context, network_id)])
 
     def _check_one_domain(self, context, domain, network_id):
-        """A network belongs to one domain (F3).
+        """A network belongs to one domain.
 
         Two domains holding one network would each put a gateway with the
         same address on the same L2 segment, and the network's instances
-        would be routed into whichever domain answered ARP -- t9 I8 saw
-        red's r1 reach blue's instance through such a network. The unique
+        would be routed into whichever domain answered ARP: one tenant's
+        router could reach another's instance through such a network. The
+        unique
         constraint on network_id closes the race this check leaves open;
         create_srv6_domain_network_association maps it back here.
         """
@@ -496,7 +506,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             fields=['id', 'cidr', 'ip_version'])
 
     def _check_no_overlap(self, context, domain, network_id, cidrs):
-        """No two networks of a domain may have overlapping subnets (F10).
+        """No two networks of a domain may have overlapping subnets.
 
         They share one routing table: the second connected route would
         either be refused by the kernel or shadow the first, and the
@@ -541,7 +551,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
             assoc = domain_db.create_net_assoc(context, srv6_domain_id, body)
         except db_exc.DBDuplicateEntry:
             # A concurrent attach got there first: to this domain or, since
-            # the network_id unique constraint (F3), to another one.
+            # the network_id unique constraint, to another one.
             self._check_one_domain(context, domain, body['network_id'])
             raise srv6_ext.Srv6DomainNetAssocAlreadyExists(
                 network_id=body['network_id'], domain_id=srv6_domain_id)
@@ -576,7 +586,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
     @registry.receives(resources.SUBNET, [events.BEFORE_CREATE])
     def _refuse_overlapping_subnet_in_domain(self, resource, event, trigger,
                                              payload=None):
-        """F10 again, through the other door: a subnet added after attach.
+        """No overlap again, through the other door: a subnet added after
+        attach.
 
         Only a request that names its cidr can be checked here: Neutron
         publishes no precommit event for subnets, and a subnet allocated
@@ -666,7 +677,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         raise srv6_ext.Srv6LocatorNotFound(id=id)
 
     # ------------------------------------------------------------------
-    # measured link state (PLAN-LINK-STATE-TE)
+    # measured link state
     # ------------------------------------------------------------------
     def create_srv6_link_state_bulk(self, context, srv6_link_states):
         return self._add_link_states(
@@ -689,7 +700,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         An item for a link the topology file does not have is skipped, with
         one WARNING per reporter and link, and the rest is stored: refusing
         the batch would leave its reporter silent, which reads as a dead
-        node (L8) and sends every TE path through it direct. A batch with
+        node and sends every TE path through it direct. A batch with
         no known link at all is refused.
         """
         if not self.capacity:
@@ -782,9 +793,9 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         that one. mbps comes from the sender if it is fresh, else from the
         receiver if fresh, else from whichever is newer (then stale). A
         measurement is fresh for link_state_stale_after seconds;
-        peak_mbps is the highest mbps of that end in link_state_window
-        (L4, L9). up is False if a fresh report from either end says so
-        (L8; a silent node is step 4's).
+        peak_mbps is the highest mbps of that end in link_state_window.
+        up is False if a fresh report from either end says so (a silent
+        node is _silent_fabric's).
         """
         now = timeutils.utcnow()
         fresh = now - datetime.timedelta(
@@ -840,7 +851,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         return _only(entry, fields)
 
     # ------------------------------------------------------------------
-    # measured load per VM pair and link (PLAN-UNRESERVED-STEERING)
+    # measured load per VM pair and link
     # ------------------------------------------------------------------
     def create_srv6_aggregate_load_bulk(self, context, srv6_aggregate_loads):
         return self._add_aggregate_loads(
@@ -966,7 +977,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
     def _check_capabilities(self, host, capabilities):
         """Name a node that cannot honour dataplane_encoding. Logs only.
 
-        Deployment-wide by design (USID-PLAN.md D3): the server does not
+        Deployment-wide by design: the server does not
         route around such a node, but it does not let it fail in silence.
         """
         required = constants.ENCODING_REQUIRES[self.encoding]
@@ -1013,7 +1024,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                        'ob': other_block})
 
     # ------------------------------------------------------------------
-    # traffic engineering (P6, admin-only)
+    # traffic engineering (admin-only)
     # ------------------------------------------------------------------
     def _dead_hosts(self, admin_context):
         """The hosts whose node is down, judged by Neutron's agent liveness.
@@ -1026,15 +1037,15 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         API workers resolve paths too, and one worker's memory would
         disagree with another's. A host with a registered locator but no
         agent row is dead too: only an OVS agent registers a locator, so
-        that host is a removed node whose row an operator deleted (audit
-        2026-10-21, 5). No host is dead when the check is off
+        that host is a removed node whose row an operator deleted. No host
+        is dead when the check is off
         (te_liveness_interval = 0) or the question cannot be answered: an
         unanswerable query leaves the paths steered, as before this check
         existed, instead of rerouting every one of them on a database
         hiccup.
 
         Fabric nodes (spines, leaves) run no agent: one is dead when its
-        link-state reports stopped (L8, _silent_fabric), so an operator
+        link-state reports stopped (_silent_fabric), so an operator
         path through a dead spine goes DEGRADED too. The two sources are
         read apart: either failing leaves the other's answer.
         """
@@ -1148,8 +1159,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                                  source whose paths apply to the route;
                                  the agent of that host uses it instead
 
-        Precedence per route and ingress, highest first (FEATURE-TE-SOURCE-
-        HOST, user decision U1):
+        Precedence per route and ingress, highest first:
 
             (port, source) > (host, source) > (port, any) > (host, any)
             > direct
@@ -1164,7 +1174,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         A source that is the route's own host gets no entry: that node never
         encapsulates its own VMs' traffic (the agent skips the route). Both
         keys are added only when non-empty, so a route nothing steers stays
-        byte-for-byte the P5 route.
+        byte-for-byte the plain route.
 
         Transit SIDs only: the agent appends the decap SID, from the locator
         of the route's host, as it always has.
@@ -1378,7 +1388,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         One VM of the domain, bound to an SRv6 node (whose agent installs
         the rule), not the destination itself, nor on the destination's
         node. It replaces source_host (its node is its binding, which
-        follows the VM; PLAN-UNRESERVED-STEERING step 4).
+        follows the VM).
         """
         source_port_id = body[te_def.SOURCE_PORT_ID]
         if body.get(te_def.SOURCE_HOST):
@@ -1438,10 +1448,10 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 % {'p': port['id'], 's': source})
 
     # ------------------------------------------------------------------
-    # failures of the underlay (PLAN-LINK-STATE-TE step 4)
+    # failures of the underlay
     # ------------------------------------------------------------------
     def _silent_fabric(self, context):
-        """(fabric nodes down, outage) from the link-state reporters (L8).
+        """(fabric nodes down, outage) from the link-state reporters.
 
         A node that has posted link state and has posted nothing for
         link_state_stale_after seconds is down: its agent runs on the node
@@ -1463,7 +1473,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         """The directed topology links down now.
 
         Reported down by a fresh end (or last seen down), or touching a
-        silent node (L8). view: a _link_state_view already read.
+        silent node. view: a _link_state_view already read.
         """
         view = self._link_state_view(context) if view is None else view
         return frozenset(link for link, entry in view.items()
@@ -1473,14 +1483,14 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
     def _measured_load(self, context, view=None):
         """{(a, b): Mbit/s}: each fresh link's peak in link_state_window.
 
-        What a link holds when automatic steering looks for room (L4). A
+        What a link holds when automatic steering looks for room. A
         stale link is not here: it counts as empty. view: a
         _link_state_view already read.
         """
         view = self._link_state_view(context) if view is None else view
         # whole Mbit/s, the unit of the capacities: idle
         # links' control chatter (~0.03) counts as 0, so equal paths still
-        # tie and the choice stays deterministic (found live, step 6)
+        # tie and the choice stays deterministic
         return {link: round(entry['peak_mbps'])
                 for link, entry in view.items()
                 if not entry['stale'] and entry['peak_mbps'] is not None}
@@ -1504,7 +1514,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         return series
 
     def _place_auto_path(self, context, pair, node_path, existing=None):
-        """Create, or move, the server's own path for one VM pair (U-f).
+        """Create, or move, the server's own path for one VM pair.
 
         pair: one aggregate-view entry
         (domain_id, source_port_id, destination_port_id); node_path: the
@@ -1672,7 +1682,15 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
     # ------------------------------------------------------------------
     # port events -- the incremental path
     # ------------------------------------------------------------------
-    def _notify_port(self, context, port, removed=False):
+    def _notify_port(self, context, port, removed=False, migrating=False,
+                     first_host=None):
+        """Advertise or withdraw a port's routes on every node.
+
+        first_host gets the add before everybody else and is waited for
+        (bounded): the live-migration handover, where the new node must
+        stop routing the address back to the old one before any node sends
+        it there, or the two loop (N11).
+        """
         if not port:
             return
         network_id = port.get('network_id')
@@ -1682,7 +1700,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         # port is never advertised. Without it an incremental add put a
         # route on every node that the next full sync took away again.
         # Removals pass: withdrawing a route nobody holds is harmless.
-        if not removed and not self._port_is_relevant(port):
+        if not removed and not self._port_is_relevant(port, migrating):
             return
         # Runs on every port update in the cloud: one indexed query, and an
         # early return for the common case of a network in no domain.
@@ -1714,11 +1732,13 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 # Segments per domain, on copies: TE paths belong to a
                 # domain. Without them a steered VM's route would arrive
                 # at depth 1 and stay so until the next full sync.
-                self.agent_rpc.routes_updated(
-                    context, domain_id,
-                    add=self._attach_segments(
-                        context.elevated(), domain_id,
-                        [dict(r) for r in routes], locators))
+                add = self._attach_segments(
+                    context.elevated(), domain_id,
+                    [dict(r) for r in routes], locators)
+                if first_host:
+                    self.agent_rpc.routes_updated_on_host(
+                        context, first_host, domain_id, add=add)
+                self.agent_rpc.routes_updated(context, domain_id, add=add)
 
     @staticmethod
     def _addresses(port):
@@ -1727,7 +1747,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 if fixed_ip.get('ip_address')}
 
     def _notify_fixed_ip_change(self, context, original, port):
-        """A live port that kept its host but changed addresses (F14).
+        """A live port that kept its host but changed addresses.
 
         None of the status or host branches matches this case, so until the
         next periodic resync (300 s) other nodes had no route to an added
@@ -1753,7 +1773,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         """A VM changed node: end its auto paths, re-push its source paths.
 
         Auto paths from or to it were computed for the old nodes, so they
-        are deleted (A10); the next re-optimisation pass judges the pair
+        are deleted; the next re-optimisation pass judges the pair
         where it is now. A user's source-VM path follows the VM, but its
         rule must leave the old node and appear on the new one: every
         domain with a source-VM path of this port is pushed in full. Never
@@ -1799,11 +1819,24 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         try:
             was_active = original.get('status') == n_const.PORT_STATUS_ACTIVE
             is_active = port.get('status') == n_const.PORT_STATUS_ACTIVE
-            if is_active and not was_active:
+            old_host = original.get(portbindings.HOST_ID)
+            new_host = port.get(portbindings.HOST_ID)
+            if (old_host and new_host and old_host != new_host and
+                    not is_active and self._migrating(original, port)):
+                # Nova activated the destination binding: the VM runs
+                # there now and its port is wired (pre-plugged). Advertise
+                # it at once, new node first, instead of when the
+                # destination reports the port up 1-2 s later, by which
+                # time the old node may have dropped the network (N10).
+                # The add also turns the old node's route into a pointer
+                # to the new node. The ACTIVE add later repeats it.
+                self._notify_port(context, port, migrating=True,
+                                  first_host=new_host)
+            elif is_active and not was_active:
                 self._notify_port(context, port)
             elif was_active and not is_active:
                 if self._migrating(original, port):
-                    # N9: nova takes the port DOWN while the VM still runs on
+                    # Nova takes the port DOWN while the VM still runs on
                     # its source; the add when it is ACTIVE on the
                     # destination replaces the route in one step.
                     LOG.debug("SRv6: port %s is live-migrating, route kept",
@@ -1814,8 +1847,6 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 # A live port that moved host: withdraw the old SID, then
                 # advertise the new one. Order matters -- the reverse would
                 # leave a window where two nodes claim the same address.
-                old_host = original.get(portbindings.HOST_ID)
-                new_host = port.get(portbindings.HOST_ID)
                 if old_host and new_host and old_host != new_host:
                     self._notify_port(context, original, removed=True)
                     self._notify_port(context, port)
@@ -1921,7 +1952,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         return any(agent['alive'] for agent in agents)
 
     def _claim_locator(self, admin_context, host, locator):
-        """Refuse a locator that overlaps another node's (audit 2026-11-02b).
+        """Refuse a locator that overlaps another node's.
 
         Two nodes with one locator get one SID space: every route to the
         second node's VMs leads into the first node's, the underlay
@@ -1970,12 +2001,12 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         convergence bounded by one RPC round trip instead of one resync
         interval.
 
-        Only then (F13). It used to re-broadcast on every call, and every
+        Only then. It used to re-broadcast on every call, and every
         agent calls this at start, on every resync, and on every port of a
         network in no domain: domains x nodes casts per call, each one a
         full re-apply on every agent. A re-broadcast built before a
         concurrent domain delete could also land after the delete and
-        bring the domain back (F9). The caller itself always gets the
+        bring the domain back. The caller itself always gets the
         payloads as the return value, so it converges whatever is sent.
         """
         admin_context = n_context.get_admin_context()
@@ -2006,7 +2037,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         dead_hosts = self._dead_hosts(admin_context)
         payloads = []
         for domain in domain_db.get_domains(admin_context):
-            # F11: a domain with no network has no state on any node. It
+            # A domain with no network has no state on any node. It
             # used to be left out of the RPCs (create sends none) but put in
             # here, so every node built its VRF at the first sync after the
             # create. Left out, the agent's stale-domain pass and its kernel

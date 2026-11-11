@@ -12,9 +12,9 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-# Project > Network > Network Topology, with SRv6 domain links (FEATURE
-# D24). The file name is Horizon's own: a file in local/enabled/ with the
-# same name as one in openstack_dashboard/enabled/ replaces it, so this
+# Project > Network > Network Topology, with SRv6 domain links. The file
+# name is Horizon's own: a file in local/enabled/ with the same name as
+# one in openstack_dashboard/enabled/ replaces it, so this
 # registers our subclass in place of Horizon's panel, at the same place
 # in the menu. Deleting this file brings Horizon's panel back.
 PANEL = 'network_topology'

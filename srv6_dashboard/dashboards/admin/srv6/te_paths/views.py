@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""TE path pages: create, edit waypoints, detail (FEATURE §5.2)."""
+"""TE path pages: create, edit waypoints, detail."""
 
 from django.urls import reverse
 from django.urls import reverse_lazy

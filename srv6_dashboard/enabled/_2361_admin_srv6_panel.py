@@ -12,9 +12,9 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-# The admin's panel: Admin > Network > SRv6 (FEATURE §1, §2.1). Being in
-# the Admin dashboard makes it admin-only (FEATURE §2.2). The number sorts
-# it right after networking-bgpvpn's _2360 (D10).
+# The admin's panel: Admin > Network > SRv6. Being in the Admin dashboard
+# makes it admin-only. The number sorts it right after networking-bgpvpn's
+# _2360.
 
 PANEL = 'srv6'
 PANEL_DASHBOARD = 'admin'

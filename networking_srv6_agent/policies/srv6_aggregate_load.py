@@ -14,8 +14,8 @@
 
 """Policies for the measured VM-pair loads: admin-only.
 
-Writing them moves traffic (U-f steers the heavy pairs), and reading them
-shows every tenant's traffic matrix, so both are admin-only, like
+Writing them moves traffic (the server steers the heavy pairs), and
+reading them shows every tenant's traffic matrix, so both are admin-only, like
 srv6_link_states. No update or delete rules on purpose: measurements are
 only ever added (and pruned by the server).
 """

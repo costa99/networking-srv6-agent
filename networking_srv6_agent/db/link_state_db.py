@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Measured link state: one row per measurement (PLAN-LINK-STATE-TE L9).
+"""Measured link state: one row per measurement.
 
 A row is what one node (reporter) measured on one directed link
 (from_node -> to_node) in one period. Rows are never updated: the history
@@ -22,7 +22,7 @@ numbers.
 
 The table stays small by itself: each batch deletes its OWN reporters' rows
 older than the cut-off. A node that stops posting keeps its last rows, which
-is how the server tells "reported, then went silent" (down, L8) from "never
+is how the server tells "reported, then went silent" (down) from "never
 reported". About 32 directed links x 2 ends x 2 windows / period rows on
 the Clos test bed.
 """
@@ -43,7 +43,7 @@ class SRv6LinkState(model_base.BASEV2, model_base.HasId):
     # NULL: no rate for that period (a counter went backwards)
     mbps = sa.Column(sa.Float, nullable=True)
     drops = sa.Column(sa.BigInteger, nullable=True)
-    # The server's clock at receipt, never the reporter's (L8)
+    # The server's clock at receipt, never the reporter's
     measured_at = sa.Column(sa.DateTime, nullable=False)
 
     # the pruning of add_link_states reads by reporter and age
@@ -76,8 +76,8 @@ def get_link_states(context):
 
     Rows with attribute access (r.mbps, r.measured_at), not ORM objects:
     the re-optimisation reads the whole table every pass, and building one
-    mapped object and one dict per row was most of its CPU
-    (PLAN-C4-OPTIMISATION O2: 5x cheaper with the read-once of O1).
+    mapped object and one dict per row was most of its CPU (5x cheaper
+    together with reading the table once per pass).
     """
     return context.session.query(
         SRv6LinkState.reporter, SRv6LinkState.from_node,

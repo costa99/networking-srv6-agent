@@ -18,9 +18,9 @@ Admin-only. A path has no name, so it is addressed by ID. The via-host count
 and the host names are checked by the server, not here.
 
 --source-host limits a path to the traffic entering the domain at one node;
-such a path outranks every path without one (FEATURE-TE-SOURCE-HOST).
+such a path outranks every path without one.
 --source-port limits it to one VM's traffic, at whatever node the VM is
-bound to; such a path outranks every other (PLAN-UNRESERVED-STEERING).
+bound to; such a path outranks every other.
 Origin "auto" marks a path the server created to steer a heavy VM pair.
 """
 

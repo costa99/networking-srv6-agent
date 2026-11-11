@@ -14,8 +14,8 @@
 
 """expand te reserved host
 
-The host a bandwidth reservation's hops were computed for
-(PLAN-RESERVATION-FOLLOWS-INSTANCE): the books are built from it, never from
+The host a bandwidth reservation's hops were computed for:
+the books are built from it, never from
 where a port is now, so a migrated port cannot make them charge a link that
 does not exist.
 

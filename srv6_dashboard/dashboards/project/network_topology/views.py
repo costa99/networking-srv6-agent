@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Horizon's topology page and JSON, plus the SRv6 domains (FEATURE D24).
+"""Horizon's topology page and JSON, plus the SRv6 domains.
 
 Both views subclass Horizon's: the page adds the script that draws the
 links, the JSON adds the domains to draw. Everything else is Horizon's.
@@ -42,7 +42,7 @@ class JSONView(core_views.JSONView):
 
     One more request, domain_list for the current project: the domains
     this project's networks are in, even for an admin, as on the SRv6
-    Domains panel (D14).
+    Domains panel.
     """
 
     def get(self, request, *args, **kwargs):

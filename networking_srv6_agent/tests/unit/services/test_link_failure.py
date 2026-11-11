@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""PLAN-LINK-STATE-TE step 4: silent fabric nodes, end to end.
+"""Silent fabric nodes, end to end.
 
 The two-spine fabric of test_te (node1 - la - s1|s2 - lb - node2, spine
 links 100 Mbit/s), a real database, link state posted through the API as
@@ -94,9 +94,8 @@ class TestSilentNodes(LinkFailureTestCase):
         self.assertTrue(self.agent_rpc.method_calls)
 
     def test_an_unknown_link_in_its_batch_does_not_silence_a_node(self):
-        # s1's link map names a link topology_file does not have (audit
-        # 2026-11-02 finding 2): the batch used to be refused whole, so s1
-        # went silent and read as dead
+        # s1's link map names a link topology_file does not have: the batch
+        # used to be refused whole, so s1 went silent and read as dead
         path = self._via_s1()
         self._all_report()
         self._at(20)

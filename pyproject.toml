@@ -27,7 +27,7 @@ classifiers = [
 ]
 
 # Horizon is optional: only the node serving the dashboard needs it, and
-# neutron-server never imports srv6_dashboard (FEATURE-HORIZON-DASHBOARD D2).
+# neutron-server never imports srv6_dashboard.
 # `pip install networking-srv6-agent[horizon]` on that node; devstack's
 # Horizon already has it.
 [project.optional-dependencies]
@@ -62,7 +62,7 @@ packages = ["networking_srv6_agent", "srv6_dashboard"]
 [project.entry-points."neutron.db.alembic_migrations"]
 "networking-srv6-agent" = "networking_srv6_agent.db.migration:alembic_migrations"
 
-# --- P4: service plugin and API ------------------------------------------
+# --- service plugin and API ----------------------------------------------
 [project.entry-points."neutron.service_plugins"]
 "srv6" = "networking_srv6_agent.services.plugin:Srv6Plugin"
 
@@ -72,7 +72,7 @@ packages = ["networking_srv6_agent", "srv6_dashboard"]
 [project.entry-points."oslo.policy.policies"]
 "networking-srv6-agent" = "networking_srv6_agent.policies:list_rules"
 
-# --- P5: agent and dataplane ---------------------------------------------
+# --- agent and dataplane -------------------------------------------------
 [project.entry-points."neutron.agent.l2.extensions"]
 "srv6" = "networking_srv6_agent.agent.agent_extension:Srv6AgentExtension"
 

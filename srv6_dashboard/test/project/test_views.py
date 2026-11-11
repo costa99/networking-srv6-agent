@@ -16,7 +16,7 @@
 
 Each test drives a real URL through Django's test client, with the
 api/srv6.py functions mocked (their own contract is pinned by
-api_tests/). What is checked is the panel's side of FEATURE §5.2: which
+api_tests/). What is checked is the panel's side of the contract: which
 functions a page calls, with which arguments, and what the user gets
 back -- the page, the redirect, the message -- on success and on error.
 """
@@ -51,8 +51,8 @@ class IndexTests(helpers.TestCase):
         self.assertCountEqual(
             [d.id for d in self.srv6_domains.list()],
             [d.id for d in res.context['table'].data])
-        # The current project's domains only, even for an admin (D14),
-        # and one network request for the whole table (D15).
+        # The current project's domains only, even for an admin,
+        # and one network request for the whole table.
         self.mock_domain_list.assert_called_once_with(
             test.IsHttpRequest(), project_id=self.tenant.id)
         self.mock_network_list.assert_called_once_with(
@@ -131,7 +131,7 @@ class CreateTests(helpers.TestCase):
 
     @test.create_mocks({srv6_api: ('domain_create',)})
     def test_create_rejects_unknown_behavior(self):
-        # The choices are the server's VALID_BEHAVIORS (D12): a forged
+        # The choices are the server's VALID_BEHAVIORS: a forged
         # value stops at the form, before any request.
         res = self.client.post(CREATE_URL, {'name': 'green',
                                             'srv6_behavior': 'End.DT4'})
@@ -237,7 +237,7 @@ class DetailTests(helpers.TestCase):
         self.assertContains(res, self.networks.first().name)
         self.mock_domain_get.assert_called_once_with(test.IsHttpRequest(),
                                                      domain.id)
-        # The networks of the domain's project: one request (D15).
+        # The networks of the domain's project: one request.
         self.mock_network_list.assert_called_once_with(
             test.IsHttpRequest(), project_id=domain.project_id)
         # The associations tab is not preloaded: no request until opened.
@@ -310,7 +310,7 @@ class AssociateTests(helpers.TestCase):
         offered = {c[0] for c in res.context['form']
                    .fields['network_id'].choices if c[0]}
         # Not net1: red already holds it, and a network belongs to at
-        # most one domain (F3). Not the external networks (400).
+        # most one domain. Not the external networks (400).
         taken = {nid for d in self.srv6_domains.list() for nid in d.networks}
         expected = {n.id for n in self.networks.list()
                     if not n.is_router_external and n.id not in taken}
@@ -353,7 +353,7 @@ class AssociateTests(helpers.TestCase):
                                    'network_association_create')})
     def test_associate_post_server_refuses(self):
         # What the form cannot see -- a router interface on the network,
-        # an overlapping subnet (F10) -- comes back as the server's error.
+        # an overlapping subnet -- comes back as the server's error.
         domain = self.srv6_domains.list()[1]
         net = self._free_network()
         self.mock_domain_get.return_value = domain

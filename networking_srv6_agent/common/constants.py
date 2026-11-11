@@ -32,6 +32,12 @@ ROUTES_UPDATED = 'routes_updated'
 # Agent -> server call.
 SYNC_STATE = 'sync_state'
 
+# Seconds the server waits for the destination of a live migration to apply
+# the instance's route before it tells everybody else (handover H2). It
+# delays nova's binding activation by as much at worst; then the fanout
+# goes ahead unordered, as before.
+HANDOVER_CALL_TIMEOUT = 2
+
 # Every RPC payload carries this. An agent that receives a version it does
 # not understand logs and ignores rather than half-applying a message whose
 # shape it cannot rely on.
@@ -41,9 +47,9 @@ PAYLOAD_VERSION = 1
 # function id rather than the domain UUID appears in them.
 #
 # These strings are deliberately UNCHANGED from the networking-bgpvpn build.
-# The migration's acceptance gate is that the two-node lifecycle produces the
-# same kernel objects as before, compared against the recorded evidence -- and
-# that comparison is only literal if the names match. Nothing collides:
+# The migration from it was checked by the two-node lifecycle producing the
+# same kernel objects as before -- a comparison that is only literal if the
+# names match. Nothing collides:
 # networking-bgpvpn's own drivers name their objects differently.
 VRF_PREFIX = 'sv6vrf-'          # sv6vrf-<function_id>
 GW_PORT_PREFIX = 'svp-'         # svp-<function_id>-<local_vlan>
@@ -111,7 +117,7 @@ MAX_TE_VIA_HOSTS = 6
 # The metric of the `unreachable default` route that seals every domain VRF.
 # Without it a lookup that misses in the VRF table
 # falls through the l3mdev rule to `main`, where every domain's End.DT46 SID
-# lives -- measured on node 1, evidence/vrf-fallthrough.txt: a tenant's
+# lives -- measured: a tenant's
 # gateway port resolved another tenant's SID and would have decapsulated
 # into that tenant's VRF. The value is the one the kernel's
 # Documentation/networking/vrf.rst uses: high enough that anything else in
@@ -132,12 +138,12 @@ VRF_UNREACHABLE_METRIC = 4278198272
 # hop to the underlay however many hops away it is.
 SID_RULE_PRIORITY = 999
 
-# Steering by source VM (PLAN-UNRESERVED-STEERING step 5): one policy rule per
+# Steering by source VM: one policy rule per
 # steered VM address, ahead of the l3mdev rule (1000) and of the SID rules:
 #     ip [-6] rule add pref 900 from <VM address> iif <gateway port> \
 #         lookup <steer table>
 # `iif <vrf>` does NOT match a VM's forwarded traffic; its network's gateway
-# port does (GATE A, D1), and that port belongs to one VRF. The steer table
+# port does, and that port belongs to one VRF. The steer table
 # holds only that VM's steered destinations: anything else misses there and
 # falls through to the l3mdev rule and the VRF's sealed table. Steer tables
 # sit above every VRF table (vrf_table_base + function id, at most 0xffff).
@@ -150,9 +156,9 @@ STEER_TABLE_SLOTS = 4096
 # The one place to change both.
 TE_REOPT_HIGH_DEFAULT = 0.72
 
-# Where the `local` FIB rule goes (F7). The kernel puts it at 0, ahead of
+# Where the `local` FIB rule goes. The kernel puts it at 0, ahead of
 # the l3mdev rule at 1000, so a lookup from inside a VRF found every host
-# address first: t9 saw a tenant ping the management address and deliver a
+# address first: a tenant could ping the management address and deliver a
 # forged ICMPv6 to the underlay address. After l3mdev, a VRF's lookup ends
 # at its own table (sealed, so it never falls through), and everything else
 # still finds `local` before `main` -- the order Documentation/networking/
@@ -161,7 +167,7 @@ TE_REOPT_HIGH_DEFAULT = 0.72
 LOCAL_RULE_PRIORITY = 32765
 
 # br-int table-0 priority of the flows that keep a gateway's ARP and ND on
-# its own node (F12): above the OVS agent's own table-0 flows for patch
+# its own node: above the OVS agent's own table-0 flows for patch
 # ports (single digits, a few more with DVR), below its dead-VLAN drop
 # (65535).
 GATEWAY_ND_FLOW_PRIORITY = 100
@@ -184,8 +190,7 @@ IPV6_HEADER = 40
 SRH_HEADER = 8
 
 # How the dataplane encodes a segment list ([srv6] dataplane_encoding).
-# One deployment-wide value, carried to every agent in the domain payload
-# (USID-PLAN.md D3).
+# One deployment-wide value, carried to every agent in the domain payload.
 #
 #   encap  full 128-bit SIDs, H.Encaps: outer IPv6 + SRH.
 #   usid   RFC 9800 NEXT-C-SID ("microSID") in the F3216 format, pushed
@@ -217,7 +222,7 @@ USID_FUNCTION_PREFIXLEN = USID_LOCATOR_PREFIXLEN + USID_CSID_BITS
 # The split is Cisco's for F3216, the widely deployed reference. It has to be
 # disjoint: under a uN, a function id that is also a node id is read as "the
 # next node", so a packet for a deleted domain's SID would be shifted and
-# forwarded to that node instead of dropped (USID-PLAN.md D2). 0 is reserved
+# forwarded to that node instead of dropped. 0 is reserved
 # (end of container).
 USID_GIB_MIN = 0x0001
 USID_GIB_MAX = 0xdfff

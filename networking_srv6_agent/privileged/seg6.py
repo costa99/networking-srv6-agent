@@ -95,6 +95,17 @@ def modprobe_vrf():
     processutils.execute('modprobe', 'vrf', check_exit_code=False)
 
 
+@privileged.default.entrypoint
+def send_garp(device, address):
+    """Two gratuitous ARPs for `address` out of `device` (arping -U).
+
+    Takes about 2 s (arping waits between and after its probes), so callers
+    run it off their critical path. Best effort: the exit code is ignored.
+    """
+    processutils.execute('arping', '-U', '-c', '2', '-I', device, address,
+                         check_exit_code=False)
+
+
 SEG6_MODES = (constants.SEG6_MODE_ENCAP, constants.SEG6_MODE_ENCAP_RED)
 
 
@@ -397,7 +408,7 @@ def list_vrf_names():
 def add_address_nodad(device, cidr):
     """`ip -6 addr add <cidr> dev <device> nodad`; existing is success.
 
-    For the gateway address of an IPv6 subnet (F12). The same address sits
+    For the gateway address of an IPv6 subnet. The same address sits
     on every node's gateway port of a network, all in one L2 segment, so
     duplicate address detection would disable it on all nodes but the
     first. neutron's ip_lib has no way to pass IFA_F_NODAD.

@@ -23,6 +23,8 @@ be handed the same id -- one of the two UPDATEs matches zero rows and retries.
 
 import random
 
+from neutron.plugins.ml2 import models as ml2_models
+from neutron_lib import constants as n_const
 from neutron_lib.db import api as db_api
 from neutron_lib.db import model_base
 from oslo_log import log as logging
@@ -100,7 +102,7 @@ def parse_function_id_ranges(range_strings):
                                "start is greater than end") % entry)
         # Both ends inside the LIB, so the range is too: it never spans
         # 0xf000-0xffff (the nodes' End SIDs), never reaches past the 16-bit
-        # function field, and under usid no id is also a node id (D2).
+        # function field, and under usid no id is also a node id.
         if (start < constants.MIN_DOMAIN_FUNCTION_ID or
                 end > constants.MAX_DOMAIN_FUNCTION_ID):
             raise ValueError(
@@ -205,7 +207,7 @@ def set_host_locator(context, host, locator, when):
     Returns whether the stored locator changed: True for a host seen for
     the first time or one whose locator differs, False for a report that
     only refreshes updated_at. handle_sync_state re-broadcasts the domains
-    only on True (F13).
+    only on True.
     """
     row = context.session.query(SRv6HostLocator).filter_by(host=host).first()
     if row is None:
@@ -248,6 +250,24 @@ def get_host_locator_details(context):
              'updated_at': row.updated_at}
             for row in context.session.query(SRv6HostLocator).order_by(
                 SRv6HostLocator.host).all()]
+
+
+@db_api.CONTEXT_READER
+def get_migrating_port_ids(context, port_ids):
+    """The ports among port_ids that are being live-migrated.
+
+    Nova gives a port a second, INACTIVE binding for the whole migration:
+    on the destination before the move, on the source once the destination
+    binding is activated, until the port is ACTIVE there and nova removes
+    it. The profile's migrating_to is no marker after the activation: it
+    stays on the old binding only.
+    """
+    if not port_ids:
+        return set()
+    return {row.port_id for row in context.session.query(
+        ml2_models.PortBinding.port_id).filter(
+            ml2_models.PortBinding.port_id.in_(list(port_ids)),
+            ml2_models.PortBinding.status == n_const.INACTIVE)}
 
 
 class NoFunctionIdAvailable(Exception):

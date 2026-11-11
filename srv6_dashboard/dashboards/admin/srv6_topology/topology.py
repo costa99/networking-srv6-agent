@@ -15,7 +15,7 @@
 """What the topology page draws, assembled from five API answers.
 
 build() is a pure function of the lists the API returned, so the whole
-picture is unit-tested without a browser (FEATURE D8): the JavaScript only
+picture is unit-tested without a browser: the JavaScript only
 lays out and draws what this returns, it decides nothing.
 
     hosts     every host with a registered locator, plus, flagged with
@@ -30,9 +30,9 @@ lays out and draws what this returns, it decides nothing.
               bound to, if any). A path limited to one ingress (source)
               starts its hops at that host, minus leading waypoints equal
               to it: the node drops its own SID, so the packet never
-              visits it twice (FEATURE-TE-SOURCE-HOST).
+              visits it twice.
     links     each directed underlay link with its measured state
-              (srv6_link_states, PLAN-LINK-STATE-TE step 3) and a level
+              (srv6_link_states) and a level
               the page colours it by. A node on a link without a locator
               is a fabric node (spine/leaf): drawn as such, not flagged.
               Every node gets a tier, its hop distance from the nearest

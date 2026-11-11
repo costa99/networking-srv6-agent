@@ -66,7 +66,7 @@ def _network(network_id='net1', mtu=1450):
 
 
 def _attached(domain_id, **kwargs):
-    """A payload with one network: since F11 an empty one is a removal."""
+    """A payload with one network: an empty one is a removal."""
     return _payload(domain_id, networks=[_network()], **kwargs)
 
 
@@ -210,7 +210,7 @@ class TestSyncState(AgentExtensionTestCaseBase):
         self.assertIn(self.domain_id, self.ext.domains)
 
     def test_a_refused_sync_leaves_every_domain_and_the_kernel_alone(self):
-        # How the server's Srv6SyncRefused arrives here (N1). It used to
+        # How the server's Srv6SyncRefused arrives here. It used to
         # arrive as [], and the agent removed every domain it held.
         self.ext.domains[self.domain_id] = _payload(self.domain_id)
         self.cctxt.call.side_effect = oslo_messaging.RemoteError(
@@ -355,7 +355,7 @@ class TestApplyDomainReconciles(AgentExtensionTestCaseBase):
             self.domain_id, {100, 101})
 
     def test_a_domain_with_no_networks_left_is_removed(self):
-        """F11: detaching the last network removes the domain here."""
+        """Detaching the last network removes the domain here."""
         self.ext.domains[self.domain_id] = _attached(self.domain_id)
         self.ext._apply_domain(_payload(self.domain_id, networks=[]))
         self.ext.dataplane.delete_domain.assert_called_once_with(
@@ -364,12 +364,12 @@ class TestApplyDomainReconciles(AgentExtensionTestCaseBase):
         self.assertNotIn(self.domain_id, self.ext.domains)
 
     def test_a_network_with_no_live_port_here_keeps_nothing(self):
-        """F8 and F6: the domain still has the network, the node does not.
+        """The domain still has the network, the node does not.
 
         The network's last port left (or the network was detached on a
         node where the domain has nothing else). The old code saw "has
         networks, no VLANs", took it for a VLAN map not built yet, and kept
-        the leftover -- which t9 then saw inherited by another network.
+        the leftover, which another network could then inherit.
         The domain was programmed here: a fanout keeps it so until the next
         full sync makes it dormant (TestDormantDomains), and meanwhile no
         gateway may outlive the port.
@@ -552,7 +552,7 @@ class TestPortEvents(AgentExtensionTestCaseBase):
                              {'network_id': 'net1', 'port_id': 'p1'})
 
     def test_port_events_reconcile_before_they_ensure(self):
-        """A leftover sharing the new port's VLAN goes first (F8)."""
+        """A leftover sharing the new port's VLAN goes first."""
         self.ext.domains[self.domain_id] = _payload(self.domain_id,
                                                     networks=[_network()])
         self.ext.vlan_manager.get_segments.return_value = {1: _segment(100)}
@@ -568,12 +568,11 @@ class TestPortEvents(AgentExtensionTestCaseBase):
 
 
 class TestDeletePort(AgentExtensionTestCaseBase):
-    """F8: the port that leaves takes its network's gateway with it.
+    """The port that leaves takes its network's gateway with it.
 
     Before, delete_port did nothing: when a network's last port left a node
-    the gateway stayed, the OVS agent reclaimed the VLAN, and t9 saw an
-    unrelated network inherit it and inject into the domain
-    (REPORT-ISOLATION.md 4.7).
+    the gateway stayed, the OVS agent reclaimed the VLAN, and an unrelated
+    network could inherit it and inject into the domain.
     """
 
     def setUp(self):
@@ -808,6 +807,46 @@ class TestRouteMtus(AgentExtensionTestCaseBase):
             self.ext.dataplane.add_routes.call_args[1]['mtus'])
 
 
+class TestGatewayAnnouncement(AgentExtensionTestCaseBase):
+    """H4: an instance that is local now hears its gateway's MAC here.
+
+    Each node's gateway port has its own MAC (TECH-DOC-NOTES N13); a
+    live-migrated instance would keep sending to the old node's.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.ext.domains[self.domain_id] = _attached(self.domain_id)
+        self.ext.vlan_manager.get_segments.return_value = {
+            'seg': _segment(100)}
+        self.threads = mock.patch.object(agent_extension.threading,
+                                         'Thread').start()
+        self.addCleanup(mock.patch.stopall)
+
+    def _add(self, *routes):
+        self.ext.routes_updated(self.ext.context, domain_id=self.domain_id,
+                                add=list(routes))
+
+    def test_a_local_address_gets_one_gratuitous_arp_off_the_lock(self):
+        self._add({'prefix': '10.0.0.5/32', 'host': HOST, 'port_id': 'p5',
+                   'network_id': 'net1'})
+        self.threads.assert_called_once_with(
+            target=self.ext._send_garp, args=('svp-7-100', '10.0.0.1'),
+            daemon=True)
+        self.threads.return_value.start.assert_called_once()
+
+    def test_remote_and_ipv6_addresses_get_none(self):
+        self._add({'prefix': '10.0.0.6/32', 'host': 'node2', 'port_id': 'p6',
+                   'network_id': 'net1'},
+                  {'prefix': '2001:db8::5/128', 'host': HOST,
+                   'port_id': 'p5', 'network_id': 'net1'})
+        self.threads.assert_not_called()
+
+    def test_a_failure_is_only_logged(self):
+        self.ext.dataplane.announce_gateway.side_effect = RuntimeError('x')
+        self.ext._send_garp('svp-7-100', '10.0.0.1')
+
+
 class TestDriverType(base.BaseTestCase):
     """Only the OVS agent drives the dataplane."""
 
@@ -871,7 +910,7 @@ class TestOvsFirewallDetection(base.BaseTestCase):
 
 
 class TestTunnelPatchPort(base.BaseTestCase):
-    """F12: the gateway ARP/ND flows filter what arrives from br-tun."""
+    """The gateway ARP/ND flows filter what arrives from br-tun."""
 
     def setUp(self):
         super().setUp()
@@ -950,7 +989,7 @@ class TestRpcContract(base.BaseTestCase):
 
 
 class TestEncoding(AgentExtensionTestCaseBase):
-    """The payload's `encoding` reaches the node before its domain (D3)."""
+    """The payload's `encoding` reaches the node before its domain."""
 
     def test_the_payload_encoding_is_applied_before_the_domain(self):
         order = []
@@ -985,7 +1024,7 @@ class TestEncoding(AgentExtensionTestCaseBase):
 
 
 class TestEmptyDomain(AgentExtensionTestCaseBase):
-    """F11: a node holds a domain's state only while it has a network."""
+    """A node holds a domain's state only while it has a network."""
 
     def test_an_unknown_empty_domain_creates_nothing(self):
         self.ext.domain_updated(self.ext.context,
@@ -1023,11 +1062,10 @@ class TestEmptyDomain(AgentExtensionTestCaseBase):
 
 
 class TestTombstones(AgentExtensionTestCaseBase):
-    """F9: a deleted domain is not brought back by a late message.
+    """A deleted domain is not brought back by a late message.
 
-    t9 I6e (2026-10-04): DELETE iso-blue, and on nodes 1 and 2 a
-    re-broadcast built before the delete arrived 100 ms after it, waited for
-    the lock and re-created the whole domain.
+    A re-broadcast built before a domain's DELETE can arrive after it (100
+    ms was seen), wait for the lock and re-create the whole domain.
     """
 
     def _delete(self, domain_id=None):
@@ -1076,7 +1114,7 @@ class TestTombstones(AgentExtensionTestCaseBase):
 
 
 class TestUnknownNetworkHoldoff(AgentExtensionTestCaseBase):
-    """F13: a port on a network in no domain no longer means a full sync."""
+    """A port on a network in no domain no longer means a full sync."""
 
     def _port_on_unknown_network(self):
         self.ext.handle_port(self.ext.context,
@@ -1106,8 +1144,8 @@ class TestUnknownNetworkHoldoff(AgentExtensionTestCaseBase):
         self.cctxt.call.assert_called_once()
 
     def test_a_domain_that_failed_to_apply_costs_one_sync_per_holdoff(self):
-        # audit 2026-11-02 finding 7: the domain never enters self.domains,
-        # and every routes_updated of it was one full sync
+        # The domain never enters self.domains, and every routes_updated of
+        # it was one full sync
         self.cctxt.call.return_value = [_attached(self.domain_id)]
         self.ext.dataplane.ensure_domain.side_effect = RuntimeError('seal')
         self.ext._sync_state()
@@ -1141,8 +1179,8 @@ class TestUnknownNetworkHoldoff(AgentExtensionTestCaseBase):
 class TestDormantDomains(AgentExtensionTestCaseBase):
     """No port of a domain on this node: known, but nothing programmed.
 
-    M2s (2026-10-29) found every node holding the whole domain -- VRF,
-    routes, decap SID, rules -- even with no port in it.
+    Without this every node held the whole domain -- VRF, routes, decap
+    SID, rules -- even with no port in it.
     """
 
     def setUp(self):
@@ -1184,7 +1222,7 @@ class TestDormantDomains(AgentExtensionTestCaseBase):
         self._dormant()
         # handle_port fires after port_bound wrote the port to OVSDB.
         self.ext.dataplane.local_network_vlans.return_value = {'net1': {100}}
-        # Right after a sync: the F13 hold-off must not delay activation.
+        # Right after a sync: the hold-off must not delay activation.
         self.ext.handle_port(self.ext.context,
                              {'network_id': 'net1', 'port_id': 'p1'})
         self.cctxt.call.assert_called_once()
@@ -1203,6 +1241,20 @@ class TestDormantDomains(AgentExtensionTestCaseBase):
         self.ext.dataplane.add_routes.assert_not_called()
         self.ext.dataplane.remove_routes.assert_not_called()
         self.cctxt.call.assert_not_called()
+
+    def test_an_arriving_instance_wakes_it_at_once(self):
+        # H2: the server waits for the live migration's destination before
+        # it tells the other nodes, so the destination programs the domain
+        # now rather than when its OVS agent reports the port up
+        self._dormant()
+        self.ext.dataplane.local_network_vlans.return_value = {'net1': {100}}
+        self.cctxt.call.return_value = [_attached(self.domain_id)]
+        self.ext.routes_updated(
+            self.ext.context, domain_id=self.domain_id,
+            add=[{'prefix': '10.0.0.5/32', 'host': HOST, 'port_id': 'p5',
+                  'network_id': 'net1'}])
+        self.cctxt.call.assert_called_once()
+        self.assertNotIn(self.domain_id, self.ext.dormant)
 
     def test_domain_updated_only_replaces_the_cache(self):
         self._dormant()
@@ -1229,7 +1281,7 @@ class TestDormantDomains(AgentExtensionTestCaseBase):
         self.assertNotIn(self.domain_id, self.ext.dormant)
 
     def test_a_programmed_domain_stays_until_the_next_sync(self):
-        # D1: a fanout leaves it programmed (a port can come back, a live
+        # A fanout leaves it programmed (a port can come back, a live
         # migration flaps it); the next full sync makes it dormant.
         self.ext.domains[self.domain_id] = _attached(self.domain_id)
         self.ext.domain_updated(self.ext.context,

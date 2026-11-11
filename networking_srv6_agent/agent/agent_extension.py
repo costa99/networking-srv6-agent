@@ -24,6 +24,7 @@ the agent. The price is that this runs under ML2/OVS only -- under ML2/OVN
 there is no L2 agent to host it -- and initialize() refuses anything else.
 """
 
+import ipaddress
 import threading
 import time
 
@@ -51,16 +52,16 @@ from networking_srv6_agent.common import sid
 LOG = logging.getLogger(__name__)
 
 # A port on a network in no domain resyncs only if the last full sync is
-# older than this (F13). Such a network is "unknown" forever -- DHCP ports,
+# older than this. Such a network is "unknown" forever -- DHCP ports,
 # router ports, any VM on a plain network -- so without a holdoff every
 # one of its port events was a full sync, and an agent restart a burst of
 # them. A network that really was just attached arrives by the
 # domain_updated fanout anyway; this is only the fallback for a lost one.
 # The same holdoff limits the resync of a routes_updated for a domain this
-# node does not hold (audit 2026-11-02 finding 7).
+# node does not hold.
 UNKNOWN_NETWORK_SYNC_HOLDOFF = 60
 
-# How long a deleted domain's id is remembered (F9). Domain ids are UUIDs
+# How long a deleted domain's id is remembered. Domain ids are UUIDs
 # and never reused, so the only cost of a long memory is the dict; an hour
 # is many resync intervals, far longer than any message can be in flight.
 TOMBSTONE_SECONDS = 3600
@@ -102,9 +103,9 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         # routes_updated cause no resync.
         self.dormant = set()
         self.locators = {}
-        # domain_id -> monotonic time of its domain_deleted (F9)
+        # domain_id -> monotonic time of its domain_deleted
         self.tombstones = {}
-        # monotonic time of the last successful sync_state (F13)
+        # monotonic time of the last successful sync_state
         self._last_sync = None
         self._lock = threading.Lock()
 
@@ -143,10 +144,10 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
     def _ovs_firewall_active():
         """Whether this agent filters ports with the OVS firewall driver.
 
-        Only that driver leaves the gateway ports outside the firewall (F1,
-        F2), and only its tables 73 and 94 exist for the flows the dataplane
-        adds. Under iptables_hybrid table 73 is empty, so the same flows
-        would DROP every frame from the gateway; under noop there is
+        Only that driver leaves the gateway ports outside the firewall, and
+        only its tables 73 and 94 exist for the flows the dataplane adds.
+        Under iptables_hybrid table 73 is empty, so the same flows would
+        DROP every frame from the gateway; under noop there is
         nothing to join. The driver is resolved the way the agent resolves
         it (alias or class path, unset meaning noop), so a subclass counts.
         """
@@ -167,7 +168,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
     def _tunnel_patch_port():
         """br-int's patch port to br-tun, or None if this agent has no tunnels.
 
-        The gateway ARP/ND flows (F12) filter what arrives through it. Read
+        The gateway ARP/ND flows filter what arrives through it. Read
         from the OVS agent's own options, which it registered before loading
         any extension.
         """
@@ -231,9 +232,9 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         self._last_sync = time.monotonic()
         wanted = {}
         for payload in payloads or []:
-            # A reply built before a delete this agent has already applied
-            # (F9). The server's own state no longer has the domain, so the
-            # next sync agrees.
+            # A reply built before a delete this agent has already applied.
+            # The server's own state no longer has the domain, so the next
+            # sync agrees.
             if self._is_tombstoned(payload['id']):
                 LOG.info("SRv6: sync_state still lists deleted domain %s; "
                          "ignoring it", payload['id'])
@@ -270,15 +271,14 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         return domain_id in self.tombstones
 
     def _tombstone(self, domain_id):
-        """Remember a deleted domain, so a late update cannot revive it (F9).
+        """Remember a deleted domain, so a late update cannot revive it.
 
         The server builds a domain_updated after its transaction commits and
         casts it with no ordering against a concurrent delete, and the
         sync_state reply of an earlier call can arrive after the delete too.
         Either one used to re-create the VRF, the decap SID and the
         gateways of a domain that no longer existed, until the next resync
-        collected them (t9 I6e, 2026-10-04: blue survived its own delete on
-        nodes 1 and 2).
+        collected them.
         """
         now = time.monotonic()
         self.tombstones = {d: t for d, t in self.tombstones.items()
@@ -286,7 +286,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         self.tombstones[domain_id] = now
 
     def _retire_domain(self, payload):
-        """A domain with no network has no state on any node (F11).
+        """A domain with no network has no state on any node.
 
         One rule for both paths -- the server leaves such a domain out of
         sync_state, and its domain_updated arrives here -- so detaching the
@@ -324,7 +324,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         A node with no port in a domain neither sends into it nor receives
         from it, and a TE waypoint needs only its node-level End SID or uN:
         the VRF, decap SID, rules and routes would be per-domain state on a
-        node that serves nobody in the domain (M2s, 2026-10-29). State this
+        node that serves nobody in the domain. State this
         node held -- programmed until now, or left by an earlier build --
         is removed.
         """
@@ -467,7 +467,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         """{network_id: its gateway port's name} for the networks here.
 
         A source VM's steer rule matches on the gateway port its traffic
-        enters the VRF through (PLAN-UNRESERVED-STEERING step 5). vlans: the
+        enters the VRF through. vlans: the
         local VLANs _apply_domain already looked up; otherwise looked up.
         """
         out = {}
@@ -603,13 +603,21 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                 # building partial state from an incremental message. At most
                 # one per holdoff: a domain this node failed to apply is never
                 # in self.domains, and every port event of it, anywhere in
-                # the cloud, was one full sync here (audit 2026-11-02 7).
+                # the cloud, was one full sync here.
                 self._sync_unless_recent('routes for unknown domain %s'
                                          % domain_id)
                 return
+            arriving = [r for r in add or [] if r.get('host') == self.host]
             if domain_id in self.dormant:
                 # Not programmed here; activation takes the routes from a
-                # full sync, not from this message.
+                # full sync, not from this message. An instance that
+                # arrives here (live migration) wakes it now: the server
+                # waits for this node before it tells the others (H2).
+                if arriving:
+                    LOG.info("SRv6: an instance of dormant domain %s "
+                             "arrives; resyncing to program it", domain_id)
+                    self._do_sync_state()
+                    self._announce_gateways(domain_id, arriving)
                 return
             try:
                 if remove:
@@ -625,6 +633,46 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             except Exception:
                 LOG.exception("SRv6: failed to apply routes_updated for %s",
                               domain_id)
+            self._announce_gateways(domain_id, arriving)
+
+    def _announce_gateways(self, domain_id, routes):
+        """Gratuitous ARP of the gateway to instances that are local now (H4).
+
+        Caller holds the lock. In a background thread: arping takes about
+        2 s, and the server waits for this handler during a migration
+        handover. IPv4 only (an unsolicited NA for IPv6 is not sent yet).
+        """
+        payload = self.domains.get(domain_id)
+        if not routes or not payload or domain_id in self.dormant:
+            return
+        ports = self._gateway_ports(payload)
+        jobs = set()
+        for route in routes:
+            port_name = ports.get(route.get('network_id'))
+            try:
+                address = ipaddress.ip_interface(route['prefix']).ip
+            except (KeyError, ValueError):
+                continue
+            if port_name is None or address.version != 4:
+                continue
+            for network in payload.get('networks') or []:
+                if network['network_id'] != route.get('network_id'):
+                    continue
+                for subnet in network.get('subnets') or []:
+                    gateway = subnet.get('gateway_ip')
+                    if gateway and address in ipaddress.ip_network(
+                            subnet['cidr']):
+                        jobs.add((port_name, gateway))
+        for job in sorted(jobs):
+            threading.Thread(target=self._send_garp, args=job,
+                             daemon=True).start()
+
+    def _send_garp(self, port_name, address):
+        try:
+            self.dataplane.announce_gateway(port_name, address)
+        except Exception:
+            LOG.exception("SRv6: gratuitous ARP for %(a)s on %(p)s failed",
+                          {'a': address, 'p': port_name})
 
     def domain_deleted(self, context, domain_id=None, function_id=None,
                        vrf_table=None, payload_version=1, **kwargs):
@@ -657,7 +705,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             return
         with self._lock:
             # First, so no leftover gateway can share the VLAN this port's
-            # network has just been given (F8). delete_port normally removed
+            # network has just been given. delete_port normally removed
             # it already; this covers a removal the agent never saw.
             self._reconcile_all_gateways()
             known = activate = False
@@ -683,7 +731,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             if activate:
                 # The domain's first port here. Its routes come from the
                 # server's current view: the cached payload missed every
-                # routes_updated while dormant. No F13 hold-off: the
+                # routes_updated while dormant. No sync hold-off: the
                 # instance has no connectivity until this runs.
                 LOG.info("SRv6: first port of a dormant domain on network "
                          "%s; resyncing to program it", network_id)
@@ -699,7 +747,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         UNKNOWN_NETWORK_SYNC_HOLDOFF seconds already reflects every attach
         the server had made by then, and a later attach reaches this agent
         through the domain_updated fanout; so within the holdoff the sync
-        would only repeat what is known (F13). A domain that failed to
+        would only repeat what is known. A domain that failed to
         apply is retried by the next sync after the holdoff, and by the
         resync loop.
         """
@@ -714,15 +762,15 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
     def delete_port(self, context, port):
         """A port left this node: drop the gateways no live port backs now.
 
-        This is the fix for F8. When a network's last port leaves, the OVS
+        When a network's last port leaves, the OVS
         agent reclaims its local VLAN right after this call
         (treat_devices_removed calls the extensions before port_unbound),
         and it processes added ports before removed ones, so the VLAN can
         reach another network no earlier than its next iteration. Removing
         the gateway here therefore leaves no moment in which a leftover
         shares a VLAN with somebody else's network. Before this, nothing
-        reacted, and t9 had an unrelated network inherit the VLAN and inject
-        into the domain (REPORT-ISOLATION.md 4.7).
+        reacted, and an unrelated network could inherit the VLAN and inject
+        into the domain.
 
         The port is already gone from OVSDB when this runs, so
         local_network_vlans() no longer counts it. Routes are still left

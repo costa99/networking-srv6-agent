@@ -14,7 +14,7 @@
 
 """expand aggregate loads
 
-Measured load per VM pair and link (PLAN-UNRESERVED-STEERING step 2): one row
+Measured load per VM pair and link: one row
 per measurement a fabric node posts to srv6_aggregate_loads.
 
     srv6_aggregate_loads    new table; uuid primary key and an index

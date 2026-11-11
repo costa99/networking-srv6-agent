@@ -292,7 +292,7 @@ class TestHostLocators(Srv6DbTestCase):
                          srv6_db.get_host_locators(self.ctx))
 
     def test_a_new_host_is_a_change(self):
-        # F13: the plugin re-broadcasts only on a change.
+        # The plugin re-broadcasts only on a change.
         self.assertTrue(srv6_db.set_host_locator(
             self.ctx, 'node1', 'fc00:0:1::/48', self._now()))
 
@@ -332,7 +332,7 @@ class TestParseHexRanges(base.BaseTestCase):
 
     def test_a_range_spanning_the_topology_range_is_refused(self):
         # Neither end is in 0xf000-0xffff, but 0xfff0 (the End SID) is
-        # inside. Accepted before the 2026-10-21 audit (finding 3).
+        # inside. Used to be accepted.
         self.assertRaises(ValueError, srv6_db.parse_function_id_ranges,
                           ['1:0x1ffff'])
 

@@ -14,9 +14,9 @@
 
 """Online CSPF: topology file, path choice, admission.
 
-The topology is the test bed's 2-spine / 4-leaf Clos (PLAN-PATH-COMPUTATION):
-spine-leaf links 100 Mbit/s, host links 1000, hosts ml1/ml4 dual-homed to
-l1/l2 (rack A), ml5/ml6 to l3/l4 (rack B).
+The topology is the test bed's 2-spine / 4-leaf Clos: spine-leaf links
+100 Mbit/s, host links 1000, hosts ml1/ml4 dual-homed to l1/l2 (rack A),
+ml5/ml6 to l3/l4 (rack B).
 """
 
 import collections

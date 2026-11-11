@@ -17,11 +17,10 @@
 A path says "in this domain, traffic towards <selector> goes via these
 transit nodes, in this order". The selector is exactly one of a destination
 host -- all of the domain's traffic toward that node -- or a destination
-port -- one VM's addresses only (P6). A path may also name a source
-host, the ingress node: it then applies only to the domain's traffic that
-enters at that node, and outranks every path without a source
-(FEATURE-TE-SOURCE-HOST). The plugin turns
-each path into the prefix of the segment list on the matching encapsulation
+port -- one VM's addresses only. A path may also name a source host, the
+ingress node: it then applies only to the domain's traffic that enters at
+that node, and outranks every path without a source. The plugin turns each
+path into the prefix of the segment list on the matching encapsulation
 routes; without a path, the segment list is just the destination's domain
 SID and the packet follows the underlay shortest path.
 
@@ -82,7 +81,7 @@ class SRv6TePath(model_base.BASEV2, model_base.HasId):
     source_host = sa.Column(sa.String(255), nullable=False, default='',
                             server_default='')
     # One source VM: the path holds only for that port's traffic, at the
-    # node it is bound to (PLAN-UNRESERVED-STEERING). CASCADE as for the
+    # node it is bound to. CASCADE as for the
     # destination port. source_port_key mirrors it as '' or the id, for the
     # unique constraints, where NULLs would be distinct (as source_host).
     source_port_id = sa.Column(sa.String(36),
@@ -90,7 +89,7 @@ class SRv6TePath(model_base.BASEV2, model_base.HasId):
                                nullable=True)
     source_port_key = sa.Column(sa.String(36), nullable=False, default='',
                                 server_default='')
-    # 'user', or 'auto' for a path the server made itself (U-f)
+    # 'user', or 'auto' for a path the server made itself
     origin = sa.Column(sa.String(16), nullable=False, default='user',
                        server_default='user')
 
@@ -298,7 +297,7 @@ def delete_auto_paths_of_port(context, port_id):
 
     An auto path was computed for the hosts its two VMs were on; once
     either moves it leads nowhere useful, and the next re-optimisation pass
-    judges the pair where it is now (PLAN-UNRESERVED-STEERING A10).
+    judges the pair where it is now.
     """
     gone = []
     for path_db in context.session.query(SRv6TePath).filter(

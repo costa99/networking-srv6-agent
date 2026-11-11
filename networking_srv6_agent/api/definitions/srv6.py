@@ -86,7 +86,7 @@ RESOURCE_ATTRIBUTE_MAP = {
                             'type:values': constants.VALID_BEHAVIORS},
                         'is_visible': True,
                         'enforce_policy': True},
-        # Server-allocated, and ADMIN-only to read (decided 2026-09-10): it
+        # Server-allocated, and ADMIN-only to read: it
         # is half of an underlay SID, like the locators.
         SID_FUNCTION: {'allow_post': False, 'allow_put': False,
                        'is_visible': True,

@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Create a TE path, and change its waypoints (FEATURE §5.2, D6, D7, D18).
+"""Create a TE path, and change its waypoints.
 
 Hosts are never typed: every host field offers the hosts that have a
 registered locator (GET /v2.0/srv6_locators), the same set the plugin
@@ -20,8 +20,8 @@ resolves names against. Waypoints are MAX_TE_VIA_HOSTS ordered choice
 fields -- the server's own limit -- because a waypoint list is ordered and
 a multi-select is not.
 
-The source host is optional: empty means every ingress, as the API's None
-(FEATURE-TE-SOURCE-HOST).
+The source host is optional: empty means every ingress, as the API's
+None.
 
 Each clean() rule names the server check it mirrors. The server stays the
 authority: whatever passes here is still validated there, and its refusal

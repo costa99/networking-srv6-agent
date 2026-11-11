@@ -18,7 +18,7 @@ Rows are written only by an agent's sync_state. Without this collection an
 admin has no way to learn the host names a TE path's via_hosts must use, and
 a typo there resolves to an empty segment list -- "not steered", silently.
 
-Until an agent runs (P5), the collection is legitimately empty.
+Until an agent runs, the collection is legitimately empty.
 """
 
 from networking_srv6_agent.api.definitions import srv6 as srv6_def

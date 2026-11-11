@@ -25,8 +25,6 @@ Results come back as SDK Resources and leave as NeutronAPIDictWrapper, the
 dict-with-attributes Horizon tables expect. Errors are not caught here:
 openstack.exceptions.* reach the views, whose exceptions.handle() turns them
 into the message the user sees.
-
-FEATURE-HORIZON-DASHBOARD.md: §3 (layers), §5 (one row per function), §6.
 """
 
 import logging
@@ -74,7 +72,7 @@ def _dict(res, **extra):
 def network_list(request, **filters):
     """GET /v2.0/networks -- core Neutron, policy get_network.
 
-    One request answers every network name a page shows (FEATURE D15),
+    One request answers every network name a page shows,
     where bgpvpn's panel makes one network_get per associated network.
     Horizon's own api.neutron.network_list is not used: it also lists
     every subnet, a second request these pages do not need.
@@ -174,8 +172,8 @@ def network_association_create(request, domain_id, **attrs):
 
     Policy create_srv6_domain_network_association. attrs: network_id. The
     plugin then checks that caller and network belong to the domain's
-    project, that the network is in no other domain (F3), and that its
-    subnets overlap none already in the domain (F10).
+    project, that the network is in no other domain, and that its
+    subnets overlap none already in the domain.
     """
     LOG.debug("network_association_create(): domain_id=%s, attrs=%s",
               domain_id, attrs)
@@ -209,7 +207,7 @@ def locator_list(request, **filters):
     return [Locator(_dict(loc)) for loc in locators]
 
 
-# --- link states (PLAN-LINK-STATE-TE) -------------------------------------
+# --- link states -----------------------------------------------------------
 
 def link_state_list(request, **filters):
     """GET /v2.0/srv6_link_states -- policy get_srv6_link_state (admin).

@@ -14,7 +14,7 @@
 
 """expand link states
 
-Measured link state of the underlay (PLAN-LINK-STATE-TE step 2): one row per
+Measured link state of the underlay: one row per
 measurement a fabric node posts to srv6_link_states.
 
     srv6_link_states    new table; id (uuid) as primary key, not

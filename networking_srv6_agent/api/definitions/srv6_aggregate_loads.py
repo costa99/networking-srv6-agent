@@ -14,7 +14,7 @@
 
 """API definition: measured load per VM pair and link.
 
-PLAN-UNRESERVED-STEERING step 2 (U-f). Admin-only. Each fabric node
+Input of the automatic steering. Admin-only. Each fabric node
 counts, per link it sends on, the traffic of every VM pair: the outer
 destination SID and the inner source and destination addresses of the
 SRv6 packets it forwards. Its agent POSTs the largest pairs of each link

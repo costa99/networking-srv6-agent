@@ -15,7 +15,7 @@
 """openstack srv6 aggregate list
 
 Admin-only and read-only: the load of each VM pair on each underlay link,
-as the fabric nodes measured it (PLAN-UNRESERVED-STEERING). Mbit/s is the
+as the fabric nodes measured it. Mbit/s is the
 latest period, Peak the highest in the server's link_state_window, Steered
 whether the traffic already follows a TE path (its outer SID is not a
 decap SID).

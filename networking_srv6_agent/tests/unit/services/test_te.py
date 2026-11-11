@@ -485,7 +485,7 @@ class TestSourcePrecedence(TePluginTestCaseBase):
         self.assertEqual({'node1': [E3]}, neighbour['segments_by_source'])
 
     def test_a_source_host_path_beats_an_any_source_port_path(self):
-        # U1: the source rank wins, at that ingress only.
+        # The source rank wins, at that ingress only.
         self._paths(by_port={'p1': ['node1']},
                     by_source={'node1': (None, {'node2': ['node3']})})
         route = self._attach(_route('p1'))[0]
@@ -501,7 +501,7 @@ class TestSourcePrecedence(TePluginTestCaseBase):
         self.assertEqual({'node1': []}, route['segments_by_source'])
 
     def test_a_degraded_source_path_is_direct_for_its_source(self):
-        # Not "fall back to the any-source path" (U1).
+        # Not "fall back to the any-source path".
         self._paths(by_host={'node2': ['node3']},
                     by_source={'node1': (None, {'node2': ['node9']})})
         with mock.patch.object(plugin.LOG, 'warning') as warning:
@@ -886,11 +886,10 @@ class TestListBySource(TePluginTestCaseBase):
 class TestDeadWaypoint(TePluginTestCaseBase):
     """A path through a node whose agent is down goes direct.
 
-    The feature is FEATURE-TE-FAILOVER. Direct, not "skip the dead hop" and
-    not "fall to the host path": the same answer as an unknown locator
-    (decision 9). The registry keeps the dead
-    node's locator -- its VMs' routes and decap SIDs must stay on every
-    other node -- so the death is a separate input, dead_hosts.
+    Direct, not "skip the dead hop" and not "fall to the host path": the
+    same answer as an unknown locator. The registry keeps the dead node's
+    locator -- its VMs' routes and decap SIDs must stay on every other
+    node -- so the death is a separate input, dead_hosts.
     """
 
     def _agents(self, *dead, hosts=('node1', 'node2', 'node3')):
@@ -910,7 +909,7 @@ class TestDeadWaypoint(TePluginTestCaseBase):
             self.ctx, filters={'agent_type': ['Open vSwitch agent']})
 
     def test_a_host_with_a_locator_and_no_agent_is_dead(self):
-        # audit 2026-10-21, 5: node1 and node3 were removed, rows deleted
+        # node1 and node3 were removed, rows deleted
         self._agents('node2', hosts=('node2',))
         self.assertEqual(frozenset({'node1', 'node2', 'node3'}),
                          self.plugin._dead_hosts(self.ctx))
@@ -960,7 +959,7 @@ class TestDeadWaypoint(TePluginTestCaseBase):
         self.assertEqual([E1], self._attach(_route('p1'))[0]['segments'])
 
     def test_one_dead_hop_sends_the_whole_path_direct(self):
-        # Not a shorter list: that is the partial steering decision 9 refuses.
+        # Not a shorter list: that is the partial steering the plugin refuses.
         self._paths(by_host={'node2': ['node3', 'node1']})
         self._agents('node1')
         self.assertNotIn('segments', self._attach(_route('p1'))[0])
@@ -1067,7 +1066,7 @@ class TestLivenessWorker(TePluginTestCaseBase):
 
 
 # ----------------------------------------------------------------------
-# the underlay topology (PLAN-PATH-COMPUTATION)
+# the underlay topology
 # ----------------------------------------------------------------------
 # node1 -- la ==== s1, s2 ==== lb -- node2: two spines between two leaves,
 # 100 Mbit/s spine links, 1000 to the hosts. Set on the plugin instance, as

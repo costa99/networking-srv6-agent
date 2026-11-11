@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""The topology page and the JSON it draws (FEATURE §5.2, D8, D22).
+"""The topology page and the JSON it draws.
 
 The page is a shell; the browser fetches data/ and draws it. Both URLs
 are under the Admin dashboard, so both are admin-only.

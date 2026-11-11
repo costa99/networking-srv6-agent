@@ -17,8 +17,7 @@
 Ported from networking-bgpvpn (branch srv6-te) with `vpn` renamed `domain`.
 The kernel objects and their names are unchanged on purpose: for a given
 domain, what this class writes and what the manual proof wrote are the same
-objects with the same names, and the migration's gate compares against the
-recorded evidence literally.
+objects with the same names, so the two can be compared literally.
 
 Per domain:
     ip link add sv6vrf-<fid> type vrf table <base+fid>
@@ -37,7 +36,7 @@ Per remote port:
     ip route replace <ip>/32 encap seg6 mode encap \
         segs [<transit End SID>,...]<remote sid> dev <underlay> table <table>
 
-Per gateway port and gateway address, on a node with tunnels (F12: every
+Per gateway port and gateway address, on a node with tunnels (every
 node's gateway of a network holds the same address on one L2 segment, so
 its ARP and ND must not cross nodes; IPv6 gateways are added `nodad`):
     table=0,priority=100,in_port=<patch-tun>,dl_vlan=<vlan>,arp,
@@ -45,22 +44,22 @@ its ARP and ND must not cross nodes; IPv6 gateways are added `nodad`):
     table=0,priority=100,in_port=<patch-tun>,dl_vlan=<vlan>,icmp6,
         icmp_type=135,nd_target=<gw6> actions=drop # and icmp_type=136
 
-With the OVS firewall driver, per gateway port (F1, F2: the port is not a
+With the OVS firewall driver, per gateway port (the port is not a
 Neutron port, so without these the firewall never sees its traffic):
     table=60,priority=100,in_port=<of> actions=ct_clear,
         set_field:<of>->reg5,set_field:<vlan>->reg6,resubmit(,73)
     table=73,priority=80,reg5=<of> actions=resubmit(,94)
 
 Per first segment the domain encapsulates to -- a remote decap SID, or for a
-steered route (P6) a transit End SID, the latter only while the edge filter
+steered route a transit End SID, the latter only while the edge filter
 covers it:
     ip -6 rule add pref 999 iif sv6vrf-<fid> to <first seg>/128 lookup main
 
-Per node, over every registered locator (P6):
+Per node, over every registered locator:
     table inet srv6_edge -- on iifname "svp-*", drop `ip6 daddr @sid_space`
                             and drop `rt type 4` (any tenant-built SRH)
 
-With dataplane_encoding = usid (RFC 9800 NEXT-C-SID, USID-PLAN.md) the node
+With dataplane_encoding = usid (RFC 9800 NEXT-C-SID) the node
 state changes and the routes are packed:
     ip -6 route replace <locator>/48 encap seg6local action End \
         flavors next-csid lblen 32 nflen 16 dev <underlay>   # the uN, in
@@ -110,7 +109,7 @@ LOG = logging.getLogger(__name__)
 #   rp_filter     at the default, decapsulated packets vanish with no
 #                 counter moving anywhere.
 #   tcp_/udp_l3mdev_accept
-#                 0, the kernel default, asserted (F7): at 1 a socket bound
+#                 0, the kernel default, asserted: at 1 a socket bound
 #                 in the default VRF answers connections that arrive through
 #                 any VRF, so every service of the host would be open to
 #                 every tenant. With the local rule after l3mdev a VRF's
@@ -123,10 +122,9 @@ LOG = logging.getLogger(__name__)
 #                 outer header has no ports: every flow between two nodes in
 #                 one domain then has the same outer header, so every ECMP
 #                 hop of the underlay sends them all down ONE path (measured
-#                 on the Clos test bed, PLAN-PATH-COMPUTATION LOG op 14). The
-#                 flow label is the entropy RFC 6437 provides for this; the
-#                 underlay must hash it (Linux: fib_multipath_hash_policy 0,
-#                 the default).
+#                 on the Clos test bed). The flow label is the entropy RFC
+#                 6437 provides for this; the underlay must hash it (Linux:
+#                 fib_multipath_hash_policy 0, the default).
 GLOBAL_SYSCTLS = [
     ('net.ipv6.conf.all.forwarding', '1'),
     ('net.ipv4.ip_forward', '1'),
@@ -200,7 +198,7 @@ def render_edge_ruleset(networks):
     `add` then `delete` then the full table: `delete` alone fails on a table
     that does not exist yet, and nft runs the script as one transaction, so
     the replacement is atomic. The SID space is every registered locator --
-    no new configuration (decided 2026-09-10). `auto-merge` because interval
+    no new configuration. `auto-merge` because interval
     sets refuse overlapping elements; locators are disjoint anyway.
 
     The drop rules match only the gateway ports: a tenant packet passes
@@ -254,7 +252,7 @@ class Srv6LinuxDataplane:
         # gateway port name -> ofport its firewall flows were installed for
         self.gateway_flows = {}
         # br-int's patch port to br-tun, or None without tunnels; and
-        # gateway port name -> the ND/ARP flow matches installed for it (F12)
+        # gateway port name -> the ND/ARP flow matches installed for it
         self.tunnel_patch_port = tunnel_patch_port
         self.gateway_nd_flows = {}
         # domain_id -> DomainState, and domain_id -> {network_id: port name}
@@ -359,8 +357,8 @@ class Srv6LinuxDataplane:
 
         A usid request this node cannot honour -- a locator that is not
         F3216, or a kernel without the flavor -- is refused here, loudly,
-        and the node stays on full SIDs. That is the black hole of
-        USID-PLAN.md D3 made visible; the probe told the server too.
+        and the node stays on full SIDs: a black hole made visible; the
+        probe told the server too.
         """
         if encoding not in constants.VALID_ENCODINGS:
             LOG.error("SRv6: the server asked for unknown dataplane "
@@ -401,7 +399,7 @@ class Srv6LinuxDataplane:
         """The /48 is the `local` route with full SIDs, the uN with usid.
 
         Both sit on the same prefix in the same table, so one replaces the
-        other (USID-PLAN.md D6). The old one is deleted first, by what the
+        other. The old one is deleted first, by what the
         kernel shows rather than what this process remembers, so the switch
         works in both directions and after a restart.
 
@@ -545,7 +543,7 @@ class Srv6LinuxDataplane:
                  {'k': key, 'cur': current, 'v': value})
 
     def _ensure_local_rule_after_l3mdev(self):
-        """Move the `local` FIB rule from 0 to after l3mdev (1000), F7.
+        """Move the `local` FIB rule from 0 to after l3mdev (1000).
 
         At 0 a lookup from inside a VRF consults the host's local table
         before the l3mdev rule sends it to the VRF's table, so every
@@ -584,7 +582,7 @@ class Srv6LinuxDataplane:
             self._set_sysctl(key, value)
 
     # ------------------------------------------------------------------
-    # edge filter (P6)
+    # edge filter
     # ------------------------------------------------------------------
     def ensure_edge_filter(self, locators):
         """Filter the gateway ports over every known locator, this one too.
@@ -945,7 +943,7 @@ class Srv6LinuxDataplane:
                 if present is not None:
                     # Added by an older build, with DAD, and it lost to
                     # another node's gateway: the kernel neither uses nor
-                    # answers for it, and never retries (F12).
+                    # answers for it, and never retries.
                     LOG.info("SRv6: %(c)s on %(p)s failed duplicate address "
                              "detection; re-adding it without DAD",
                              {'c': cidr, 'p': port_name})
@@ -1028,7 +1026,7 @@ class Srv6LinuxDataplane:
         (_restore_local_vlan_map) -- so they are right even while the
         in-memory map is still empty, which it is during every restart.
         That emptiness is what used to force reconcile_gateway_ports to
-        give up, and giving up kept leftover gateways forever (F6, F8).
+        give up, and giving up kept leftover gateways forever.
 
         A port in the dead VLAN (4095: admin down, unbound) is not live, and
         a gateway port is not a network's port. Returns None if the bridge
@@ -1060,6 +1058,20 @@ class Srv6LinuxDataplane:
             present[net_id].add(tag)
         return dict(present)
 
+    @staticmethod
+    def announce_gateway(port_name, address):
+        """Gratuitous ARP for a gateway address on its gateway port.
+
+        Each node's gateway port has its own MAC (N13), so an instance
+        that live-migrated here still has the old node's in its ARP cache
+        and would send its traffic back there. The gateway's ARP never
+        crosses nodes (dropped at the tunnel ingress), so only this node's
+        instances hear it. About 2 s; best effort.
+        """
+        LOG.debug("SRv6: gratuitous ARP for %(a)s on %(p)s",
+                  {'a': address, 'p': port_name})
+        priv_seg6.send_garp(port_name, address)
+
     def reconcile_gateway_ports(self, domain_id, local_vlans):
         """Delete gateway ports for networks that are no longer local.
 
@@ -1067,12 +1079,11 @@ class Srv6LinuxDataplane:
         a live port on this node (local_network_vlans), so an empty set
         means exactly that: nothing of this domain is here any more, and
         every svp-<fid>-* of it goes. A port is stale when its network left
-        the domain (a detach, F6) or when the network's last port left the
-        node (a VM deleted or migrated, F8). The second case is the
+        the domain (a detach) or when the network's last port left the
+        node (a VM deleted or migrated). The second case is the
         dangerous one: the OVS agent reclaims the VLAN and hands it to the
         next network that arrives, and a leftover gateway then routes that
-        network -- any project's -- into this domain. t9 measured it on
-        2026-10-03 (REPORT-ISOLATION.md 4.7): r1 +3, r2 +3.
+        network -- any project's -- into this domain.
 
         There used to be an early return here for "the domain has networks
         but none resolves to a VLAN", meant for the empty VLAN map every
@@ -1107,7 +1118,7 @@ class Srv6LinuxDataplane:
         return ip_lib.device_exists(device)
 
     # ------------------------------------------------------------------
-    # firewall flows of gateway ports (F1, F2)
+    # firewall flows of gateway ports
     # ------------------------------------------------------------------
     def _ensure_gateway_flows(self, port_name, local_vlan):
         """Show a gateway port to the OVS firewall as an unfiltered port.
@@ -1115,20 +1126,20 @@ class Srv6LinuxDataplane:
         The firewall only programs Neutron ports. An svp-* port is not one,
         so table 60 sent its frames straight to NORMAL: they skipped the
         destination's ingress pipeline, so the security group never applied
-        to traffic routed in (F2), and its conntrack zone never saw the
-        reply's other half, so the instance's reply was +inv and dropped
-        (F1). These are the two flows the firewall installs for a port with
+        to traffic routed in, and its conntrack zone never saw the
+        reply's other half, so the instance's reply was +inv and dropped.
+        These are the two flows the firewall installs for a port with
         port security disabled (_initialize_egress_no_port_security), so
         frames from the gateway now enter the destination's ingress pipeline
         like frames from any other port.
 
-        One difference, ct_clear, measured by t11 (LOG-2026-10-03-portsec.md
-        s2): the frames leave the host's IP stack carrying its own conntrack
-        entry whenever the host tracks connections at all (devstack's NAT
-        rules are enough), OVS takes it as +trk, and table 81 then skips the
-        guest-zone lookup and drops the reply as not established. qr-*
-        ports never show this because crossing a namespace clears it; svp-*
-        ports live in the root namespace.
+        One difference, ct_clear (measured): the frames leave the host's IP
+        stack carrying its own conntrack entry whenever the host tracks
+        connections at all (devstack's NAT rules are enough), OVS takes it
+        as +trk, and table 81 then skips the guest-zone lookup and drops the
+        reply as not established. qr-* ports never show this because
+        crossing a namespace clears it; svp-* ports live in the root
+        namespace.
 
         Re-asserted on every call, with this process's cookie: the OVS agent
         deletes flows of any other cookie at its first iteration
@@ -1196,7 +1207,7 @@ class Srv6LinuxDataplane:
                         {'p': port_name, 'o': ofport, 'e': e})
 
     # ------------------------------------------------------------------
-    # neighbour discovery of gateway ports (F12)
+    # neighbour discovery of gateway ports
     # ------------------------------------------------------------------
     @staticmethod
     def _gateway_nd_matches(subnets):
@@ -1222,7 +1233,7 @@ class Srv6LinuxDataplane:
         return matches
 
     def _ensure_gateway_nd_flows(self, port_name, local_vlan, subnets):
-        """Keep the gateway's ARP and ND on this node (F12).
+        """Keep the gateway's ARP and ND on this node.
 
         Every node with a port of the network has a gateway port on it,
         each holding the subnet's gateway address, and neutron joins the
@@ -1233,8 +1244,7 @@ class Srv6LinuxDataplane:
         duplicate address detection disabled the address on every node but
         the first ("dadfailed"), whose gateway then served the network on
         every node, over the tunnel. When that gateway went, IPv6 routing
-        on the others stopped for good: DAD is not retried (spike,
-        LOG-2026-10-04-vrf-fixes.md).
+        on the others stopped for good: DAD is not retried.
 
         Dropping, on the way in from the tunnel, every ARP or ND frame that
         names a gateway address of this network makes each node's gateway
@@ -1345,7 +1355,7 @@ class Srv6LinuxDataplane:
         can clear it before the next full sync.
 
         A route may carry `segments` -- transit End SIDs the server resolved
-        from an operator's TE path (P6) -- which go before the remote decap
+        from an operator's TE path -- which go before the remote decap
         SID, and `segments_by_source`, the lists that hold only at the
         ingress nodes it names (_segments_for). A route without either is
         exactly the depth-1 route of the old build. `mtus` maps network_id
@@ -1388,7 +1398,7 @@ class Srv6LinuxDataplane:
 
         A route's outer destination is its FIRST segment. When that is the
         remote decap SID -- no transit -- the domain's VRF needs a rule to
-        reach it (P5). When it is a transit End SID (P6), the VRF needs a
+        reach it. When it is a transit End SID, the VRF needs a
         rule toward that End SID, and such a rule lets a tenant hand-craft
         an SRH through it toward another domain's SID -- unless the edge
         filter stops tenant packets into the SID space and tenant SRHs at
@@ -1484,7 +1494,7 @@ class Srv6LinuxDataplane:
         return segments, mode, rule_sid, dev
 
     # ------------------------------------------------------------------
-    # steering by source VM (PLAN-UNRESERVED-STEERING step 5)
+    # steering by source VM
     # ------------------------------------------------------------------
     def _steer_gateway_prefix(self, function_id):
         return '%s%d-' % (constants.GW_PORT_PREFIX, function_id)
@@ -1531,7 +1541,7 @@ class Srv6LinuxDataplane:
         skipped: there is nothing to match its traffic on.
 
         Returns the SID rules the steer routes need, which the caller
-        counts as wanted (GATE A, D2).
+        counts as wanted.
         """
         desired = {}
         for route in routes:
@@ -1748,7 +1758,7 @@ class Srv6LinuxDataplane:
 
         add_routes only ever added, exactly as the gateway ports only ever
         accumulated, so an address that left the domain kept its encap
-        route: measured on node 1 on 2026-09-03.
+        route.
 
         Also the withdraw half of a migration: a workload that moved to
         THIS node is skipped by add_routes rather than removed, so without
@@ -1770,7 +1780,7 @@ class Srv6LinuxDataplane:
                                                  local_host, mtus)
         self._remove_unwanted_routes(domain_id, wanted)
         # The steer tables' SIDs are wanted too, or the line below would
-        # remove the rule a steered VM's outer packet needs (GATE A, D2).
+        # remove the rule a steered VM's outer packet needs.
         rule_sids |= self._sync_steering(state, routes, locators, local_host,
                                          gateway_ports, prune=True)
         self._remove_unwanted_sid_rules(state, rule_sids)

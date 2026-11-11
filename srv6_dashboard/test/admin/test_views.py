@@ -56,7 +56,7 @@ class IndexDomainsTabTests(helpers.BaseAdminViewTests):
         table = res.context['srv6_domains_table']
         self.assertCountEqual([d.id for d in self.srv6_domains.list()],
                               [d.id for d in table.data])
-        # Every project's domains: no project filter (D14), and so no
+        # Every project's domains: no project filter, and so no
         # project filter on the network names either.
         self.mock_domain_list.assert_called_once_with(test.IsHttpRequest())
         self.mock_network_list.assert_called_once_with(test.IsHttpRequest())
@@ -210,7 +210,7 @@ class NonAdminTests(helpers.TestCase):
 
     @test.create_mocks({srv6_api: ('domain_list',)})
     def test_non_admin_is_turned_away(self):
-        # The Admin dashboard's own gate (FEATURE §2.2): a logged-in user
+        # The Admin dashboard's own gate: a logged-in user
         # without the admin role gets 403 Forbidden, and the panel's views
         # never run, so not a single SRv6 request is made.
         res = self.client.get(INDEX_URL)
@@ -282,7 +282,7 @@ def _can_access(request, slug):
 
 
 class PanelPolicyTests(helpers.TestCase):
-    """The admin panels' own gate, with policy checks on (FEATURE D23).
+    """The admin panels' own gate, with policy checks on.
 
     Horizon's test settings set POLICY_CHECK_FUNCTION = None, so every
     other test here goes through the Admin dashboard's `permissions` gate.

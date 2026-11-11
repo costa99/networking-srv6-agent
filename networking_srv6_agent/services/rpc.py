@@ -22,19 +22,20 @@ networking-bagpipe.
 Directions:
   server -> agents   fanout casts: domain_updated, routes_updated,
                      domain_deleted
+  server -> agent    call: routes_updated on one host (migration handover)
   agent  -> server   call:         sync_state(host, locator) -> [domain, ...]
                                    or Srv6SyncRefused, never [] for "no"
 
 The kwargs are part of the contract, not only the method names. The
 agent's handlers end in **kwargs, so a server sending `vpn=` to a
 handler expecting `domain=` would see the payload land in **kwargs and the
-handler return without a word. P5's contract test binds every cast below to
+handler return without a word. A contract test binds every cast below to
 the agent's named parameters.
 
 Payload shape. Each route is {prefix, host, port_id} and may carry an
-optional `segments` list of transit SIDs (filled by P6), and an optional
+optional `segments` list of transit SIDs (TE paths), and an optional
 `segments_by_source` map {ingress host: transit SIDs} for the TE paths
-limited to one ingress (FEATURE-TE-SOURCE-HOST): each agent uses its own
+limited to one ingress: each agent uses its own
 entry, even an empty one, in place of `segments`. An agent older than that
 key ignores it and pushes `segments` for every route. PAYLOAD_VERSION is
 an equality check on both sides, so adding an optional key the agent already
@@ -121,6 +122,32 @@ class Srv6AgentNotifyAPI:
         # agent can always loop over `add` and `remove` safely.
         self._fanout(context, constants.ROUTES_UPDATED, domain_id=domain_id,
                      add=add or [], remove=remove or [])
+
+    def routes_updated_on_host(self, context, host, domain_id, add=None,
+                               remove=None):
+        """routes_updated to one agent, waiting until it has applied them.
+
+        The live-migration handover (PLAN-MIGRATION-HANDOVER H2): the new
+        node must stop sending the address back to the old one before any
+        other node starts sending it to the new one. The agent's fanout
+        consumer also listens on its host's direct queue, so this needs no
+        new endpoint. Bounded: on a timeout or any error the caller's
+        fanout goes ahead, as it did before. Returns whether it was applied.
+        """
+        cctxt = self.client.prepare(topic=self.topic_srv6_update,
+                                    server=host,
+                                    timeout=constants.HANDOVER_CALL_TIMEOUT)
+        try:
+            cctxt.call(context, constants.ROUTES_UPDATED,
+                       payload_version=constants.PAYLOAD_VERSION,
+                       domain_id=domain_id, add=add or [],
+                       remove=remove or [])
+            return True
+        except Exception as e:
+            LOG.warning("SRv6: %(host)s did not confirm routes_updated for "
+                        "domain %(d)s (%(e)s); fanning out anyway",
+                        {'host': host, 'd': domain_id, 'e': e})
+            return False
 
     def domain_deleted(self, context, domain_id, function_id, vrf_table):
         """The domain is gone; tear down its VRF and SID.

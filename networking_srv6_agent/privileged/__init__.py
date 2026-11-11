@@ -25,8 +25,8 @@ neutron's context raises
 The capabilities bound only what the daemon does in its own process:
 enslaving a port to a VRF over netlink (pyroute2), which needs NET_ADMIN.
 The other operations run a command -- ip, modprobe, nft -- and the daemon
-stays uid 0, so an executed command regains every capability (checked on
-2026-10-31: CapEff of the child is the full bounding set). What confines
+stays uid 0, so an executed command regains every capability (checked:
+CapEff of the child is the full bounding set). What confines
 them is that each entrypoint runs one fixed program on an argument list.
 """
 

@@ -12,12 +12,13 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Measured load per VM pair and link (PLAN-UNRESERVED-STEERING step 2).
+"""Measured load per VM pair and link.
 
 The fabric nodes count, per out-link, the SRv6 traffic of every
-(outer SID, inner source, inner destination) they forward (GATE A: nft reads
-the inner header past the outer one and past an SRH). This module checks a
-posted batch, and turns the stored rows into what U-f needs: for each fresh
+(outer SID, inner source, inner destination) they forward (nft reads the
+inner header past the outer one and past an SRH). This module checks a
+posted batch, and turns the stored rows into what the automatic steering
+needs: for each fresh
 key, its rate and peak, the domain, the two ports with their hosts, and
 whether the traffic is steered.
 
@@ -42,7 +43,7 @@ from networking_srv6_agent._i18n import _
 from networking_srv6_agent.common import constants
 from networking_srv6_agent.common import sid
 
-# A fabric agent sends its top 16 per link (A8); the server accepts up to
+# A fabric agent sends its top 16 per link; the server accepts up to
 # this many, so a changed constant on the agents does not break ingestion,
 # while a runaway or hostile collector cannot fill the table.
 MAX_PAIRS_PER_LINK = 64
@@ -207,10 +208,10 @@ def view(rows, now, fresh, window_start, resolve, current=None):
     that cut-off. The agent reports only the pairs above its floor, so a
     pair that left a link (ECMP moved it, it stopped) is simply missing
     from the next batch: without the heartbeat its last row would stay
-    listed, at its old rate, until it went stale (GATE B).
+    listed, at its old rate, until it went stale.
 
     rows: the stored measurements, oldest first. mbps is the newest row's,
-    peak_mbps the highest after window_start (as link states, L9).
+    peak_mbps the highest after window_start (as for link states).
     """
     current = current or {}
     latest, peak = {}, {}

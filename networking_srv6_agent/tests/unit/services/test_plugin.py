@@ -132,9 +132,8 @@ class Srv6RestTestCase(test_db_plugin.NeutronDbPluginV2TestCase,
 class TestDomainApi(Srv6RestTestCase):
 
     def test_a_project_gets_ten_domains_by_default(self):
-        # audit 2026-11-02b finding 1: srv6_domain fell back to
-        # default_quota (unlimited), so one project could take every id of
-        # the shared function id pool
+        # srv6_domain used to fall back to default_quota (unlimited), so one
+        # project could take every id of the shared function id pool
         for n in range(10):
             self._domain(project_id='tenant-q', name='q%d' % n)
         res = self._domain(expected=409, project_id='tenant-q', name='q10')
@@ -150,7 +149,7 @@ class TestDomainApi(Srv6RestTestCase):
         domain = self._domain()
         self.assertEqual('End.DT46', domain['srv6_behavior'])
         self.assertEqual(self._project_id, domain['project_id'])
-        # Admin-only to read (decided 2026-09-10); neutron drops the field
+        # Admin-only to read; neutron drops the field
         # rather than refusing the request.
         self.assertNotIn('sid_function', domain)
         shown = self._show_domain(domain['id'], as_admin=True)
@@ -206,7 +205,7 @@ class TestDomainApi(Srv6RestTestCase):
         self._show_domain(domain['id'], expected=404, as_admin=True)
         self.assertIsNone(srv6_db.get_function_id(self.admin_ctx,
                                                   domain['id']))
-        # D5: the id was read before the delete destroyed it.
+        # The id was read before the delete destroyed it.
         self.agent_rpc.domain_deleted.assert_called_once_with(
             mock.ANY, domain['id'], fid, fid)
 
@@ -259,7 +258,7 @@ class TestAssociationApi(Srv6RestTestCase):
         self._assoc(domain['id'], net['id'], expected=409)
 
     def test_a_network_in_another_domain_is_a_conflict(self):
-        # F3: t9 I8 saw red reach blue's instance through such a network.
+        # Otherwise red could reach blue's instance through such a network.
         red = self._domain()
         blue = self._domain(name='blue')
         net = self._network()
@@ -279,7 +278,7 @@ class TestAssociationApi(Srv6RestTestCase):
         self._assoc(red['id'], net['id'])
 
     def test_overlapping_subnets_in_one_domain_are_refused(self):
-        # F10: one routing table cannot hold two 10.0.0.0/24.
+        # One routing table cannot hold two 10.0.0.0/24.
         domain = self._domain()
         first, second = self._network(), self._network()
         self._subnet(first, '10.0.0.0/24')
@@ -305,7 +304,7 @@ class TestAssociationApi(Srv6RestTestCase):
         self._assoc(domain['id'], second['id'])
 
     def test_the_same_cidr_in_two_domains_is_accepted(self):
-        # What a VRF is for (t9 I2): the tables are separate.
+        # What a VRF is for: the tables are separate.
         red, blue = self._domain(), self._domain(name='blue')
         first, second = self._network(), self._network()
         self._subnet(first, '10.0.0.0/24')
@@ -348,7 +347,7 @@ class TestAssociationApi(Srv6RestTestCase):
         self._assoc(domain['id'], net['id'], expected=404)
 
     def test_the_owners_shared_network_is_accepted(self):
-        # Decided 2026-09-10: same owner, shared allowed.
+        # Same owner, shared allowed.
         domain = self._domain()
         net = self._network(as_admin=True, shared=True)
         self._assoc(domain['id'], net['id'])
@@ -464,6 +463,8 @@ class PluginUnitTestCaseBase(base.BaseTestCase):
         get_plugin.start()
         self.addCleanup(get_plugin.stop)
         self.srv6_db.get_host_locators.return_value = {}
+        # no port is being live-migrated
+        self.srv6_db.get_migrating_port_ids.return_value = set()
         # no link state posted: no fabric node is down
         self.link_state_db.get_last_seen.return_value = {}
         self.link_state_db.get_link_states.return_value = []
@@ -584,9 +585,25 @@ class TestPortSelection(PluginUnitTestCaseBase):
             self.ctx, [], self.locators))
         self.core.get_ports.assert_not_called()
 
+    def test_a_live_migrating_down_port_keeps_its_route(self):
+        # N12: a resync between nova's binding activation and the port
+        # going ACTIVE on the destination must not prune it everywhere
+        moving = _port(status=n_const.PORT_STATUS_DOWN)
+        stopped = _port(status=n_const.PORT_STATUS_DOWN,
+                        fixed_ips=[{'ip_address': '10.0.0.6'}])
+        self.srv6_db.get_migrating_port_ids.return_value = {moving['id']}
+        routes = self._routes(moving, stopped, _port(
+            fixed_ips=[{'ip_address': '10.0.0.7'}]))
+        self.assertEqual(['10.0.0.5/32', '10.0.0.7/32'],
+                         sorted(r['prefix'] for r in routes))
+        # only the ports that are not ACTIVE are looked up
+        self.assertEqual(
+            {moving['id'], stopped['id']},
+            set(self.srv6_db.get_migrating_port_ids.call_args[0][1]))
+
 
 class TestDeleteOrdering(PluginUnitTestCaseBase):
-    """Regression tests for delta D5.
+    """Regression tests: the function id is read before the delete.
 
     The allocation row references srv6_domains.id with ON DELETE SET NULL,
     so after the delete there is no function id left to read -- and an agent
@@ -657,7 +674,7 @@ class TestSyncState(PluginUnitTestCaseBase):
         args = self.srv6_db.set_host_locator.call_args[0]
         self.assertEqual(('node1', 'fc00:0:1::/48'), args[1:3])
 
-    # --- one locator per node (audit 2026-11-02b finding 2) -------------
+    # --- one locator per node -------------------------------------------
     def _registered(self, alive):
         self.srv6_db.get_host_locators.return_value = {
             'node1': 'fc00:0:1::/48', 'node2': 'fc00:0:2::/48'}
@@ -736,7 +753,7 @@ class TestSyncState(PluginUnitTestCaseBase):
         self.assertEqual(2, self.agent_rpc.domain_updated.call_count)
 
     def test_an_unchanged_locator_rebroadcasts_nothing(self):
-        # F13: a restart, a resync or a port on a network in no domain
+        # A restart, a resync or a port on a network in no domain
         # used to cost domains x nodes casts, each a full re-apply.
         self.srv6_db.get_function_id.return_value = 7
         self.srv6_db.set_host_locator.return_value = False
@@ -761,7 +778,7 @@ class TestSyncState(PluginUnitTestCaseBase):
             self.ctx, 'node1', 'fc00:0:1::/48'))
 
     def test_a_domain_with_no_network_is_left_out(self):
-        """F11: one rule for every path, no network means no node state.
+        """One rule for every path, no network means no node state.
 
         It used to be in every sync_state reply and re-broadcast with it,
         so each node built its VRF at the first sync after the create.
@@ -837,7 +854,7 @@ class TestPortEvents(PortEventsTestCaseBase):
         self.assertIn('remove', self.agent_rpc.routes_updated.call_args[1])
 
     def test_a_live_migrating_port_going_down_keeps_its_route(self):
-        # N9: nova's pre-migration DOWN, and the activation's DOWN on the
+        # Nova's pre-migration DOWN, and the activation's DOWN on the
         # destination; the VM still runs, so no withdrawal either time
         for profile in ({'migrating_to': 'node2'}, {}):
             port = _port(status=n_const.PORT_STATUS_DOWN,
@@ -846,6 +863,39 @@ class TestPortEvents(PortEventsTestCaseBase):
                             **{portbindings.PROFILE: {'migrating_to': 'node2'}})
             self.plugin.registry_port_updated(None, None, None,
                                               self._payload(port, original))
+        self.agent_rpc.routes_updated.assert_not_called()
+
+    def test_binding_activation_advertises_the_new_node_first(self):
+        # H1 + H2: nova activated the destination binding (host changes,
+        # port DOWN, migrating_to only on the old binding's profile). The
+        # route moves now, not when the port turns ACTIVE, and the new
+        # node is told and waited for before everybody else.
+        port = _port(status=n_const.PORT_STATUS_DOWN,
+                     **{portbindings.HOST_ID: 'node2',
+                        portbindings.PROFILE: {}})
+        original = dict(port, **{portbindings.HOST_ID: 'node1',
+                                 portbindings.PROFILE: {
+                                     'migrating_to': 'node2'}})
+        calls = mock.Mock()
+        calls.attach_mock(self.agent_rpc.routes_updated_on_host, 'first')
+        calls.attach_mock(self.agent_rpc.routes_updated, 'fanout')
+        self.plugin.registry_port_updated(None, None, None,
+                                          self._payload(port, original))
+        route = {'prefix': '10.0.0.5/32', 'host': 'node2',
+                 'port_id': port['id'], 'network_id': 'net1'}
+        self.assertEqual(
+            [mock.call.first(self.ctx, 'node2', 'd1', add=[route]),
+             mock.call.fanout(self.ctx, 'd1', add=[route])],
+            calls.mock_calls)
+
+    def test_a_host_change_of_a_down_port_that_does_not_migrate(self):
+        # No migrating_to: not a live migration, nothing advertised
+        port = _port(status=n_const.PORT_STATUS_DOWN,
+                     **{portbindings.HOST_ID: 'node2'})
+        original = dict(port, **{portbindings.HOST_ID: 'node1'})
+        self.plugin.registry_port_updated(None, None, None,
+                                          self._payload(port, original))
+        self.agent_rpc.routes_updated_on_host.assert_not_called()
         self.agent_rpc.routes_updated.assert_not_called()
 
     def test_a_deleted_port_is_withdrawn(self):
@@ -866,7 +916,7 @@ class TestPortEvents(PortEventsTestCaseBase):
 
 
 class TestFixedIpChange(PortEventsTestCaseBase):
-    """F14: a live port that keeps its host but changes its addresses.
+    """A live port that keeps its host but changes its addresses.
 
     Before the fix none of registry_port_updated's branches matched, so the
     change reached other nodes only with the next periodic resync.
@@ -940,7 +990,7 @@ class TestFixedIpChange(PortEventsTestCaseBase):
 
 
 class TestSubnetGuard(PluginUnitTestCaseBase):
-    """F10 through the other door: a subnet added after the attach.
+    """Overlapping subnets through the other door: a subnet added later.
 
     A unit test of the receiver: the REST harness's core plugin is not ML2
     and publishes no SUBNET BEFORE_CREATE.

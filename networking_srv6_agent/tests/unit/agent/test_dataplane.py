@@ -66,7 +66,7 @@ class DataplaneTestCaseBase(base.BaseTestCase):
 
         self.priv_seg6.list_sid_rules.return_value = []
         self.priv_seg6.list_vrf_names.return_value = []
-        # The kernel's default rule order, which F7 changes.
+        # The kernel's default rule order, which the dataplane changes.
         self.priv_seg6.local_rule_prefs.return_value = [0]
         # A node fresh from a full-SID build: the `local` locator route.
         self.priv_seg6.show_main_route.return_value = [
@@ -115,11 +115,11 @@ class TestNodeInitialisation(DataplaneTestCaseBase):
 
 
 class TestLocalRuleOrder(DataplaneTestCaseBase):
-    """F7: the local rule goes after l3mdev, so a VRF cannot reach the host.
+    """The local rule goes after l3mdev, so a VRF cannot reach the host.
 
-    t9 and t10 (2026-10-03): from inside a VRF the management address
-    answered ping and a forged ICMPv6 to the underlay address was
-    delivered, because `0: lookup local` precedes `1000: l3mdev`.
+    Otherwise, from inside a VRF the management address answered ping and a
+    forged ICMPv6 to the underlay address was delivered, because
+    `0: lookup local` precedes `1000: l3mdev`.
     """
 
     def _calls(self):
@@ -424,7 +424,7 @@ class TestGatewayPort(DataplaneTestCaseBase):
                              'gateway_ip': '2001:db8::1'}])
         self.assertEqual([mock.call('10.0.0.1/24')],
                          self.device.addr.add.call_args_list)
-        # IPv6 without DAD (F12): TestGatewayIpv6NoDad.
+        # IPv6 without DAD: TestGatewayIpv6NoDad.
         self.priv_seg6.add_address_nodad.assert_called_once_with(
             PORT_NAME, '2001:db8::1/64')
 
@@ -494,15 +494,14 @@ class TestGatewayPort(DataplaneTestCaseBase):
 
 
 class TestGatewayFirewallFlows(DataplaneTestCaseBase):
-    """F1 and F2: the OVS firewall has to see the gateway port.
+    """The OVS firewall has to see the gateway port.
 
-    t11 (LOG-2026-10-03-portsec.md) measured both on 4b607d3: every routed
-    leg into an instance with port security on lost ICMP and TCP (the reply
-    was +inv in table 72, F1) while a port the security group does not open
-    still received SYNs (F2), and an instance with port security on could
-    not open TCP to anything routed. The two flows below, the firewall's own
-    pair for an unfiltered port plus ct_clear, made all of it pass (B2,
-    32/0).
+    Without it every routed leg into an instance with port security on lost
+    ICMP and TCP (the reply was +inv in table 72) while a port the security
+    group does not open still received SYNs, and an instance with port
+    security on could not open TCP to anything routed. The two flows below,
+    the firewall's own pair for an unfiltered port plus ct_clear, made all
+    of it pass.
     """
 
     OFPORT = 42
@@ -542,9 +541,9 @@ class TestGatewayFirewallFlows(DataplaneTestCaseBase):
         self.assertEqual({PORT_NAME: self.OFPORT}, self.dp.gateway_flows)
 
     def test_ct_clear_comes_before_anything_else(self):
-        """Regression from the spike: the pair alone is not enough.
+        """Regression: the pair alone is not enough.
 
-        Without ct_clear (t11 phase B1) frames from the gateway still carry
+        Without ct_clear frames from the gateway still carry
         the host's conntrack entry, OVS takes them as +trk, table 81 skips
         the instance's zone and the reply dies as not established: Rl and
         Rl' lost everything, Rc lost TCP and UDP.
@@ -577,7 +576,7 @@ class TestGatewayFirewallFlows(DataplaneTestCaseBase):
 
     def test_flows_are_reasserted_on_every_call(self):
         # The OVS agent deletes every flow of another cookie at its first
-        # iteration after a restart (t11 phase C: 4 -> 0); handle_port and
+        # iteration after a restart; handle_port and
         # the resync put them back by calling this again.
         self._ensure()
         self._ensure()
@@ -668,12 +667,11 @@ class TestGatewayFirewallFlows(DataplaneTestCaseBase):
 
 
 class TestGatewayIpv6NoDad(DataplaneTestCaseBase):
-    """F12, part a: an IPv6 gateway address is added without DAD.
+    """An IPv6 gateway address is added without DAD.
 
     Every node's gateway of a network holds it on one L2 segment, so DAD
-    disabled it on all nodes but the first (t10 s_dad), and a guest there
-    lost IPv6 routing for good when the first one's gateway went (spike,
-    2026-10-04).
+    disabled it on all nodes but the first, and a guest there lost IPv6
+    routing for good when the first one's gateway went.
     """
 
     V4 = {'id': 's4', 'cidr': '10.0.0.0/24', 'gateway_ip': '10.0.0.1'}
@@ -716,12 +714,12 @@ class TestGatewayIpv6NoDad(DataplaneTestCaseBase):
 
 
 class TestGatewayNdFlows(DataplaneTestCaseBase):
-    """F12, part b: a gateway's ARP and ND do not cross nodes.
+    """A gateway's ARP and ND do not cross nodes.
 
-    The spike (LOG-2026-10-04-vrf-fixes.md) dropped, on the way in from
-    patch-tun, ARP and ND frames naming the gateway on the network's VLAN:
-    node 3's gateway then passed DAD although node 1 held the address, and
-    every guest resolved both gateways to its own node's port.
+    The flows drop, on the way in from patch-tun, ARP and ND frames naming
+    the gateway on the network's VLAN: a second node's gateway then passes
+    DAD although another node holds the address, and every guest resolves
+    the gateway to its own node's port.
     """
 
     PATCH_OFPORT = 2
@@ -936,21 +934,21 @@ class TestGatewayPortReconciliation(DataplaneTestCaseBase):
     def test_ports_left_behind_by_a_previous_agent_are_collected(self):
         """The reason the bridge is asked instead of self.gateway_ports.
 
-        Measured on node 1 on 2026-09-03: after a restart the in-memory map
-        is empty while the OVS ports are all still there, so a map-based
-        reconciliation deleted nothing and the leak survived every restart.
+        After a restart the in-memory map is empty while the OVS ports are
+        all still there, so a map-based reconciliation deleted nothing and
+        the leak survived every restart.
         """
         self.assertEqual({}, self.dp.gateway_ports[self.domain_id])
         self.dp.reconcile_gateway_ports(self.domain_id, {100})
         self.bridge.delete_port.assert_called_once_with('svp-7-101')
 
     def test_an_empty_wanted_set_deletes_every_port_of_the_domain(self):
-        """F6 and F8: the domain has networks, none with a live port here.
+        """The domain has networks, none with a live port here.
 
         This used to be the early return for "the VLAN map is not built
-        yet", which kept every leftover: after a detach (F6), and after a
-        network's last port left the node (F8), when t9 saw the reclaimed
-        VLAN reach another network that then injected into the domain. The
+        yet", which kept every leftover: after a detach, and after a
+        network's last port left the node, when the reclaimed VLAN could
+        reach another network that then injected into the domain. The
         wanted set now comes from OVSDB, so empty means empty.
         """
         self.dp.reconcile_gateway_ports(self.domain_id, set())
@@ -985,8 +983,8 @@ class TestGatewayPortReconciliation(DataplaneTestCaseBase):
 class TestRouteReconciliation(DataplaneTestCaseBase):
     """Regression: encap routes accumulated exactly as the ports did.
 
-    Found on node 1 on 2026-09-03 while verifying the gateway-port fix:
-    the port for a detached network was gone, but table 13783 still held
+    Found while verifying the gateway-port fix: the port for a detached
+    network was gone, but table 13783 still held
     `10.90.2.21 encap seg6 ... segs [fc00:0:2:ec7::]` for a workload on a
     network that had left the domain.
     """
@@ -1032,11 +1030,10 @@ class TestRouteReconciliation(DataplaneTestCaseBase):
     def test_an_incremental_add_for_this_node_removes_its_encap_route(self):
         """A live migration to this node sends no withdrawal of the old host.
 
-        Seen live on 2026-10-31 (FIX-STALE-ROUTE-MIGRATION): the source's
-        flap re-advertised the guest on the old host, the port then went
-        down and changed host without a cast, and add(new) was skipped here
-        as local, so the destination kept an encap route to the old host
-        until the next full sync.
+        Seen live: the source's flap re-advertised the guest on the old
+        host, the port then went down and changed host without a cast, and
+        add(new) was skipped here as local, so the destination kept an
+        encap route to the old host until the next full sync.
         """
         self._add([{'prefix': '10.90.2.21/32', 'host': 'node1'}])
         self.priv_seg6.delete_route.assert_called_once_with(
@@ -1358,9 +1355,9 @@ class TestSidRules(DataplaneTestCaseBase):
                           (self.RED, 'fc00:0:3:7::')], self._added())
 
     def test_the_rule_comes_before_the_route(self):
-        # Make before break (B4, 2026-11-04): a route re-steered through a
-        # new first segment dropped its packets in the VRF until the rule
-        # toward that segment followed, ~0.4 s per drain on the Clos.
+        # Make before break: a route re-steered through a new first segment
+        # dropped its packets in the VRF until the rule toward that segment
+        # followed, ~0.4 s per drain on the Clos.
         self.dp.add_routes(self.domain_id,
                            [self._route('10.0.0.5/32', 'node2')],
                            self.locators, 'node1')
@@ -1880,7 +1877,7 @@ class TestRouteMtu(DataplaneTestCaseBase):
 
 
 # ----------------------------------------------------------------------
-# microSID (USID-PLAN.md)
+# microSID
 # ----------------------------------------------------------------------
 UN_LINE = ('fc00:0:1::/48  encap seg6local action End flavors next-csid '
            'lblen 32 nflen 16 dev eth0 metric 1024 pref medium')
@@ -1888,7 +1885,7 @@ LIB = 'fc00:0:1:e000::/52'
 
 
 class TestUsidNode(DataplaneTestCaseBase):
-    """Node state per encoding: the /48, the LIB seal (D6)."""
+    """Node state per encoding: the /48, the LIB seal."""
 
     def _un_installed(self):
         self.priv_seg6.replace_seg6local_route.assert_any_call(
@@ -1978,7 +1975,7 @@ class TestUsidDomain(DataplaneTestCaseBase):
 
 
 class TestUsidRoutes(DataplaneTestCaseBase):
-    """Packing at the ingress, the rule on the first container (D9, D13)."""
+    """Packing at the ingress, the rule on the first container."""
 
     LOCATORS = {'node2': LOCATOR2, 'node3': LOCATOR3}
 
@@ -2123,7 +2120,7 @@ class TestUnderlayAutodetect(DataplaneTestCaseBase):
 
 
 class TestSteering(DataplaneTestCaseBase):
-    """Steer tables and rules for source VMs (PLAN-UNRESERVED-STEERING 5).
+    """Steer tables and rules for source VMs.
 
     The routes carry segments_by_source_port; the VM is on node1 (here),
     its network net1's gateway port is svp-7-100, and the steer tables
@@ -2188,7 +2185,7 @@ class TestSteering(DataplaneTestCaseBase):
                       self.priv_seg6.add_sid_rule.call_args_list)
 
     def test_the_steer_sid_rule_is_not_pruned(self):
-        # GATE A D2: without the rule the steered flow never connected
+        # Without the rule the steered flow never connected
         self.priv_nft.apply_ruleset.return_value = None
         self.dp.ensure_edge_filter([LOCATOR2, LOCATOR3])
         self.priv_seg6.list_sid_rules.return_value = [

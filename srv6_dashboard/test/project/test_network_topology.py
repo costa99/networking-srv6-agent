@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Horizon's Network Topology with SRv6 domain links (FEATURE D24).
+"""Horizon's Network Topology with SRv6 domain links.
 
 topology.srv6_domains() decides which links the page draws, so it is
 tested directly; the views are tested for being Horizon's plus the
@@ -154,7 +154,7 @@ class NetworkTopologyViewTests(helpers.TestCase):
               'networks': [nets[0].id, nets[1].id],
               'links': [[nets[0].id, nets[1].id]]}],
             data['srv6_domains'])
-        # The current project's domains, even for an admin (D14).
+        # The current project's domains, even for an admin.
         self.mock_domain_list.assert_called_once_with(
             test.IsHttpRequest(), project_id=self.tenant.id)
 

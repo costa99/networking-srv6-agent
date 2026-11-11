@@ -64,8 +64,7 @@ elif [[ "$1" == "stack" && "$2" == "post-config" ]]; then
     # compress must already see them. Nothing to install: setup_develop
     # above put srv6_dashboard in the same venv as Horizon. No
     # POLICY_FILES entry, unlike networking-bgpvpn: Neutron enforces the
-    # policy and the admin panels sit behind the Admin dashboard's gate
-    # (FEATURE-HORIZON-DASHBOARD D9).
+    # policy and the admin panels sit behind the Admin dashboard's gate.
     if is_service_enabled horizon; then
         cp $SRV6_DASHBOARD_ENABLE \
             $HORIZON_DIR/openstack_dashboard/local/enabled/

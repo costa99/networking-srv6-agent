@@ -18,7 +18,7 @@ The mocks sit on the SDK Proxy class itself (as upstream networking-bgpvpn's
 SDK tests do), so the real networkclient(request) runs: a test fails if a
 wrapper builds its client some other way. What each test pins down is the
 contract with Neutron -- which Resource class, which id, which attributes --
-because that is what decides the HTTP request (FEATURE §5) -- and that the
+because that is what decides the HTTP request -- and that the
 answer comes back as the right wrapper with every field intact.
 """
 

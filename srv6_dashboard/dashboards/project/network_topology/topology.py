@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""The SRv6 domains drawn on Horizon's Network Topology (FEATURE D24).
+"""The SRv6 domains drawn on Horizon's Network Topology.
 
 srv6_domains() is a pure function of the domain list and the networks the
 topology shows, so what gets linked is unit-tested without a browser; the

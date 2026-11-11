@@ -18,6 +18,4 @@ A package of its own, beside networking_srv6_agent, so that neither side
 imports the other's world: this one never imports neutron, the server never
 imports Django. The only thing it takes from networking_srv6_agent is the
 neutron-free part: cli.resources (the SDK classes) and common.constants.
-
-Design reference: private-docs/features/FEATURE-HORIZON-DASHBOARD.md.
 """

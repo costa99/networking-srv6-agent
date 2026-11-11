@@ -12,9 +12,9 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-# The admin's topology picture: Admin > Network > SRv6 Topology (FEATURE
-# D8, D22). Its script is inline in the template, so the panel needs no
-# static files and no ADD_INSTALLED_APPS (Deviation V6).
+# The admin's topology picture: Admin > Network > SRv6 Topology.
+# Its script is inline in the template, so the panel needs no static files
+# and no ADD_INSTALLED_APPS.
 
 PANEL = 'srv6_topology'
 PANEL_DASHBOARD = 'admin'

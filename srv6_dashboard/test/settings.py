@@ -15,7 +15,7 @@
 """Django settings for the dashboard tests.
 
 Horizon's own test settings, plus our enabled/ files applied the way a real
-Horizon applies local/enabled/ (FEATURE §2.1): so the tests register the
+Horizon applies local/enabled/: so the tests register the
 panels exactly as production does, and a broken enabled file fails here.
 """
 

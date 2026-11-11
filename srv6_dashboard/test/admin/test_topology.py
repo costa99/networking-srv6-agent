@@ -73,8 +73,7 @@ class BuildTests(helpers.TestCase):
         self.assertEqual('fc00:0:3::/48', hosts['ale-node3']['locator'])
         # Drawn, but flagged: it can be neither waypoint nor destination.
         # mystery-host runs a VM; gone-host is the DEGRADED path's
-        # waypoint, and without it that path would not be drawn at all
-        # (found by rendering the page, LOG Op 4.4).
+        # waypoint, and without it that path would not be drawn at all.
         self.assertIsNone(hosts['mystery-host']['locator'])
         self.assertIsNone(hosts['gone-host']['locator'])
 
@@ -193,7 +192,7 @@ class TopologyViewTests(helpers.BaseAdminViewTests):
 
         self.assertTemplateUsed(res, 'admin/srv6_topology/index.html')
         self.assertContains(res, 'data-url="%s"' % DATA_URL)
-        # The drawing script is inline: no static file to collect (D22).
+        # The drawing script is inline: no static file to collect.
         self.assertContains(res, "getElementById('srv6-topology')")
 
     @test.create_mocks({srv6_api: ('locator_list', 'domain_list',

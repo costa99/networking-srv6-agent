@@ -18,7 +18,7 @@
 Runs on each spine and leaf of the underlay (a Linux switch, as SONiC is;
 on the test bed, Linux VMs). It tells Neutron what the fabric really
 carries, so that the server can see congested links and steer heavy VM
-pairs off them (PLAN-LINK-STATE-TE, PLAN-UNRESERVED-STEERING). It reads
+pairs off them. It reads
 only what the kernel already counts: every period, one read of
 /proc/net/dev (bytes, packets and drops of every interface) and of
 /sys/class/net/<if>/operstate. It turns them into one report covering
@@ -39,7 +39,7 @@ dropped, never queued: a late measurement is worth nothing. Only changes
 of the push state are logged, so a dead API does not flood the journal.
 Without --neutron-url, one JSON line per period on stdout (debugging).
 
-With --aggregates (PLAN-UNRESERVED-STEERING) the node also counts, per link
+With --aggregates the node also counts, per link
 it sends on, the SRv6 traffic of every VM pair: an nft table of its own
 (installed at start, needs CAP_NET_ADMIN) keys dynamic sets on (out
 interface, outer destination SID, inner source, inner destination). nft's
@@ -77,14 +77,14 @@ import urllib.request
 API_PATH = '/v2.0/srv6_link_states'
 AGGREGATE_PATH = '/v2.0/srv6_aggregate_loads'
 # VM pairs reported per link and period, and the smallest rate reported
-# (decision A8: a development constant, not an option; the server accepts
-# up to 64 per link).
+# (a development constant, not an option; the server accepts up to 64 per
+# link).
 TOP_K = 16
 FLOOR_MBPS = 1.0
 NFT_TABLE = 'srv6_agg'
 # The inner-family test and the counter update sit in different rules (a
 # jump): nft 1.0.9 cannot print a rule holding both (payload.c assertion),
-# which would break `nft list ruleset` on the node (GATE A, D3). An element
+# which would break `nft list ruleset` on the node. An element
 # idle for 60 s leaves its set; the agent reads every period.
 NFT_SCRIPT = """table inet %(t)s
 delete table inet %(t)s
@@ -466,8 +466,8 @@ def selftest():
                  'OS_PASSWORD': 'p=w', 'OS_PROJECT_NAME': 'admin'}, c
     assert (Neutron('http://ctl/networking/', c).url ==
             'http://ctl/networking/v2.0/srv6_link_states')
-    # --- VM-pair loads (PLAN-UNRESERVED-STEERING) -----------------------
-    # the JSON of nft 1.0.9 (GATE A): 32-bit fields as numbers, 128-bit
+    # --- VM-pair loads --------------------------------------------------
+    # the JSON of nft 1.0.9: 32-bit fields as numbers, 128-bit
     # ones as hex strings
     v4 = json.dumps({'nftables': [{'metainfo': {}}, {'set': {'elem': [
         {'elem': {'val': {'concat': ['s2', 'fc00:0:4:e300::', 173736203,

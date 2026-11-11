@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Admin > Network > SRv6: the views behind each URL (FEATURE §5.2).
+"""Admin > Network > SRv6: the views behind each URL.
 
 The domain views are the project panel's, with admin URLs, forms, tables
 and tabs. The index is different: a tabbed page with one tab per resource.

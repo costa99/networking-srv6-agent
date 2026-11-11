@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Measured VM-pair load: one row per measurement (PLAN-UNRESERVED-STEERING).
+"""Measured VM-pair load: one row per measurement.
 
 A row is what one fabric node measured, in one period, for one VM pair on
 one link it sends on: the outer SID and the inner addresses, as seen on the

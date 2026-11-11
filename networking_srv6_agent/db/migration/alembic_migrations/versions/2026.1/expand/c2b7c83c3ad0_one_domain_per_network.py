@@ -14,7 +14,7 @@
 
 """expand one domain per network
 
-F3: a network belongs to one SRv6 domain.
+A network belongs to one SRv6 domain.
 
     uniq (network_id) on srv6_domain_network_associations
 

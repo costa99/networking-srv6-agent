@@ -1,5 +1,5 @@
 #!/bin/bash
-# clos.sh <action> [node...]   -- the Clos underlay of PLAN-CLOS-TESTBED.md
+# clos.sh <action> [node...]   -- the Clos underlay
 #
 # Builds and checks a 2-spine / 6-leaf routed fabric of small VMs on mac-server
 # (10.47.7.66) under the ML2 cloud's hosts ubuntu-ovs1..6 (racks l1/l2,
@@ -19,10 +19,9 @@
 #   push     install /usr/local/sbin/clos-routes.sh + clos-routes.service on the
 #            listed (default: all running) nodes and run it; on spines and
 #            leaves also the fabric agent (srv6-fabric-agent.service, link
-#            telemetry of PLAN-LINK-STATE-TE: journalctl -u srv6-fabric-agent)
+#            telemetry: journalctl -u srv6-fabric-agent)
 #   tunnels  put the tenant tunnel endpoint of every running host on its IPv4
-#            fabric loopback 10.255.0.<id> (PLAN-PATH-COMPUTATION U5; IPv4 by
-#            the user's decision of 2026-11-01), so VXLAN (ML2: [ovs] local_ip,
+#            fabric loopback 10.255.0.<id>, so VXLAN (ML2: [ovs] local_ip,
 #            [ml2] overlay_ip_version = 4 on the controller) or Geneve (OVN:
 #            ovn-encap-ip) crosses the Clos in every mode; restarts the agents
 #            whose setting changed. A restack reverts it: run again.
@@ -69,7 +68,7 @@ nodes_or_all() { if [ $# -gt 0 ]; then echo "$@"; else py nodes | awk '{print $1
 do_nets() {
     py nets | while read -r net br; do
         if ! v net-info $net >/dev/null 2>&1; then
-            # no <ip>, no <forward>: libvirt only makes the bridge (D3)
+            # no <ip>, no <forward>: libvirt only makes the bridge
             ssh "${SSH[@]}" $HOST "cat > /tmp/$net.xml && virsh -c qemu:///system net-define /tmp/$net.xml >/dev/null && rm /tmp/$net.xml" <<EOF
 <network><name>$net</name><bridge name='$br' stp='off' delay='0'/><mtu size='9000'/></network>
 EOF
@@ -177,7 +176,7 @@ do_hosts() {
 }
 
 UNIT='[Unit]
-Description=Clos fabric NICs, addresses and static routes (PLAN-CLOS-TESTBED)
+Description=Clos fabric NICs, addresses and static routes
 After=network.target
 Before=devstack@q-agt.service
 [Service]
@@ -187,19 +186,19 @@ ExecStart=/usr/local/sbin/clos-routes.sh
 [Install]
 WantedBy=multi-user.target'
 
-# The fabric agent (PLAN-LINK-STATE-TE): link telemetry of a spine/leaf,
-# POSTed to Neutron's srv6_link_states every 5 s (steps 1-2).
-# Restart=always: the server reads a silent node as a dead one (decision L8),
+# The fabric agent: link telemetry of a spine/leaf, POSTed to Neutron's
+# srv6_link_states every 5 s.
+# Restart=always: the server reads a silent node as a dead one,
 # so a crashed agent must come back within seconds. DynamicUser: it only reads
 # /proc/net/dev and /sys, so it runs as a throwaway unprivileged user; systemd
 # hands it the root-only credentials file through LoadCredential (%d).
-# --aggregates (PLAN-UNRESERVED-STEERING step 2): it also installs and reads
+# --aggregates: it also installs and reads
 # its own nft table of per-VM-pair counters, which needs CAP_NET_ADMIN, and
-# only that: ambient (inherited by nft) and the whole bounding set (GATE A D4).
+# only that: ambient (inherited by nft) and the whole bounding set.
 agent_unit() {   # [<extra ExecStart args>]: the unit file
     cat <<UNIT
 [Unit]
-Description=SRv6 fabric agent: link telemetry for Neutron (PLAN-LINK-STATE-TE)
+Description=SRv6 fabric agent: link telemetry for Neutron
 After=clos-routes.service network-online.target
 Wants=network-online.target
 [Service]
@@ -216,8 +215,8 @@ WantedBy=multi-user.target
 UNIT
 }
 
-# The agents' Keystone identity: devstack's own admin account (user decision,
-# 2026-11-01: no extra user or role). srv6_link_states is admin-only. Tokens
+# The agents' Keystone identity: devstack's own admin account (no extra user
+# or role). srv6_link_states is admin-only. Tokens
 # expire, so the agent gets the credentials, not a token, and fetches tokens
 # itself. Read from devstack's openrc on the controller (host id 1); printed
 # openrc-style. On the fabric nodes they stay root-only (do_agent).
@@ -273,7 +272,7 @@ do_tunnels() {
         if [ "${CLOS_CLOUD:-}" = ovn ]; then
             # ovn-set-local-ip: without it the Geneve source is whatever the route
             # picks (a link address, fd01:...), and the peer, which knows this
-            # chassis only as $ep, drops every packet (op 10)
+            # chassis only as $ep, drops every packet
             on $n "[ \"\$(sudo ovs-vsctl get open . external_ids:ovn-encap-ip | tr -d '\"')\" = $ep ] && echo '$n: ovn-encap-ip $ep already' ||
                    { sudo ovs-vsctl set open . external_ids:ovn-encap-ip=$ep && echo '$n: ovn-encap-ip -> $ep'; }
                    sudo ovs-vsctl set open . external_ids:ovn-set-local-ip=true"

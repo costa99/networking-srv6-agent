@@ -142,14 +142,14 @@ class CreateTePathTests(helpers.BaseAdminViewTests):
         res = self.client.get(CREATE_URL)
 
         form = res.context['form']
-        # Hosts: exactly the registered locators (D6), for the
+        # Hosts: exactly the registered locators, for the
         # destination and for every waypoint.
         self.assertEqual(HOSTS, [c[0] for c in
                                  form.fields['destination_host'].choices
                                  if c[0]])
         self.assertEqual(HOSTS, [c[0] for c in
                                  form.fields['via_host_1'].choices if c[0]])
-        # As many waypoint fields as the server accepts (D12).
+        # As many waypoint fields as the server accepts.
         self.assertIn('via_host_6', form.fields)
         self.assertNotIn('via_host_7', form.fields)
         # Ports: the VM ports on the domains' networks, in one request.
@@ -289,7 +289,7 @@ class CreateTePathTests(helpers.BaseAdminViewTests):
     @test.create_mocks({srv6_api: ('domain_list', 'locator_list',
                                    'port_list', 'te_path_create')})
     def test_create_unknown_host_is_refused(self):
-        # Not a registered locator: not a valid choice (D6).
+        # Not a registered locator: not a valid choice.
         self._mock_choices()
 
         res = self._post(destination_host='no-such-host')

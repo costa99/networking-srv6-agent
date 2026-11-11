@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""PLAN-LINK-STATE-TE step 2: /v2.0/srv6_link_states, end to end.
+"""/v2.0/srv6_link_states, end to end.
 
 Neutron's own REST harness with a real database and the policy from the
 entry point, on a two-link topology: spine s1 - leaf l1 - host ml1. The
@@ -182,8 +182,8 @@ class TestView(LinkStateRestTestCase):
         self.assertEqual((0, False, True), (up['age'], up['stale'], up['up']))
 
     def test_a_history_read_once_gives_the_same_view_and_series(self):
-        # PLAN-C4-OPTIMISATION O1: the re-optimisation passes one history
-        # to every caller instead of each reading its own
+        # The re-optimisation passes one history to every caller instead of
+        # each reading its own
         self._post(self._l1_batch(tx=150.0, rx=60.0))
         self._post([_m('s1', 'l1', 's1', 100.0), _m('s1', 's1', 'l1', 61.0)])
         self._at(5)

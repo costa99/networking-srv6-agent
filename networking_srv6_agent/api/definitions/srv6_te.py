@@ -31,8 +31,8 @@ It may also name source_host, the ingress node: the path then applies only
 to the domain's traffic that enters the SRv6 domain at that node (is
 encapsulated there). Without it the path applies at every ingress. Or it
 may name source_port_id, one VM: the path then applies only to that VM's
-traffic (its fixed IPs as source), at whatever node the VM is bound to
-(PLAN-UNRESERVED-STEERING). Per route and per ingress, the first of these
+traffic (its fixed IPs as source), at whatever node the VM is bound to.
+Per route and per ingress, the first of these
 that exists wins:
 
     destination port + this source VM  >  destination host + this source VM
@@ -41,11 +41,11 @@ that exists wins:
     >  direct
 
 so a source-VM path outranks every other, and a source path every path
-without one (FEATURE-TE-SOURCE-HOST). The source-VM ranks are a policy rule
+without one. The source-VM ranks are a policy rule
 at the ingress, looked up before the domain's routing table.
 
 `origin` is 'user' for a path an admin created and 'auto' for one the server
-created to steer a heavy VM pair off a congested link (U-f); an auto path
+created to steer a heavy VM pair off a congested link; an auto path
 cannot be re-steered by hand, only deleted.
 
 `segments` and `status` are what the SERVER resolved when the path was read,

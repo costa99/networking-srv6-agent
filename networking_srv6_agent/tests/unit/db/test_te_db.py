@@ -374,7 +374,7 @@ class TestPayloadHelpers(Srv6TeDbTestCase):
 
 
 class TestSourceSelector(Srv6TeDbTestCase):
-    """A path may be limited to one ingress node (FEATURE-TE-SOURCE-HOST).
+    """A path may be limited to one ingress node.
 
     '' is stored for "any ingress" so that the unique constraints, which
     include the column, also hold between any-source paths; the dict says
@@ -468,7 +468,7 @@ class TestSourceSelector(Srv6TeDbTestCase):
 
 
 class TestSourcePort(Srv6TeDbTestCase):
-    """Paths limited to one source VM (PLAN-UNRESERVED-STEERING step 4)."""
+    """Paths limited to one source VM."""
 
     def _vm_path(self, source_port_id, destination_port_id=None,
                  destination_host=None, origin=None, via_hosts=None):

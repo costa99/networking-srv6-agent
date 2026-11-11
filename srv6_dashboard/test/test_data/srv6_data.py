@@ -21,7 +21,7 @@ Each object exists twice, as Horizon's own test data does:
                  expects to come out.
 The values are realistic so a failing test reads like a real answer.
 They are what the plugin computes in usid mode, the testbed's mode,
-taken from networking_srv6_agent.common.sid (LOG Op 3c.1):
+taken from networking_srv6_agent.common.sid:
   - locators are the testbed's fc00:0:N::/48;
   - SID functions are in the LIB range, 0xe000 and up;
   - a waypoint is named by its uN SID, the locator's own address
@@ -135,7 +135,7 @@ def data(TEST):
              resources.Srv6TePath, srv6.TePath, p)
     # Not in the container (its tests count two paths): a path limited to
     # the ingress ale, whose first waypoint is ale itself -- the server
-    # leaves that SID out of the segments (FEATURE-TE-SOURCE-HOST).
+    # leaves that SID out of the segments.
     TEST.srv6_te_path_from_source = srv6.TePath(dict(
         path_via_node2, id='c3d4e5f6-0a1b-4c2d-8e3f-4a5b6c7d8e03',
         source_host='ale', via_hosts=['ale', 'ale-XPS-15-9570'],
@@ -143,7 +143,7 @@ def data(TEST):
         encoded_segments=['fc00:0:2:3:e000::']))
 
     # --- link states: hosts ale and ale-node3 under leaf l1, spine s1 above,
-    # one directed link at each level the page colours (PLAN-LINK-STATE-TE)
+    # one directed link at each level the page colours
 
     def link(a, b, cap, mbps, up=True, stale=False):
         return {'id': '%s:%s' % (a, b), 'from_node': a, 'to_node': b,

@@ -14,7 +14,7 @@
 
 """expand te port selector
 
-P6: a TE path selects its traffic by
+A TE path selects its traffic by
 exactly one of destination_host or destination_port_id.
 
     srv6_te_paths.destination_host      becomes nullable

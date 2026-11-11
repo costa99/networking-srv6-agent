@@ -184,7 +184,7 @@ class Srv6TePath(resource.Resource):
     #: The one VM the path is limited to (its node follows the VM).
     #: Create-only; excludes source_host.
     source_port_id = resource.Body('source_port_id')
-    #: 'user', or 'auto' for a path the server made (U-f). Read-only.
+    #: 'user', or 'auto' for a path the server made. Read-only.
     origin = resource.Body('origin')
     #: Traversal order. An update replaces the whole list.
     via_hosts = resource.Body('via_hosts', type=list)

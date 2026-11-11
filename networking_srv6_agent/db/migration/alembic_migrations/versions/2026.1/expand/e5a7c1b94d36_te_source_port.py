@@ -15,7 +15,7 @@
 """expand te source port
 
 A TE path may be limited to one source VM, and the server creates paths of
-its own (PLAN-UNRESERVED-STEERING step 4).
+its own.
 
     srv6_te_paths.source_port_id   new, NULL or a port (ON DELETE CASCADE:
                                    a path for a deleted VM is meaningless)

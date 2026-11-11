@@ -16,7 +16,7 @@
 
 A locator is written by the host's agent, never by a user, so the table
 has no actions. It answers the questions an admin asks before steering:
-which hosts can be a waypoint or a destination (only these, D6), and is
+which hosts can be a waypoint or a destination (only these), and is
 that host's agent still reporting.
 """
 

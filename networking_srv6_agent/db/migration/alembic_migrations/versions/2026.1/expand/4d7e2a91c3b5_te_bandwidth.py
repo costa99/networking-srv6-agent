@@ -14,8 +14,7 @@
 
 """expand te bandwidth
 
-A TE path may reserve bandwidth; the plugin then computes its hops itself
-(PLAN-PATH-COMPUTATION, FEATURE-PATH-COMPUTATION).
+A TE path may reserve bandwidth; the plugin then computes its hops itself.
 
     srv6_te_paths.bandwidth     new, nullable INTEGER, Mbit/s; NULL for every
                                 existing row: an operator-chosen path that

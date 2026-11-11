@@ -12,12 +12,12 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""The server half of microSID (USID-PLAN.md).
+"""The server half of microSID.
 
 What [srv6] dataplane_encoding = usid changes on the server: the function
-id ranges it accepts (D2), the locators it registers (D5), the transit SIDs
-it resolves via hosts to (D10), the `encoded_segments` it shows (D11), and
-the capabilities it checks agents for (D3).
+id ranges it accepts, the locators it registers, the transit SIDs it
+resolves via hosts to, the `encoded_segments` it shows, and the
+capabilities it checks agents for.
 """
 
 from unittest import mock

@@ -226,7 +226,7 @@ def pack_next_csid(sids, block_bits=constants.USID_BLOCK_BITS,
     C-SIDs -- six for F3216 -- zero-padded (s6.3: "the remaining least
     significant bits ... MUST be set to 0").
 
-    A SID's C-SIDs are never split across two containers (USID-PLAN.md D9):
+    A SID's C-SIDs are never split across two containers:
     when the decap SID's node + function pair does not fit in what is left,
     the container is closed early. Split, the function would open the next
     container alone as block:function::, which only a pure-LIB route on

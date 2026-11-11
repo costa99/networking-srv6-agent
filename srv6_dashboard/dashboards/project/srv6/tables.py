@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""The domains table and its actions (FEATURE §5.2, §6.2).
+"""The domains table and its actions.
 
 The admin panel subclasses these, changing only the `url` of each action
 and adding columns (admin/srv6/tables.py).
@@ -76,7 +76,7 @@ class NetworksColumn(tables.Column):
     """The domain's networks, as links named after the network.
 
     The view puts the {id: name} map on each row (row.network_names), so
-    the whole table costs one network request, not one per network (D15).
+    the whole table costs one network request, not one per network.
     """
 
     network_url = srv6_common.PROJECT_NETWORK_URL

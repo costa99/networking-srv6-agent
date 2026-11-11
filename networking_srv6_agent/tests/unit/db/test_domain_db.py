@@ -165,7 +165,7 @@ class TestNetworkAssociations(DomainDbTestCase):
             self._associate, domain['id'], net_id)
 
     def test_one_network_cannot_be_in_two_domains(self):
-        # F3: the plugin refuses it first; the constraint closes the race.
+        # The plugin refuses it first; the constraint closes the race.
         net_id = self._create_network()
         a = self._create_domain(name='a')
         b = self._create_domain(name='b')

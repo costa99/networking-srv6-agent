@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""PLAN-UNRESERVED-STEERING step 4: TE paths from one source VM, auto paths.
+"""TE paths from one source VM, auto paths.
 
 Plugin units with the database mocked (test_te's base): what a create
 accepts and refuses, the payload key the head-end agent reads

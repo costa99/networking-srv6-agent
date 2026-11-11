@@ -155,7 +155,7 @@ class TestTopologyFunctionIds(base.BaseTestCase):
 
 
 # ----------------------------------------------------------------------
-# microSID (USID-PLAN.md)
+# microSID
 # ----------------------------------------------------------------------
 def _loc(node):
     return 'fc00:0:%x::/48' % node
@@ -220,7 +220,7 @@ class TestUsidLocator(base.BaseTestCase):
 
 
 class TestPackNextCsid(base.BaseTestCase):
-    """The containers the ingress pushes (RFC 9800 s6.2, USID-PLAN.md D9)."""
+    """The containers the ingress pushes (RFC 9800 s6.2)."""
 
     DECAP = 'fc00:0:8:e001::'
 
@@ -249,7 +249,7 @@ class TestPackNextCsid(base.BaseTestCase):
                          sid.pack_next_csid(self._path(6)))
 
     def test_overhead_matches_the_plan_table(self):
-        # USID-PLAN.md s3: k -> (encap today, usid).
+        # k waypoints -> header bytes (encap, usid).
         expected = {0: (64, 40), 1: (80, 40), 2: (96, 40), 4: (128, 40),
                     5: (144, 64), 6: (160, 64)}
         for k, (full, usid) in expected.items():

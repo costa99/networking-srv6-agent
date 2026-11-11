@@ -58,6 +58,22 @@ class TestNotifier(base.BaseTestCase):
             mock.sentinel.ctx, 'routes_updated', payload_version=1,
             domain_id='d1', add=[{'prefix': '10.0.0.5/32'}], remove=[])
 
+    def test_routes_updated_on_host_waits_for_that_agent(self):
+        self.assertTrue(self.notifier.routes_updated_on_host(
+            mock.sentinel.ctx, 'node2', 'd1', add=[{'prefix': '10.0.0.5/32'}]))
+        self.client.prepare.assert_called_once_with(
+            topic='q-agent-notifier-srv6-update', server='node2', timeout=2)
+        self.cctxt.call.assert_called_once_with(
+            mock.sentinel.ctx, 'routes_updated', payload_version=1,
+            domain_id='d1', add=[{'prefix': '10.0.0.5/32'}], remove=[])
+
+    def test_routes_updated_on_host_gives_up_quietly(self):
+        # A slow or dead agent must not fail the port update: the fanout
+        # that follows goes ahead as before
+        self.cctxt.call.side_effect = oslo_messaging.MessagingTimeout()
+        self.assertFalse(self.notifier.routes_updated_on_host(
+            mock.sentinel.ctx, 'node2', 'd1', add=[]))
+
     def test_domain_deleted_carries_what_the_agent_cannot_look_up(self):
         self.notifier.domain_deleted(mock.sentinel.ctx, 'd1', 7, 10007)
         self.cctxt.cast.assert_called_once_with(
@@ -89,7 +105,7 @@ class TestServerRpcCallback(base.BaseTestCase):
     def test_refuses_an_unknown_payload_version(self):
         # Half-applying a message whose shape cannot be relied on is worse
         # than refusing it. Raised, not [], which the agent would take for
-        # "no domains" and remove everything (N1).
+        # "no domains" and remove everything.
         e = self.assertRaises(
             oslo_messaging.ExpectedException, self.callback.sync_state,
             mock.sentinel.ctx, host='node1', locator='fc00:0:1::/48',

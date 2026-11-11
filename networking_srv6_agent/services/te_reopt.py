@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Move heavy VM pairs off congested links (PLAN-UNRESERVED-STEERING U-f).
+"""Move heavy VM pairs off congested links.
 
 Each pass reads the measured link state (srv6_link_states) and:
 
@@ -20,11 +20,11 @@ Each pass reads the measured link state (srv6_link_states) and:
    link all above te_reopt_high of its capacity, and all newer
    than the last move off it (a move must show in the data before the link
    is judged again);
-2. releases (U-f, step 7) the automatic paths no longer needed: a pair idle
+2. releases the automatic paths no longer needed: a pair idle
    for te_auto_release_after, or one whose default routes would now all
    stay at or below te_reopt_low with its rate added (the worst case: ECMP
    may hash it onto any of them); never inside the hold-down;
-3. on the hottest link first, moves (U-f, step 6) the largest VM pairs the
+3. on the hottest link first, moves the largest VM pairs the
    fabric measured on it (srv6_aggregate_loads): a pair of at least
    te_auto_min_share of the link, that no user path covers, gets a path of
    its own (origin auto) or has its auto path moved;
@@ -37,7 +37,7 @@ until its load minus what was moved is at most te_reopt_low (hysteresis),
 te_reopt_max_moves moves were made in this pass (budget, shared by moves
 and releases), skipping anything moved within te_reopt_hold_down
 (damping). A path moves onto a path with room where every link holds its
-measured load (L4) minus the mover's own traffic, avoiding every congested
+measured load minus the mover's own traffic, avoiding every congested
 and dead link; in place, make-before-break. No room: it stays.
 
 The memory of moves (hold-down, last move per link, idle since) is this
@@ -88,7 +88,7 @@ def _covered(pair, paths):
 
     Any rank: a path of the pair's domain to its destination port or node,
     from its source port, its source node, or any source. An auto path is
-    never created over one (A11).
+    never created over one.
     """
     e = pair['entry']
     for p in paths:
@@ -116,8 +116,9 @@ class TeReoptimiser:
         self._idle_since = {}     # auto path id -> first idle pass
         # pair -> (when, {link: Mbit/s}) it was just placed on: not in the
         # measurements yet, so counted by every later what-if until the
-        # peak window has seen it (eval 2026-11-02: three pairs piled onto
-        # one spine because each check read the fabric before the others)
+        # peak window has seen it (without this, several pairs could pile
+        # onto one spine because each check read the fabric before the
+        # others)
         self._pending = {}
 
     def check(self):
@@ -156,14 +157,14 @@ class TeReoptimiser:
             return
         # the link-state history once per pass, for every caller below: it
         # was read 3 times idle and once more per candidate move, most of
-        # the pass's CPU (PLAN-C4-OPTIMISATION O1)
+        # the pass's CPU
         hist = plugin._history(ctx)
         view = plugin._link_state_view(ctx, hist)
         congested = self._congested(ctx, hist)
         now = timeutils.utcnow()
         hold = now - datetime.timedelta(seconds=conf.te_reopt_hold_down)
         # an entry at or before `hold` no longer holds anything down: drop
-        # it, or every pair ever moved stays here (audit 2026-11-02 6)
+        # it, or every pair ever moved stays here
         self._moved = {k: t for k, t in self._moved.items() if t > hold}
         seen = now - datetime.timedelta(seconds=conf.link_state_window)
         self._pending = {k: v for k, v in self._pending.items()
@@ -185,7 +186,6 @@ class TeReoptimiser:
                 break
             # a pair moved off an earlier link has left this one too: two
             # elephants sharing two links were both moved, one per link
-            # (PLAN-C4-OPTIMISATION X3)
             load = congested[link] - sum(pr['links'].get(link, 0.0)
                                          for pr in moved.values())
             limit = conf.te_reopt_low * plugin.capacity[link]
@@ -201,13 +201,13 @@ class TeReoptimiser:
                          {'l': '%s>%s' % link, 'm': load})
 
     # ------------------------------------------------------------------
-    # U-f: VM pairs (PLAN-UNRESERVED-STEERING steps 6-7)
+    # VM pairs
     # ------------------------------------------------------------------
     def _used(self, measured, own, key=None):
         """{link: Mbit/s held}: the measured load, own traffic off.
 
         measured: the pass's _measured_load. own: {link: Mbit/s} of the
-        pair being placed, as the fabric measured it (L10). Plus what the
+        pair being placed, as the fabric measured it. Plus what the
         other pairs placed in
         the last link_state_window add to their new links (_pending): the
         fabric has not shown it yet. Counting it twice for a while once it
@@ -296,7 +296,7 @@ class TeReoptimiser:
         return moves, load
 
     def _room_for_another(self, e, autos, host_of):
-        """The caps (A9): auto paths in all, steered VMs per node."""
+        """The caps: auto paths in all, steered VMs per node."""
         conf = self._plugin.conf
         if len(autos) >= conf.te_auto_max_paths:
             LOG.info("SRv6 TE re-optimisation: te_auto_max_paths (%d) "
@@ -315,7 +315,7 @@ class TeReoptimiser:
         return True
 
     def _release(self, ctx, pairs, congested, dead, measured, now, hold):
-        """Release the auto paths no longer needed (A5). Returns releases."""
+        """Release the auto paths no longer needed. Returns releases."""
         plugin, conf = self._plugin, self._plugin.conf
         autos = te_db.get_all_te_paths(ctx, {'origin': [te_def.ORIGIN_AUTO]})
         alive = {p['id'] for p in autos}

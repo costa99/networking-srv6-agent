@@ -273,7 +273,7 @@ class TestSidRules(Seg6ArgvTestCase):
 
 
 class TestAddressNoDad(Seg6ArgvTestCase):
-    """F12: the IPv6 gateway address skips duplicate address detection."""
+    """The IPv6 gateway address skips duplicate address detection."""
 
     def test_argv(self):
         seg6.add_address_nodad('svp-7-100', 'fd98:1::/64')
@@ -288,7 +288,7 @@ class TestAddressNoDad(Seg6ArgvTestCase):
 
 
 class TestLocalRule(Seg6ArgvTestCase):
-    """F7: moving the kernel's `local` rule after l3mdev."""
+    """Moving the kernel's `local` rule after l3mdev."""
 
     def test_prefs_of_the_plain_local_rule_only(self):
         self.ip_route_cmd.return_value = (
@@ -346,8 +346,7 @@ class TestLocatorRoute(Seg6ArgvTestCase):
 class TestMicroSidArgv(Seg6ArgvTestCase):
     """The microSID vectors.
 
-    As checked against kernel 7.0 / iproute2 6.1 on node 2 on 2026-10-02
-    (USID-PLAN.md s2.3).
+    As checked against kernel 7.0 / iproute2 6.1.
     """
 
     def test_encap_red(self):
@@ -469,7 +468,7 @@ class TestProbeCapabilities(Seg6ArgvTestCase):
 
 
 class TestSteerRules(Seg6ArgvTestCase):
-    """A source VM's rules into its steer table (PLAN-UNRESERVED-STEERING)."""
+    """A source VM's rules into its steer table."""
 
     def test_add_v4(self):
         seg6.add_steer_rule('10.91.1.11/32', 'svp-58112-3', 75536)

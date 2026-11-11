@@ -14,7 +14,7 @@
 
 """contract drop te bandwidth
 
-Bandwidth reservations are gone (PLAN-REMOVE-BANDWIDTH): a TE path is its
+Bandwidth reservations are gone: a TE path is its
 waypoint list only. Existing reservations become plain paths with the hops
 they had.
 

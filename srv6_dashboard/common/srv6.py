@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Formatting shared by the project and admin panels (FEATURE §6.2)."""
+"""Formatting shared by the project and admin panels."""
 
 from django.urls import reverse
 from django.utils import html

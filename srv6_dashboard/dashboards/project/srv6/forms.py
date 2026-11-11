@@ -12,11 +12,11 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""Create, rename, and associate-network forms (FEATURE §5.2).
+"""Create, rename, and associate-network forms.
 
 Each handle() makes exactly one write call. On failure it reports through
-exceptions.handle(), which puts the Neutron error text -- F3's "already
-attached to SRv6 domain ...", F10's overlapping subnet, a 403 -- in front of
+exceptions.handle(), which puts the Neutron error text -- "already
+attached to SRv6 domain ...", an overlapping subnet, a 403 -- in front of
 the user and redirects; the form never second-guesses the server.
 """
 
@@ -38,8 +38,7 @@ class CreateDomainForm(forms.SelfHandlingForm):
     name = forms.CharField(max_length=255, label=_("Name"))
     srv6_behavior = forms.ThemableChoiceField(
         label=_("SRv6 behavior"),
-        # The server's own list (D12): a value it would refuse is never
-        # offered.
+        # The server's own list: a value it would refuse is never offered.
         choices=[(b, b) for b in constants.VALID_BEHAVIORS],
         initial=constants.BEHAVIOR_END_DT46,
         help_text=srv6_common.BEHAVIOR_HELP)
@@ -103,7 +102,7 @@ class AssociateNetworkForm(forms.SelfHandlingForm):
 
     @staticmethod
     def _choices(request, project_id):
-        """The networks this domain could take, by name (FEATURE D16).
+        """The networks this domain could take, by name.
 
         Offered: the domain project's own networks, minus external ones
         and minus any already in one of the project's domains. The plugin

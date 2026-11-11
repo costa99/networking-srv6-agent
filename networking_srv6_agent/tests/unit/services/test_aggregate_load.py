@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
-"""PLAN-UNRESERVED-STEERING step 2: /v2.0/srv6_aggregate_loads.
+"""/v2.0/srv6_aggregate_loads.
 
 Three layers: the REST resource end to end (Neutron's harness, a real
 database, the policy from the entry point, the server clock pinned); the
@@ -40,7 +40,7 @@ AG = 'srv6_aggregate_loads'
 T0 = datetime.datetime(2026, 11, 2, 12, 0, 0)
 CAPACITY = {('s2', 'l3'): 80, ('l3', 's2'): 80,
             ('l1', 's2'): 80, ('s2', 'l1'): 80}
-# the GATE A run: pa1 -> pb3 steered via s2, pa1 -> pb4 direct
+# a measured run: pa1 -> pb3 steered via s2, pa1 -> pb4 direct
 DECAP3 = 'fc00:0:3:e300::'
 PA1, PB3, PB4 = '10.91.1.11', '10.91.2.13', '10.91.2.14'
 
@@ -196,7 +196,7 @@ class TestView(AggregateRestTestCase):
         self.assertEqual(1, len(self._list()))
 
     def test_a_pair_missing_from_its_reporters_last_report_is_gone(self):
-        # GATE B: ECMP moved pb1>pa4 off l1>s2; l1 stopped reporting it,
+        # Seen live: ECMP moved pb1>pa4 off l1>s2; l1 stopped reporting it,
         # but its last row was still fresh.
         def report(*pairs):
             req = self.new_create_request('srv6_link_states', {

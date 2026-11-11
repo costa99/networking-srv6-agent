@@ -88,7 +88,7 @@ class SRv6DomainNetAssociation(model_base.BASEV2, model_base.HasId):
     # class body as a bare expression and therefore creates no constraint at
     # all. Attaching the same network twice is silently allowed upstream.
     #
-    # network_id alone is unique too (F3, revision c2b7c83c3ad0): a network
+    # network_id alone is unique too (revision c2b7c83c3ad0): a network
     # belongs to one domain. The plugin checks first; this closes the race.
     __table_args__ = (
         sa.UniqueConstraint(
@@ -250,7 +250,7 @@ def delete_net_assoc(context, assoc_id, domain_id):
 
 @db_api.CONTEXT_READER
 def get_domain_ids_for_network(context, network_id):
-    """Which domains a network belongs to: one at most since F3.
+    """Which domains a network belongs to: one at most.
 
     Still a list: a database upgraded from before the constraint may hold
     more, and every caller has to see them.

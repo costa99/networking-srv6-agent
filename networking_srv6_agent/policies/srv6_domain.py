@@ -15,10 +15,10 @@
 """Policies for SRv6 domains.
 
 A domain is a project resource: its project creates, reads and deletes it.
-The one exception is `sid_function`, readable by admins only (decided
-2026-09-10). It is half of an underlay SID -- infrastructure vocabulary like
-the locators. Neutron's attribute-level GET check drops
-the field from a non-admin's response; the request itself still succeeds.
+The one exception is `sid_function`, readable by admins only. It is half
+of an underlay SID -- infrastructure vocabulary like the locators.
+Neutron's attribute-level GET check drops the field from a non-admin's
+response; the request itself still succeeds.
 
 The personas are neutron_lib.policy.rules, the live ones, not the
 RULE_ADMIN_OR_OWNER family that neutron-lib now files under deprecated.

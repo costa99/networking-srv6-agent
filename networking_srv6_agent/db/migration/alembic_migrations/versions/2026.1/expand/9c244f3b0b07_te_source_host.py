@@ -14,7 +14,7 @@
 
 """expand te source host
 
-A TE path may name the ingress node it applies to (FEATURE-TE-SOURCE-HOST).
+A TE path may name the ingress node it applies to.
 
     srv6_te_paths.source_host     new, NOT NULL DEFAULT '': '' is "any
                                   ingress", the meaning of every existing row

@@ -25,7 +25,7 @@ class Srv6(horizon.Panel):
     POLICY_CHECK_FUNCTION = openstack_auth.policy.check) the dashboard
     gates its URLs only through `permissions`, which it then does not set,
     and each panel must declare its own rule -- as every core admin panel
-    does. Found live: without it a tenant opened this page (FEATURE D23).
+    does. Without it a tenant could open this page.
     """
 
     name = _("SRv6")

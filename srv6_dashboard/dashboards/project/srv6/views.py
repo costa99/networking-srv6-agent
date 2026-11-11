@@ -14,8 +14,7 @@
 
 """Project > Network > SRv6 Domains: the views behind each URL.
 
-Which API calls each view makes, in order, is listed in FEATURE §5.2. The
-admin panel subclasses the form and detail views here, overriding the
+The admin panel subclasses the form and detail views here, overriding the
 class attributes ending in _url and the form, table and tab classes.
 """
 
@@ -37,7 +36,7 @@ from srv6_dashboard.dashboards.project.srv6 import tabs as srv6_tabs
 def add_network_names(request, domains, **network_filters):
     """Put the {id: name} map of networks on each domain, for its column.
 
-    One network request for the whole table (FEATURE D15), and none when
+    One network request for the whole table, and none when
     no domain has a network. The admin panel calls it too.
     """
     if not any(d.networks for d in domains):
@@ -61,7 +60,7 @@ class IndexView(tables.DataTableView):
 
     def get_data(self):
         # The project panel shows the current project's domains, even to
-        # an admin, as every Project panel does (FEATURE D14). Without the
+        # an admin, as every Project panel does. Without the
         # filter an admin would see every project's domains here.
         project_id = self.request.user.project_id
         try:

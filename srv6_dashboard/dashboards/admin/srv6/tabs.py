@@ -116,7 +116,7 @@ class AdminSrv6Tabs(tabs.TabGroup):
         domains twice.
         """
         try:
-            # No project filter: every project's domains (D14).
+            # No project filter: every project's domains.
             return srv6_api.domain_list(self.request)
         except Exception:
             exceptions.handle(self.request,

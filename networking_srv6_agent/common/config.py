@@ -141,7 +141,7 @@ srv6_server_opts = [
         min=1,
         help=_("Automatic paths created, moved or released per "
                "re-optimisation pass at most.")),
-    # --- U-f: steering heavy VM pairs (PLAN-UNRESERVED-STEERING)
+    # --- automatic steering of heavy VM pairs
     cfg.BoolOpt(
         'te_auto_steering',
         default=True,
@@ -223,7 +223,7 @@ srv6_agent_opts = [
 
 # Neutron's own group, where it looks up quota_<resource> for every
 # registered quota resource; without this option srv6_domain fell back to
-# default_quota, unlimited (audit 2026-11-02b finding 1).
+# default_quota, unlimited.
 QUOTAS_GROUP = 'QUOTAS'
 
 quota_opts = [
