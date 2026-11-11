@@ -58,8 +58,7 @@ The link map has one line per neighbour: <interface> <this node>
 topology_file). The credentials file holds openrc-style lines (export
 optional): OS_AUTH_URL, OS_USERNAME, OS_PASSWORD, OS_PROJECT_NAME and
 optionally OS_USER_DOMAIN_ID, OS_PROJECT_DOMAIN_ID (default "default").
-On the Clos test bed, live-tests/deploy/clos/clos.sh push installs it as
-srv6-fabric-agent.service, with the map from clos.py links <node>.
+Run it as a service on every fabric node, with the map of that node.
 Standard library only.
 """
 import argparse

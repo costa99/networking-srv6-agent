@@ -18,15 +18,6 @@ ChangeLog
 private-docs/
 /*.md
 live-tests/*
-# the Clos test bed's builder and its topology (git re-includes a file only if
-# every parent directory is re-included first)
-!live-tests/deploy/
-live-tests/deploy/*
-!live-tests/deploy/clos/
-live-tests/deploy/clos/*
-!live-tests/deploy/clos/clos.py
-!live-tests/deploy/clos/clos.sh
-!live-tests/deploy/clos/clos.topo
 Claude outputs/
 .ua/
 .claude/
