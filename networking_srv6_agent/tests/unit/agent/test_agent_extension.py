@@ -37,6 +37,7 @@ import oslo_messaging
 from oslo_utils import uuidutils
 
 from networking_srv6_agent.agent import agent_extension
+from networking_srv6_agent.agent import dataplane as dp
 from networking_srv6_agent.services import rpc as server_rpc
 
 
@@ -83,7 +84,7 @@ class AgentExtensionTestCaseBase(base.BaseTestCase):
         self.ext.host = HOST
         self.ext.context = mock.Mock()
         self.ext.domains = {}
-        self.ext.dormant = set()
+        self.ext.dormant = {}
         self.ext.locators = {}
         self.ext.tombstones = {}
         self.ext._last_sync = None
@@ -91,7 +92,11 @@ class AgentExtensionTestCaseBase(base.BaseTestCase):
         self.ext.vlan_manager = mock.Mock()
         # No network is local unless a test says so.
         self.ext.vlan_manager.get_segments.return_value = {}
-        self.ext.dataplane = mock.Mock()
+        # Specced, so an assertion on a method the dataplane no longer has
+        # fails instead of passing on an auto-created attribute.
+        self.ext.dataplane = mock.create_autospec(dp.Srv6LinuxDataplane,
+                                                  instance=True)
+        self.ext.dataplane.capabilities = []
         self.ext.dataplane.present_function_ids.return_value = set()
         # OVSDB's view of the live ports (network -> VLANs): net1, the
         # network of _attached(), has a port here unless a test says
@@ -199,7 +204,7 @@ class TestSyncState(AgentExtensionTestCaseBase):
         self.cctxt.call.return_value = []
         self.ext._sync_state()
         self.ext.dataplane.delete_domain.assert_called_once_with(
-            self.domain_id)
+            self.domain_id, 7, 10007)
         self.assertEqual({}, self.ext.domains)
 
     def test_rpc_failure_leaves_state_alone(self):
@@ -501,6 +506,21 @@ class TestRpcHandlers(AgentExtensionTestCaseBase):
         self.ext.dataplane.delete_domain.assert_called_once_with(
             self.domain_id, 7, 10007)
         self.assertEqual({}, self.ext.domains)
+
+    def test_domain_deleted_with_nothing_here_deletes_nothing(self):
+        self.ext.dormant[self.domain_id] = _attached(self.domain_id)
+        self.ext.domain_deleted(self.ext.context, domain_id=self.domain_id,
+                                function_id=7, vrf_table=10007)
+        self.ext.dataplane.delete_domain.assert_not_called()
+        self.assertEqual({}, self.ext.dormant)
+
+    def test_domain_deleted_after_a_restart_removes_kernel_state(self):
+        # Not in memory, but its VRF is still in the kernel.
+        self.ext.dataplane.present_function_ids.return_value = {7}
+        self.ext.domain_deleted(self.ext.context, domain_id=self.domain_id,
+                                function_id=7, vrf_table=10007)
+        self.ext.dataplane.delete_domain.assert_called_once_with(
+            self.domain_id, 7, 10007)
 
     def test_domain_deleted_failure_still_forgets_the_domain(self):
         self.ext.domains[self.domain_id] = _payload(self.domain_id)
@@ -1224,7 +1244,7 @@ class TestDormantDomains(AgentExtensionTestCaseBase):
         self.ext.dataplane.ensure_domain.assert_not_called()
         self.ext.dataplane.sync_routes.assert_not_called()
         self.ext.dataplane.delete_domain.assert_not_called()
-        self.assertIn(self.domain_id, self.ext.domains)
+        self.assertNotIn(self.domain_id, self.ext.domains)
         self.assertIn(self.domain_id, self.ext.dormant)
 
     def test_encoding_and_locators_still_apply(self):
@@ -1252,6 +1272,18 @@ class TestDormantDomains(AgentExtensionTestCaseBase):
             self.domain_id, 7, 'End.DT46')
         self.ext.dataplane.sync_routes.assert_called_once()
         self.assertNotIn(self.domain_id, self.ext.dormant)
+        self.assertIn(self.domain_id, self.ext.domains)
+
+    def test_a_failed_activation_stays_dormant(self):
+        # Not half-promoted: as programmed, with the dormant payload, its
+        # routes_updated would be merged into routes it never had.
+        self._dormant()
+        self.ext.dataplane.local_network_vlans.return_value = {'net1': {100}}
+        self.ext.dataplane.ensure_domain.side_effect = RuntimeError('seal')
+        self.ext.handle_port(self.ext.context,
+                             {'network_id': 'net1', 'port_id': 'p1'})
+        self.assertIn(self.domain_id, self.ext.dormant)
+        self.assertNotIn(self.domain_id, self.ext.domains)
 
     def test_routes_updated_neither_programs_nor_resyncs(self):
         self._dormant()
@@ -1282,7 +1314,7 @@ class TestDormantDomains(AgentExtensionTestCaseBase):
         newer = _attached(self.domain_id, routes=[
             {'prefix': '10.0.0.5/32', 'host': 'node2', 'port_id': 'p5'}])
         self.ext.domain_updated(self.ext.context, domain=newer)
-        self.assertIs(newer, self.ext.domains[self.domain_id])
+        self.assertIs(newer, self.ext.dormant[self.domain_id])
         self.ext.dataplane.ensure_domain.assert_not_called()
         self.ext.dataplane.delete_domain.assert_not_called()
 

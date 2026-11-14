@@ -109,13 +109,14 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
 
         self.host = cfg.CONF.host
         self.context = n_context.get_admin_context_without_session()
-        # domain_id -> payload, so handle_port can answer "is this network
-        # in a domain?" without an RPC round trip on every port event.
+        # Every domain the server has told us of is in exactly one of these
+        # two maps, domain_id -> payload, so handle_port can answer "is
+        # this network in a domain?" without an RPC round trip on every
+        # port event. domains: programmed on this node. dormant: known but
+        # not programmed, with no port of theirs here (_make_dormant); kept
+        # known so their routes_updated cause no resync.
         self.domains = {}
-        # ids of the domains in self.domains that this node does not program:
-        # no port of theirs here (_make_dormant). Kept known, so their
-        # routes_updated cause no resync.
-        self.dormant = set()
+        self.dormant = {}
         self.locators = {}
         # domain_id -> monotonic time of its domain_deleted
         self.tombstones = {}
@@ -264,15 +265,16 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         # One domain that fails, here or below, must not stop the others:
         # at start the error would also leave initialize() before the
         # resync loop exists, so nothing would ever retry it.
-        for stale_id in set(self.domains) - set(wanted):
-            LOG.info("SRv6: domain %s no longer present; removing", stale_id)
+        for stale_id in (set(self.domains) | set(self.dormant)) - set(wanted):
+            stale = self.domains.get(stale_id) or self.dormant[stale_id]
             try:
-                self.dataplane.delete_domain(stale_id)
+                self._delete_state(stale_id, stale['function_id'],
+                                   stale.get('vrf_table'),
+                                   'domain no longer on the server')
             except Exception:
                 LOG.exception("SRv6: could not remove domain %s; the kernel "
                               "garbage collector retries it", stale_id)
-            self.domains.pop(stale_id, None)
-            self.dormant.discard(stale_id)
+            self._forget(stale_id)
         self._collect_kernel_orphans(wanted)
         for payload in wanted.values():
             try:
@@ -308,20 +310,28 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         gets one. Unlike a delete this sets no tombstone: the domain may get
         a network again.
         """
-        domain_id = payload['id']
-        function_id = payload['function_id']
-        present = self.dataplane.present_function_ids() or set()
-        programmed = domain_id in self.domains and \
-            domain_id not in self.dormant
-        self.dormant.discard(domain_id)
-        if not programmed and function_id not in present:
-            self.domains.pop(domain_id, None)
+        self._delete_state(payload['id'], payload['function_id'],
+                           payload.get('vrf_table'), 'domain has no network')
+        self._forget(payload['id'])
+
+    def _delete_state(self, domain_id, function_id, vrf_table, why):
+        """Delete what this node holds for the domain, if anything.
+
+        It holds something if the domain is programmed here, or if the
+        kernel has a VRF or SID rule of its function id: left from before a
+        restart, or by an earlier build. A failure raises, before the caller
+        changes the domain's record, so the next pass retries.
+        """
+        if domain_id not in self.domains and function_id not in (
+                self.dataplane.present_function_ids() or set()):
             return
-        LOG.info("SRv6: domain %s has no network; removing its state on "
-                 "this node", domain_id)
-        self.dataplane.delete_domain(domain_id, function_id,
-                                     payload.get('vrf_table'))
+        LOG.info("SRv6: %(why)s; removing the state of domain %(d)s on this "
+                 "node", {'why': why, 'd': domain_id})
+        self.dataplane.delete_domain(domain_id, function_id, vrf_table)
+
+    def _forget(self, domain_id):
         self.domains.pop(domain_id, None)
+        self.dormant.pop(domain_id, None)
 
     def _is_local(self, payload, present):
         """Whether a network of the domain has a live port here.
@@ -343,17 +353,12 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         is removed.
         """
         domain_id = payload['id']
-        function_id = payload['function_id']
         if domain_id not in self.dormant:
-            programmed = domain_id in self.domains
-            if programmed or function_id in (
-                    self.dataplane.present_function_ids() or set()):
-                LOG.info("SRv6: no port of domain %s on this node; removing "
-                         "its state", domain_id)
-                self.dataplane.delete_domain(domain_id, function_id,
-                                             payload.get('vrf_table'))
-        self.domains[domain_id] = payload
-        self.dormant.add(domain_id)
+            self._delete_state(domain_id, payload['function_id'],
+                               payload.get('vrf_table'),
+                               'no port of the domain on this node')
+        self._forget(domain_id)
+        self.dormant[domain_id] = payload
 
     def _collect_kernel_orphans(self, wanted):
         """Delete VRFs in the kernel that no domain on the server owns.
@@ -469,8 +474,6 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         """
         present = self.dataplane.local_network_vlans()
         for domain_id, payload in list(self.domains.items()):
-            if domain_id in self.dormant:
-                continue
             try:
                 self._reconcile_domain(domain_id, payload, present)
             except Exception:
@@ -534,13 +537,10 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             self._retire_domain(payload)
             return encoding_changed
         present = self.dataplane.local_network_vlans()
-        programmed = domain_id in self.domains and \
-            domain_id not in self.dormant
         if not self._is_local(payload, present) and (
-                from_sync or not programmed):
+                from_sync or domain_id not in self.domains):
             self._make_dormant(payload)
             return encoding_changed
-        self.dormant.discard(domain_id)
         self.dataplane.ensure_domain(domain_id, payload['function_id'],
                                      payload['behavior'])
         # What to KEEP comes from OVSDB (local_network_vlans): it is right
@@ -565,6 +565,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             domain_id, payload.get('routes') or [], self.locators, self.host,
             mtus=self._network_mtus(payload),
             gateway_ports=self._gateway_ports(payload, vlans))
+        self._forget(domain_id)
         self.domains[domain_id] = payload
         return encoding_changed
 
@@ -611,16 +612,6 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         if not self._check_version(payload_version):
             return
         with self._lock:
-            if domain_id not in self.domains:
-                # A route for a domain we have never heard of means our view
-                # is stale; a full sync is cheaper to reason about than
-                # building partial state from an incremental message. At most
-                # one per holdoff: a domain this node failed to apply is never
-                # in self.domains, and every port event of it, anywhere in
-                # the cloud, was one full sync here.
-                self._sync_unless_recent('routes for unknown domain %s'
-                                         % domain_id)
-                return
             arriving = [r for r in add or [] if r.get('host') == self.host]
             if domain_id in self.dormant:
                 # Not programmed here; activation takes the routes from a
@@ -632,6 +623,16 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                              "arrives; resyncing to program it", domain_id)
                     self._do_sync_state()
                     self._announce_gateways(domain_id, arriving)
+                return
+            if domain_id not in self.domains:
+                # A route for a domain we have never heard of means our view
+                # is stale; a full sync is cheaper to reason about than
+                # building partial state from an incremental message. At most
+                # one per holdoff: a domain this node failed to apply is never
+                # in self.domains, and every port event of it, anywhere in
+                # the cloud, was one full sync here.
+                self._sync_unless_recent('routes for unknown domain %s'
+                                         % domain_id)
                 return
             try:
                 # Merged into the cached payload and reconciled whole, so a
@@ -657,7 +658,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         handover. IPv4 only (an unsolicited NA for IPv6 is not sent yet).
         """
         payload = self.domains.get(domain_id)
-        if not routes or not payload or domain_id in self.dormant:
+        if not routes or not payload:
             return
         ports = self._gateway_ports(payload)
         jobs = set()
@@ -695,13 +696,12 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
         LOG.info("SRv6: domain_deleted %s", domain_id)
         with self._lock:
             self._tombstone(domain_id)
-            self.dormant.discard(domain_id)
             try:
-                self.dataplane.delete_domain(domain_id, function_id,
-                                             vrf_table)
+                self._delete_state(domain_id, function_id, vrf_table,
+                                   'domain deleted')
             except Exception:
                 LOG.exception("SRv6: failed to delete domain %s", domain_id)
-            self.domains.pop(domain_id, None)
+            self._forget(domain_id)
 
     # ------------------------------------------------------------------
     # L2 agent extension interface
@@ -722,15 +722,16 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             # network has just been given. delete_port normally removed
             # it already; this covers a removal the agent never saw.
             self._reconcile_all_gateways()
-            known = activate = False
+            activate = any(
+                network['network_id'] == network_id
+                for payload in self.dormant.values()
+                for network in payload.get('networks') or [])
+            known = activate
             for domain_id, payload in self.domains.items():
                 for network in payload.get('networks') or []:
                     if network['network_id'] != network_id:
                         continue
                     known = True
-                    if domain_id in self.dormant:
-                        activate = True
-                        continue
                     local_vlan = self._local_vlan_for(network_id)
                     if local_vlan is None:
                         continue

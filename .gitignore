@@ -21,7 +21,6 @@ live-tests/*
 Claude outputs/
 .ua/
 .claude/
-.vexp/
 .vscode/
 
 
