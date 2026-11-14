@@ -67,6 +67,20 @@ UNKNOWN_NETWORK_SYNC_HOLDOFF = 60
 TOMBSTONE_SECONDS = 3600
 
 
+def _merge_routes(routes, add, remove):
+    """A domain's route list after an incremental update, keyed by prefix.
+
+    Remove before add: a migration removes and adds the same prefix in one
+    message, and the add must win.
+    """
+    merged = {dp._normalise_prefix(r['prefix']): r for r in routes}
+    for route in remove:
+        merged.pop(dp._normalise_prefix(route['prefix']), None)
+    for route in add:
+        merged[dp._normalise_prefix(route['prefix'])] = route
+    return list(merged.values())
+
+
 class Srv6AgentExtension(l2_extension.L2AgentExtension):
 
     SUPPORTED_RESOURCE_TYPES = []
@@ -620,16 +634,16 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                     self._announce_gateways(domain_id, arriving)
                 return
             try:
-                if remove:
-                    self.dataplane.remove_routes(domain_id, remove)
-                if add:
-                    # The MTUs come from the cached domain payload: an
-                    # incremental message carries routes, not networks.
-                    payload = self.domains[domain_id]
-                    self.dataplane.add_routes(
-                        domain_id, add, self.locators, self.host,
-                        mtus=self._network_mtus(payload),
-                        gateway_ports=self._gateway_ports(payload))
+                # Merged into the cached payload and reconciled whole, so a
+                # port event takes the same path as a full sync.
+                payload = dict(self.domains[domain_id], routes=_merge_routes(
+                    self.domains[domain_id].get('routes') or [],
+                    add or [], remove or []))
+                self.domains[domain_id] = payload
+                self.dataplane.sync_routes(
+                    domain_id, payload['routes'], self.locators, self.host,
+                    mtus=self._network_mtus(payload),
+                    gateway_ports=self._gateway_ports(payload))
             except Exception:
                 LOG.exception("SRv6: failed to apply routes_updated for %s",
                               domain_id)

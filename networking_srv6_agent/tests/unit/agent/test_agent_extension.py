@@ -160,7 +160,7 @@ class TestLockDiscipline(AgentExtensionTestCaseBase):
             'routes_updated', self.ext.routes_updated, self.ext.context,
             domain_id='no-such-domain', add=[{'prefix': '10.0.0.5/32'}])
         self.assertTrue(self.cctxt.call.called)
-        self.ext.dataplane.add_routes.assert_not_called()
+        self.ext.dataplane.sync_routes.assert_not_called()
 
     def test_domain_updated_releases_the_lock(self):
         self._run_without_deadlocking(
@@ -451,23 +451,46 @@ class TestRpcHandlers(AgentExtensionTestCaseBase):
         self.ext.domain_updated(self.ext.context, domain=None)
         self.ext.dataplane.ensure_domain.assert_not_called()
 
-    def test_routes_are_removed_before_they_are_added(self):
-        # The reverse order would leave a window in which a moved address
-        # is claimed by two nodes.
-        self.ext.domains[self.domain_id] = _payload(self.domain_id)
-        order = []
-        self.ext.dataplane.remove_routes.side_effect = \
-            lambda *a, **kw: order.append('remove')
-        self.ext.dataplane.add_routes.side_effect = \
-            lambda *a, **kw: order.append('add')
+    def _routes_updated(self, add=(), remove=()):
         self.ext.routes_updated(self.ext.context, domain_id=self.domain_id,
-                                add=[{'prefix': '10.0.0.5/32'}],
-                                remove=[{'prefix': '10.0.0.6/32'}])
-        self.assertEqual(['remove', 'add'], order)
+                                add=list(add), remove=list(remove))
+        return self.ext.dataplane.sync_routes.call_args[0][1]
+
+    def test_routes_updated_reconciles_the_merged_domain(self):
+        # A port event takes the full-sync path, so the two cannot drift.
+        self.ext.domains[self.domain_id] = dict(
+            _payload(self.domain_id),
+            routes=[{'prefix': '10.0.0.6/32', 'host': 'node2'},
+                    {'prefix': '10.0.0.7/32', 'host': 'node2'}])
+        routes = self._routes_updated(
+            add=[{'prefix': '10.0.0.5/32', 'host': 'node3'}],
+            remove=[{'prefix': '10.0.0.6/32'}])
+        self.assertEqual(['10.0.0.5/32', '10.0.0.7/32'],
+                         sorted(r['prefix'] for r in routes))
+        self.assertEqual(routes, self.ext.domains[self.domain_id]['routes'])
+
+    def test_a_moved_address_takes_its_new_host(self):
+        # Removed and added in one message: the reverse order would leave
+        # the address with no route.
+        self.ext.domains[self.domain_id] = dict(
+            _payload(self.domain_id),
+            routes=[{'prefix': '10.0.0.5/32', 'host': 'node2'}])
+        self.assertEqual(
+            [{'prefix': '10.0.0.5/32', 'host': 'node1'}],
+            self._routes_updated(
+                add=[{'prefix': '10.0.0.5/32', 'host': 'node1'}],
+                remove=[{'prefix': '10.0.0.5/32', 'host': 'node2'}]))
+
+    def test_a_host_route_matches_its_bare_spelling(self):
+        self.ext.domains[self.domain_id] = dict(
+            _payload(self.domain_id),
+            routes=[{'prefix': '10.0.0.5/32', 'host': 'node2'}])
+        self.assertEqual([], self._routes_updated(
+            remove=[{'prefix': '10.0.0.5'}]))
 
     def test_routes_updated_failure_is_contained(self):
         self.ext.domains[self.domain_id] = _payload(self.domain_id)
-        self.ext.dataplane.add_routes.side_effect = RuntimeError('boom')
+        self.ext.dataplane.sync_routes.side_effect = RuntimeError('boom')
         self.ext.routes_updated(self.ext.context, domain_id=self.domain_id,
                                 add=[{'prefix': '10.0.0.5/32'}])
 
@@ -618,7 +641,6 @@ class TestDeletePort(AgentExtensionTestCaseBase):
         # The server withdraws the address through routes_updated; removing
         # it here would race that message.
         self._delete()
-        self.ext.dataplane.remove_routes.assert_not_called()
         self.ext.dataplane.sync_routes.assert_not_called()
 
     def test_delete_port_takes_and_releases_the_lock(self):
@@ -804,7 +826,7 @@ class TestRouteMtus(AgentExtensionTestCaseBase):
             add=[{'prefix': '10.0.0.5/32', 'network_id': 'net1'}])
         self.assertEqual(
             {'net1': 1400},
-            self.ext.dataplane.add_routes.call_args[1]['mtus'])
+            self.ext.dataplane.sync_routes.call_args[1]['mtus'])
 
 
 class TestGatewayAnnouncement(AgentExtensionTestCaseBase):
@@ -1165,7 +1187,7 @@ class TestUnknownNetworkHoldoff(AgentExtensionTestCaseBase):
                                         domain_id=self.domain_id,
                                         add=[{'prefix': '10.0.0.5/32'}])
         self.cctxt.call.assert_called_once()   # the retry after the holdoff
-        self.ext.dataplane.add_routes.assert_not_called()
+        self.ext.dataplane.sync_routes.assert_not_called()
 
     def test_a_failed_sync_does_not_start_the_holdoff(self):
         self.cctxt.call.side_effect = Exception('no route to server')
@@ -1238,8 +1260,7 @@ class TestDormantDomains(AgentExtensionTestCaseBase):
             add=[{'prefix': '10.0.0.5/32', 'host': 'node2',
                   'port_id': 'p5'}],
             remove=[{'prefix': '10.0.0.6/32'}])
-        self.ext.dataplane.add_routes.assert_not_called()
-        self.ext.dataplane.remove_routes.assert_not_called()
+        self.ext.dataplane.sync_routes.assert_not_called()
         self.cctxt.call.assert_not_called()
 
     def test_an_arriving_instance_wakes_it_at_once(self):

@@ -175,6 +175,10 @@ def _normalise_prefix(prefix):
         return prefix
 
 
+def _is_v6(prefix):
+    return ':' in prefix.split('/')[0]
+
+
 def _locator_networks(locators):
     """Sorted, de-duplicated locator networks; an unparseable one is skipped.
 
@@ -590,7 +594,7 @@ class Srv6LinuxDataplane:
         A full replace every time: idempotent, and it restores a table
         somebody deleted by hand. Returns whether the filter is active.
         Any failure, a missing nft included, leaves it INACTIVE -- and
-        _install_routes then lets no VRF reach an End SID. There is no knob
+        sync_routes then lets no VRF reach an End SID. There is no knob
         to switch it off.
         """
         networks = _locator_networks(list(locators) + [self.locator])
@@ -783,8 +787,10 @@ class Srv6LinuxDataplane:
         vrf_name = sid.vrf_name(function_id)
         table = sid.vrf_table(function_id, self.vrf_table_base)
 
-        # Steering first: its rules name the gateway ports as their iif.
-        self._remove_steering(function_id, domain_id)
+        # Reconciled to nothing first: steering, routes and SID rules, while
+        # the gateway ports and the VRF their rules name still exist.
+        self._reconcile(DomainState(domain_id, function_id, table, vrf_name),
+                        ({}, {}, set()))
 
         # The bridge, not only the in-memory map: after a restart the map is
         # empty while every svp-<fid>-* port is still on br-int.
@@ -792,15 +798,6 @@ class Srv6LinuxDataplane:
         ports.update(self._bridge_gateway_ports(function_id))
         for port_name in sorted(ports):
             self._delete_gateway_port(port_name)
-
-        # Read from the kernel, like the ports, and while the VRF still
-        # exists: the rules name it as their iif.
-        for sid_address in sorted(self._sid_rules_for(vrf_name) or ()):
-            try:
-                priv_seg6.delete_sid_rule(vrf_name, sid_address)
-            except Exception as e:
-                LOG.debug("SRv6: removing rule %(v)s -> %(s)s: %(e)s",
-                          {'v': vrf_name, 's': sid_address, 'e': e})
 
         # Both lengths whatever the encoding: one left from before a mode
         # switch would otherwise outlive the domain.
@@ -1341,116 +1338,210 @@ class Srv6LinuxDataplane:
             return by_source[local_host]
         return route.get('segments')
 
-    def add_routes(self, domain_id, routes, locators, local_host, mtus=None,
-                   gateway_ports=None):
-        """Install one encap route per remote workload address.
+    def sync_routes(self, domain_id, routes, locators, local_host, mtus=None,
+                    gateway_ports=None):
+        """Make the domain's routes, steer tables and SID rules match routes.
 
-        A route whose host is this node is skipped: the address is already
-        reachable through the gateway port's connected route, and installing
-        an encap route for it would send local traffic out to the underlay
-        and back. An encap route this node still holds for it goes: a guest
-        that live-migrated here arrives with no withdrawal of its old host
-        (the source's flap re-advertises it, then the port goes down and
-        changes host without a cast), so add(new) is the only message that
-        can clear it before the next full sync.
+        `routes` is the whole domain, every time: what it does not name is
+        removed. The agent merges an incremental routes_updated into its
+        cached payload before calling this, so a full resync and a single
+        port event take the same path and cannot drift apart.
 
-        A route may carry `segments` -- transit End SIDs the server resolved
-        from an operator's TE path -- which go before the remote decap
-        SID, and `segments_by_source`, the lists that hold only at the
-        ingress nodes it names (_segments_for). A route without either is
-        exactly the depth-1 route of the old build. `mtus` maps network_id
-        -> MTU, for the per-route check of a steered route.
+        A route whose host is this node gets no encap route: the address is
+        reachable through the gateway port's connected route. An encap route
+        this node still holds for it goes, which is also the withdraw half of
+        a live migration to this node.
 
-        Also makes sure the domain's VRF may reach the first segment of
-        every route (_install_routes adds the rule before the route that
-        needs it); only adds, like the routes.
-        Pruning is sync_routes' job.
-
-        Returns the normalised prefixes this node should hold an encap
-        route for, which is what sync_routes reconciles the table against.
-        A prefix is counted as wanted as soon as it is decided to be, not
-        when the write succeeds: a route that failed to install is absent
-        from the table anyway, and treating it as unwanted would make a
-        transient failure delete whatever is already there.
+        A route may carry `segments` (transit SIDs of a TE path, before the
+        remote decap SID), `segments_by_source` (the lists that hold only at
+        the ingress nodes it names, _segments_for) and
+        `segments_by_source_port` (a steer table per source VM bound here,
+        entered through its network's gateway port in `gateway_ports`).
+        `mtus` maps network_id -> MTU, for the per-route check.
         """
         state = self.domains.get(domain_id)
         if state is None:
-            return set()
-        wanted, _ = self._install_routes(state, routes, locators,
-                                         local_host, mtus)
-        # A source VM's path that covers a new destination: add it to the
-        # VM's steer table now; only a full sync removes anything.
-        self._sync_steering(state, routes, locators, local_host,
-                            gateway_ports, prune=False)
-        local = {_normalise_prefix(r['prefix']) for r in routes
-                 if r.get('host') == local_host}
-        if local:
-            self._remove_encap_routes(
-                state, local.__contains__,
-                "SRv6: domain %(d)s: %(p)s is local now; removing its encap "
-                "route from table %(t)s",
-                families={':' in p for p in local})
-        return wanted
+            return
+        self._reconcile(state, self._wanted(state, routes, locators,
+                                            local_host, mtus, gateway_ports))
 
-    def _install_routes(self, state, routes, locators, local_host,
-                        mtus=None):
-        """The route loop. Returns (wanted prefixes, SIDs needing a rule).
+    def _wanted(self, state, routes, locators, local_host, mtus,
+                gateway_ports):
+        """(VRF routes, steer tables per source port, SID rules) as data.
 
-        A route's outer destination is its FIRST segment. When that is the
-        remote decap SID -- no transit -- the domain's VRF needs a rule to
-        reach it. When it is a transit End SID, the VRF needs a
-        rule toward that End SID, and such a rule lets a tenant hand-craft
-        an SRH through it toward another domain's SID -- unless the edge
-        filter stops tenant packets into the SID space and tenant SRHs at
-        the gateway ports. So the rule is added only
-        while the filter is active and covers that SID. Otherwise the route
-        is installed but its outer header stays behind the seal: it fails
-        closed, and says so.
-
-        Only transit[0] ever gets a rule. The later segments are reached
-        from main by the End behaviour on each waypoint, not from this VRF.
+        A route is {normalised prefix: (prefix, segments, mode, dev)}. A
+        route with no underlay device is still wanted: it cannot be written,
+        but a lookup that failed must not delete what is there.
         """
-        domain_id = state.domain_id
-        wanted = set()
-        rule_sids = set()
+        vrf, steer, sids = {}, {}, set()
+
+        def encap(prefix, locator, transit):
+            segments, mode, rule_sid, dev = self._encap(state, prefix,
+                                                        locator, transit)
+            if rule_sid:
+                sids.add(rule_sid)
+            return prefix, segments, mode, dev
+
         for route in routes:
             host = route.get('host')
-            if host == local_host:
-                continue
-            if not locators.get(host):
-                LOG.debug("SRv6: no locator for host %s; skipping route",
-                          host)
+            locator = locators.get(host)
+            if not locator:
+                if host != local_host:
+                    LOG.debug("SRv6: no locator for host %s; skipping route",
+                              host)
                 continue
             prefix = route['prefix']
-            wanted.add(_normalise_prefix(prefix))
-            segments, mode, rule_sid, dev = self._encap(
-                state, prefix, locators[host],
-                self._segments_for(route, local_host))
-            if rule_sid and rule_sid not in rule_sids:
-                rule_sids.add(rule_sid)
-                # make before break: the VRF must reach the new first
-                # segment before the route points there, or a re-steered
-                # route drops its packets until the caller adds the rule
-                self._ensure_sid_rules(state, [rule_sid])
-            if not dev:
-                continue
-            self._check_route_mtu(prefix,
-                                  (mtus or {}).get(route.get('network_id')),
-                                  len(segments), dev=dev)
-            extra = {'mode': mode} if self.usid else {}
+            if host != local_host:
+                entry = encap(prefix, locator,
+                              self._segments_for(route, local_host))
+                vrf[_normalise_prefix(prefix)] = entry
+                if entry[3]:
+                    self._check_route_mtu(
+                        prefix, (mtus or {}).get(route.get('network_id')),
+                        len(entry[1]), dev=entry[3])
+            for port_id, vm in sorted(
+                    (route.get('segments_by_source_port') or {}).items()):
+                iif = (gateway_ports or {}).get(vm.get('network_id'))
+                if vm.get('host') != local_host or not iif:
+                    continue
+                vm_entry = steer.setdefault(port_id, {
+                    'iif': iif, 'routes': {},
+                    'prefixes': {_normalise_prefix(p)
+                                 for p in vm.get('prefixes') or []}})
+                vm_entry['routes'][_normalise_prefix(prefix)] = encap(
+                    prefix, locator, vm.get('segments') or [])
+        return vrf, steer, sids
+
+    def _reconcile(self, state, wanted):
+        """Read the kernel once, then apply make-before-break.
+
+        Adds go in the order traffic depends on them, deletes in reverse:
+        SID rules, VRF routes, steer tables, steer rules; then stale steer
+        rules, steer tables, VRF routes, SID rules. A route never points at
+        a first segment its VRF cannot reach, and a steer rule never sends
+        traffic to a table that is not filled yet.
+
+        Whatever could not be read deletes nothing that depends on it: an
+        unreadable table keeps its routes, unreadable steer rules keep the
+        steering and every SID rule (a steer table may need one).
+        """
+        vrf, steer, sids = wanted
+        have_sids = self._sid_rules_for(state.vrf_name)
+        have_vrf = self._table_routes(state.vrf_table)
+        tables, used = self._steer_tables(state.function_id)
+        claimed = ({} if tables is None else
+                   self._claim_steer_tables(state, steer, tables, used))
+
+        for sid_address in sorted(sids - (have_sids or set())):
             try:
-                priv_seg6.replace_seg6_route(
-                    prefix, segments, dev,
-                    state.vrf_table, family_v6=':' in prefix.split('/')[0],
-                    **extra)
+                priv_seg6.add_sid_rule(state.vrf_name, sid_address)
             except Exception as e:
-                LOG.error("SRv6: could not install %(p)s -> %(s)s: %(e)s",
-                          {'p': prefix, 's': segments, 'e': e})
+                LOG.error("SRv6: could not let %(v)s reach %(s)s: %(e)s. "
+                          "Traffic from this domain to that node is dropped "
+                          "at the seal until the next resync.",
+                          {'v': state.vrf_name, 's': sid_address, 'e': e})
                 continue
-            LOG.debug("SRv6: domain %(d)s %(p)s -> segs %(s)s table %(t)s",
-                      {'d': domain_id, 'p': prefix, 's': segments,
-                       't': state.vrf_table})
-        return wanted, rule_sids
+            LOG.info("SRv6: domain %(d)s may reach %(s)s via main",
+                     {'d': state.domain_id, 's': sid_address})
+        for norm in sorted(vrf):
+            self._write_route(state, state.vrf_table, *vrf[norm])
+        for port_id, table in sorted(claimed.items()):
+            for norm in sorted(steer[port_id]['routes']):
+                self._write_route(state, table,
+                                  *steer[port_id]['routes'][norm])
+        for port_id, table in sorted(claimed.items()):
+            iif = steer[port_id]['iif']
+            have = {(p, i) for p, i, _v in tables.get(table, ())}
+            for prefix in sorted(steer[port_id]['prefixes']):
+                if (prefix, iif) in have:
+                    continue
+                try:
+                    priv_seg6.add_steer_rule(prefix, iif, table,
+                                             family_v6=_is_v6(prefix))
+                except Exception as e:
+                    LOG.error("SRv6: could not steer %(p)s (port %(port)s) "
+                              "into table %(t)s: %(e)s",
+                              {'p': prefix, 'port': port_id, 't': table,
+                               'e': e})
+                    continue
+                LOG.info("SRv6: domain %(d)s: traffic from %(p)s (port "
+                         "%(port)s) now uses steer table %(t)s",
+                         {'d': state.domain_id, 'p': prefix,
+                          'port': port_id, 't': table})
+
+        for port_id, table in sorted(claimed.items()):
+            want = {(p, steer[port_id]['iif'])
+                    for p in steer[port_id]['prefixes']}
+            for prefix, iif, _v in sorted(tables.get(table, ())):
+                if (prefix, iif) not in want:
+                    self._delete_steer_rule(prefix, iif, table)
+            self._delete_routes(state, table, steer[port_id]['routes'],
+                                self._table_routes(table))
+        for table in sorted(set(tables or ()) - set(claimed.values())):
+            self._release_steer_table(state.domain_id, table, tables[table])
+        self._delete_routes(state, state.vrf_table, vrf, have_vrf)
+        if have_sids is None or tables is None:
+            return
+        for sid_address in sorted(have_sids - sids):
+            LOG.info("SRv6: domain %(d)s no longer encapsulates to %(s)s; "
+                     "removing its rule", {'d': state.domain_id,
+                                           's': sid_address})
+            try:
+                priv_seg6.delete_sid_rule(state.vrf_name, sid_address)
+            except Exception as e:
+                LOG.debug("SRv6: removing rule %(v)s -> %(s)s: %(e)s",
+                          {'v': state.vrf_name, 's': sid_address, 'e': e})
+
+    def _write_route(self, state, table, prefix, segments, mode, dev):
+        if not dev:
+            return
+        # Extra arguments only in usid mode: the encap argv stays what
+        # every earlier build made.
+        extra = {'mode': mode} if self.usid else {}
+        try:
+            priv_seg6.replace_seg6_route(prefix, segments, dev, table,
+                                         family_v6=_is_v6(prefix), **extra)
+        except Exception as e:
+            LOG.error("SRv6: could not install %(p)s -> %(s)s in table "
+                      "%(t)s: %(e)s",
+                      {'p': prefix, 's': segments, 't': table, 'e': e})
+            return
+        LOG.debug("SRv6: domain %(d)s %(p)s -> segs %(s)s table %(t)s",
+                  {'d': state.domain_id, 'p': prefix, 's': segments,
+                   't': table})
+
+    @staticmethod
+    def _table_routes(table):
+        """A table's encap routes, or None if either family is unreadable.
+
+        {normalised prefix: (as `ip route show` printed it, family_v6)}
+        """
+        present = {}
+        for family_v6 in (False, True):
+            try:
+                for prefix in priv_seg6.list_seg6_routes(table,
+                                                         family_v6=family_v6):
+                    present[_normalise_prefix(prefix)] = (prefix, family_v6)
+            except Exception as e:
+                LOG.warning("SRv6: could not read table %(t)s: %(e)s",
+                            {'t': table, 'e': e})
+                return None
+        return present
+
+    @staticmethod
+    def _delete_routes(state, table, wanted, present):
+        """Delete the encap routes of `table` that `wanted` does not name."""
+        for norm, (prefix, family_v6) in sorted((present or {}).items()):
+            if norm in wanted:
+                continue
+            LOG.info("SRv6: domain %(d)s no longer reaches %(p)s; removing "
+                     "its encap route from table %(t)s",
+                     {'d': state.domain_id, 'p': prefix, 't': table})
+            try:
+                priv_seg6.delete_route(prefix, table, family_v6=family_v6)
+            except Exception as e:
+                LOG.debug("SRv6: removing %(p)s: %(e)s",
+                          {'p': prefix, 'e': e})
 
     def _encap(self, state, prefix, locator, transit):
         """(segments, mode, rule SID or None, dev or None) of one encap route.
@@ -1466,10 +1557,15 @@ class Srv6LinuxDataplane:
         End SID, or in usid mode the first C-SID container -- which starts
         with the first hop's block and node, so it lies inside that node's
         locator and the edge filter covers it. Its SID rule is returned
-        unless the path is sealed (a transit first SID the edge filter does
-        not cover). dev is None when no underlay device leads to it: the
-        route cannot be installed (an IPv6 route via lo would be a reject
-        route, so it cannot be left to the lookup).
+        unless the path is sealed: a rule toward a transit End SID lets a
+        tenant hand-craft an SRH through it toward another domain's SID, so
+        it is added only while the edge filter is active and covers that
+        SID. Otherwise the route is installed but its outer header stays
+        behind the seal: it fails closed, and says so. Only the first
+        segment ever gets a rule; later ones are reached from main by the
+        End behaviour on each waypoint. dev is None when no underlay device
+        leads to it: the route cannot be installed (an IPv6 route via lo
+        would be a reject route, so it cannot be left to the lookup).
         """
         domain_id = state.domain_id
         remote_sid = sid.format_sid(locator, state.function_id)
@@ -1496,9 +1592,6 @@ class Srv6LinuxDataplane:
     # ------------------------------------------------------------------
     # steering by source VM
     # ------------------------------------------------------------------
-    def _steer_gateway_prefix(self, function_id):
-        return '%s%d-' % (constants.GW_PORT_PREFIX, function_id)
-
     def _steer_tables(self, function_id):
         """The steer tables in use, read from the kernel's rules.
 
@@ -1511,7 +1604,7 @@ class Srv6LinuxDataplane:
         except Exception as e:
             LOG.warning("SRv6: could not read the steer rules: %s", e)
             return None, None
-        mine = self._steer_gateway_prefix(function_id)
+        mine = '%s%d-' % (constants.GW_PORT_PREFIX, function_id)
         tables = collections.defaultdict(set)
         used = set()
         for prefix, iif, table, family_v6 in rules:
@@ -1521,52 +1614,20 @@ class Srv6LinuxDataplane:
                                    family_v6))
         return dict(tables), used
 
-    def _sync_steering(self, state, routes, locators, local_host,
-                       gateway_ports, prune):
-        """Make this node's steer tables and rules match the payload.
+    def _claim_steer_tables(self, state, steer, tables, used):
+        """{port_id: table} for the source VMs to steer.
 
-        For each route's segments_by_source_port entry whose VM is bound
-        HERE: that VM's table holds the route, encoded as a VRF route
-        (_encap), and one rule per VM address sends the VM's traffic into
-        its table, scoped to the gateway port of its network. Nothing is
-        kept in memory: the kernel's rules say which table is whose
-        (reused when it has the VM's gateway port and an address of it), so
-        a restarted agent converges like a running one.
-
-        Make-before-break: a table is filled, and its first-segment SID
-        rules added, before its steer rules exist; with prune (a full
-        sync), rules go before routes and a VM no longer steered loses its
-        rules, then its table. Without prune (an incremental add) nothing
-        is removed. A VM whose network has no gateway port here (yet) is
-        skipped: there is nothing to match its traffic on.
-
-        Returns the SID rules the steer routes need, which the caller
-        counts as wanted.
+        Nothing is kept in memory: the kernel's rules say which table is
+        whose. A VM reuses the table that has its gateway port and an
+        address of it, so a restarted agent converges like a running one;
+        otherwise it takes a free one.
         """
-        desired = {}
-        for route in routes:
-            for port_id, vm in sorted(
-                    (route.get('segments_by_source_port') or {}).items()):
-                if vm.get('host') != local_host:
-                    continue
-                iif = (gateway_ports or {}).get(vm.get('network_id'))
-                if not iif or not locators.get(route.get('host')):
-                    continue
-                entry = desired.setdefault(port_id, {
-                    'iif': iif, 'routes': {},
-                    'prefixes': {_normalise_prefix(p)
-                                 for p in vm.get('prefixes') or []}})
-                entry['routes'][route['prefix']] = (
-                    locators[route['host']], vm.get('segments') or [])
-        tables, used = self._steer_tables(state.function_id)
-        if tables is None:
-            return set()
         base = self.vrf_table_base + constants.STEER_TABLE_OFFSET
         free = [t for t in range(base, base + constants.STEER_TABLE_SLOTS)
                 if t not in used]
         claimed = {}
-        for port_id in sorted(desired):
-            entry = desired[port_id]
+        for port_id in sorted(steer):
+            entry = steer[port_id]
             table = next((t for t in sorted(tables)
                           if t not in claimed.values() and
                           {iif for _p, iif, _v in tables[t]} ==
@@ -1582,84 +1643,15 @@ class Srv6LinuxDataplane:
                     continue
                 table = free.pop(0)
             claimed[port_id] = table
-        rule_sids = set()
-        for port_id in sorted(claimed):
-            entry, table = desired[port_id], claimed[port_id]
-            routes_wanted = set()
-            sids = set()
-            for prefix, (locator, transit) in sorted(entry['routes'].items()):
-                segments, mode, rule_sid, dev = self._encap(
-                    state, prefix, locator, transit)
-                if rule_sid:
-                    sids.add(rule_sid)
-                if not dev:
-                    continue
-                routes_wanted.add(_normalise_prefix(prefix))
-                extra = {'mode': mode} if self.usid else {}
-                try:
-                    priv_seg6.replace_seg6_route(
-                        prefix, segments, dev, table,
-                        family_v6=':' in prefix.split('/')[0], **extra)
-                except Exception as e:
-                    LOG.error("SRv6: could not install steered %(p)s -> "
-                              "%(s)s in table %(t)s: %(e)s",
-                              {'p': prefix, 's': segments, 't': table,
-                               'e': e})
-            rule_sids |= sids
-            self._ensure_sid_rules(state, sids)
-            have = {(p, i) for p, i, _v in tables.get(table, ())}
-            want = {(p, entry['iif']) for p in entry['prefixes']}
-            if prune:
-                for prefix, iif in sorted(have - want):
-                    self._delete_steer_rule(prefix, iif, table)
-                self._prune_steer_table(table, routes_wanted)
-            for prefix, iif in sorted(want - have):
-                try:
-                    priv_seg6.add_steer_rule(
-                        prefix, iif, table,
-                        family_v6=':' in prefix.split('/')[0])
-                except Exception as e:
-                    LOG.error("SRv6: could not steer %(p)s (port %(port)s) "
-                              "into table %(t)s: %(e)s",
-                              {'p': prefix, 'port': port_id, 't': table,
-                               'e': e})
-                    continue
-                LOG.info("SRv6: domain %(d)s: traffic from %(p)s (port "
-                         "%(port)s) now uses steer table %(t)s",
-                         {'d': state.domain_id, 'p': prefix,
-                          'port': port_id, 't': table})
-        if prune:
-            for table in sorted(set(tables) - set(claimed.values())):
-                self._release_steer_table(state.domain_id, table,
-                                          tables[table])
-        return rule_sids
+        return claimed
 
     def _delete_steer_rule(self, prefix, iif, table):
         try:
             priv_seg6.delete_steer_rule(prefix, iif, table,
-                                        family_v6=':' in prefix)
+                                        family_v6=_is_v6(prefix))
         except Exception as e:
             LOG.debug("SRv6: removing steer rule %(p)s %(i)s: %(e)s",
                       {'p': prefix, 'i': iif, 'e': e})
-
-    def _prune_steer_table(self, table, wanted):
-        for family_v6 in (False, True):
-            try:
-                present = priv_seg6.list_seg6_routes(table,
-                                                     family_v6=family_v6)
-            except Exception as e:
-                LOG.debug("SRv6: could not read steer table %(t)s: %(e)s",
-                          {'t': table, 'e': e})
-                continue
-            for prefix in present:
-                if _normalise_prefix(prefix) not in wanted:
-                    try:
-                        priv_seg6.delete_route(prefix, table,
-                                               family_v6=family_v6)
-                    except Exception as e:
-                        LOG.debug("SRv6: removing %(p)s from steer table "
-                                  "%(t)s: %(e)s",
-                                  {'p': prefix, 't': table, 'e': e})
 
     def _release_steer_table(self, domain_id, table, rules):
         """Its rules first (traffic goes back to the VRF), then its routes."""
@@ -1675,12 +1667,6 @@ class Srv6LinuxDataplane:
                  "back to the domain's routes)",
                  {'d': domain_id, 't': table,
                   'p': ', '.join(sorted({p for p, _i, _v in rules}))})
-
-    def _remove_steering(self, function_id, domain_id=None):
-        """Every steer rule and table of a function id (a domain going)."""
-        tables, _used = self._steer_tables(function_id)
-        for table in sorted(tables or {}):
-            self._release_steer_table(domain_id, table, tables[table])
 
     def _encode(self, segments, prefix):
         """(what to push, seg6 mode) for a logical segment list.
@@ -1702,9 +1688,6 @@ class Srv6LinuxDataplane:
                         {'p': prefix, 's': segments})
         return pushed, constants.SEG6_MODE_ENCAP_RED
 
-    # ------------------------------------------------------------------
-    # SID rules
-    # ------------------------------------------------------------------
     @staticmethod
     def _sid_rules_for(vrf_name):
         """This VRF's SID rules in the kernel, or None if unreadable.
@@ -1718,127 +1701,6 @@ class Srv6LinuxDataplane:
             LOG.warning("SRv6: could not list SID rules: %s", e)
             return None
         return {_normalise_sid(s) for vrf, s in rules if vrf == vrf_name}
-
-    def _ensure_sid_rules(self, state, sids):
-        present = self._sid_rules_for(state.vrf_name) or set()
-        for sid_address in sorted(set(sids) - present):
-            try:
-                priv_seg6.add_sid_rule(state.vrf_name, sid_address)
-            except Exception as e:
-                LOG.error("SRv6: could not let %(v)s reach %(s)s: %(e)s. "
-                          "Traffic from this domain to that node is dropped "
-                          "at the seal until the next resync.",
-                          {'v': state.vrf_name, 's': sid_address, 'e': e})
-                continue
-            LOG.info("SRv6: domain %(d)s may reach %(s)s via main",
-                     {'d': state.domain_id, 's': sid_address})
-
-    def _remove_unwanted_sid_rules(self, state, wanted):
-        """Drop rules toward SIDs no route of the domain uses any more.
-
-        Only this VRF's rules are ever considered. An unreadable list
-        deletes nothing.
-        """
-        present = self._sid_rules_for(state.vrf_name)
-        if present is None:
-            return
-        for sid_address in sorted(present - set(wanted)):
-            LOG.info("SRv6: domain %(d)s no longer encapsulates to %(s)s; "
-                     "removing its rule", {'d': state.domain_id,
-                                           's': sid_address})
-            try:
-                priv_seg6.delete_sid_rule(state.vrf_name, sid_address)
-            except Exception as e:
-                LOG.debug("SRv6: removing rule %(v)s -> %(s)s: %(e)s",
-                          {'v': state.vrf_name, 's': sid_address, 'e': e})
-
-    def sync_routes(self, domain_id, routes, locators, local_host,
-                    mtus=None, gateway_ports=None):
-        """Make the domain's table hold exactly the routes the payload names.
-
-        add_routes only ever added, exactly as the gateway ports only ever
-        accumulated, so an address that left the domain kept its encap
-        route.
-
-        Also the withdraw half of a migration: a workload that moved to
-        THIS node is skipped by add_routes rather than removed, so without
-        this its old encap route would keep sending traffic out to the
-        underlay and back.
-
-        Only _apply_domain calls this. routes_updated stays on add_routes
-        and remove_routes -- it carries a delta, not the whole domain, so
-        reconciling against it would delete every route it did not mention.
-        The SID rules follow the same split: a rule left behind by an
-        incremental remove only lets the VRF reach its own domain's SID, and
-        the next full sync prunes it. An End-SID rule whose path was removed
-        or emptied is pruned the same way.
-        """
-        state = self.domains.get(domain_id)
-        if state is None:
-            return
-        wanted, rule_sids = self._install_routes(state, routes, locators,
-                                                 local_host, mtus)
-        self._remove_unwanted_routes(domain_id, wanted)
-        # The steer tables' SIDs are wanted too, or the line below would
-        # remove the rule a steered VM's outer packet needs.
-        rule_sids |= self._sync_steering(state, routes, locators, local_host,
-                                         gateway_ports, prune=True)
-        self._remove_unwanted_sid_rules(state, rule_sids)
-
-    def _remove_unwanted_routes(self, domain_id, wanted):
-        state = self.domains.get(domain_id)
-        if state is None:
-            return
-        self._remove_encap_routes(
-            state, lambda prefix: prefix not in wanted,
-            "SRv6: domain %(d)s no longer reaches %(p)s; removing its encap "
-            "route from table %(t)s")
-
-    def _remove_encap_routes(self, state, doomed, message,
-                             families=(False, True)):
-        """Delete the domain's seg6 encap routes that `doomed` names.
-
-        `doomed` is called with the normalised prefix. Other routes of the
-        table are never touched.
-        """
-        for family_v6 in families:
-            try:
-                present = priv_seg6.list_seg6_routes(state.vrf_table,
-                                                     family_v6=family_v6)
-            except Exception as e:
-                LOG.warning("SRv6: could not read table %(t)s: %(e)s",
-                            {'t': state.vrf_table, 'e': e})
-                continue
-            for prefix in present:
-                if not doomed(_normalise_prefix(prefix)):
-                    continue
-                LOG.info(message, {'d': state.domain_id, 'p': prefix,
-                                   't': state.vrf_table})
-                try:
-                    priv_seg6.delete_route(prefix, state.vrf_table,
-                                           family_v6=family_v6)
-                except Exception as e:
-                    LOG.debug("SRv6: removing %(p)s: %(e)s",
-                              {'p': prefix, 'e': e})
-
-    def remove_routes(self, domain_id, routes):
-        state = self.domains.get(domain_id)
-        if state is None:
-            return
-        # The source VMs' steer tables too: a path to a deleted port goes
-        # with it and nothing else is pushed, so the route would stay until
-        # the next full sync and capture a reused address.
-        tables = self._steer_tables(state.function_id)[0] or {}
-        for route in routes:
-            prefix = route['prefix']
-            for table in [state.vrf_table] + sorted(tables):
-                try:
-                    priv_seg6.delete_route(
-                        prefix, table,
-                        family_v6=':' in prefix.split('/')[0])
-                except Exception as e:
-                    LOG.debug("SRv6: removing %(p)s from table %(t)s: "
-                              "%(e)s", {'p': prefix, 't': table, 'e': e})
 
     def _check_route_mtu(self, prefix, network_mtu, depth, dev=None):
         """The MTU of one steered route, warned once per (prefix, depth).

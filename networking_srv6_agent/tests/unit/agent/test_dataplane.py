@@ -14,21 +14,23 @@
 
 """Unit tests for Srv6LinuxDataplane.
 
-Everything that touches the kernel is mocked, so what is under test is the
-*shape* of the calls: which objects get created, with which names, in which
-order. That is precisely where this layer went wrong during bring-up -- the
-kernel calls themselves were fine, the arguments and the ordering were not.
+Everything that touches the kernel is mocked. The routes, steer tables and
+SID rules sync_routes reconciles go through FakeKernel, so those tests assert
+what the kernel ends up holding, and FakeKernel itself flags a route whose
+packets would meet the seal; the rest assert the shape of the calls.
 
 Ported near-verbatim from networking-bgpvpn (srv6-te); the classes after
 TestMtu cover what P5 added.
 """
 
+import ipaddress
 from unittest import mock
 
 from neutron.tests import base
 from oslo_utils import uuidutils
 
 from networking_srv6_agent.agent import dataplane
+from networking_srv6_agent.common import constants
 
 
 LOCATOR = 'fc00:0:1::/48'
@@ -37,6 +39,105 @@ FUNCTION_ID = 7
 VRF_TABLE = 10007
 VRF_NAME = 'sv6vrf-7'
 PORT_NAME = 'svp-7-100'
+
+
+def _printed(prefix):
+    """A prefix as `ip route/rule show` prints it: a host route bare."""
+    net = ipaddress.ip_network(prefix, strict=False)
+    if net.prefixlen == net.max_prefixlen:
+        return str(net.network_address)
+    return str(net)
+
+
+class FakeKernel:
+    """The routes and rules priv_seg6 manages, kept as kernel state.
+
+    Installed as the side effects of the autospec priv_seg6 mock, so the
+    signatures are still checked and the calls still recorded, while tests
+    assert on what the kernel ends up holding. After every write it checks
+    what call-order mocks could not see: a route traffic can reach (any
+    route of a VRF table, a steer table's once a steer rule sends traffic
+    there) whose first segment its VRF has no SID rule for drops every
+    packet at the seal. Each such window lands in `blackholes`; a sealed
+    path (a transit SID the edge filter does not cover) lands there too, by
+    design, so only tests that expect every path open assert it empty.
+    """
+
+    FUNCTIONS = ('replace_seg6_route', 'delete_route', 'list_seg6_routes',
+                 'flush_table', 'add_sid_rule', 'delete_sid_rule',
+                 'list_sid_rules', 'add_steer_rule', 'delete_steer_rule',
+                 'list_steer_rules')
+
+    def __init__(self, priv, vrfs):
+        self.vrfs = dict(vrfs)        # VRF table -> VRF name
+        self.routes = {}              # (table, v6) -> {printed: segments}
+        self.sid_rules = set()        # (vrf, sid)
+        self.steer_rules = set()      # (printed, iif, table, v6)
+        self.failing = set()          # prefixes / SIDs whose write fails
+        self.blackholes = set()
+        for name in self.FUNCTIONS:
+            getattr(priv, name).side_effect = getattr(self, name)
+
+    def table(self, table, family_v6=False):
+        return self.routes.get((table, family_v6), {})
+
+    def replace_seg6_route(self, prefix, segments, dev, table,
+                           family_v6=False, mode=None):
+        if prefix in self.failing:
+            raise RuntimeError('boom')
+        self.routes.setdefault((table, family_v6), {})[_printed(prefix)] = \
+            list(segments)
+        self._check()
+
+    def delete_route(self, prefix, table, family_v6=False):
+        self.routes.get((table, family_v6), {}).pop(_printed(prefix), None)
+
+    def list_seg6_routes(self, table, family_v6=False):
+        return list(self.table(table, family_v6))
+
+    def flush_table(self, table, family_v6=False):
+        self.routes.pop((table, family_v6), None)
+
+    def add_sid_rule(self, vrf_name, sid_address):
+        if sid_address in self.failing:
+            raise RuntimeError('boom')
+        self.sid_rules.add((vrf_name, sid_address))
+
+    def delete_sid_rule(self, vrf_name, sid_address):
+        self.sid_rules.discard((vrf_name, sid_address))
+        self._check()
+
+    def list_sid_rules(self):
+        return sorted(self.sid_rules)
+
+    def add_steer_rule(self, prefix, iif, table, family_v6=False):
+        self.steer_rules.add((_printed(prefix), iif, table, family_v6))
+        self._check()
+
+    def delete_steer_rule(self, prefix, iif, table, family_v6=False):
+        self.steer_rules.discard((_printed(prefix), iif, table, family_v6))
+
+    def list_steer_rules(self):
+        return sorted(self.steer_rules)
+
+    def _check(self):
+        live = dict(self.vrfs)
+        for _p, iif, table, _v in self.steer_rules:
+            function_id = iif[len(constants.GW_PORT_PREFIX):].split('-')[0]
+            live[table] = constants.VRF_PREFIX + function_id
+        for (table, _v6), routes in self.routes.items():
+            if table not in live:
+                continue
+            for prefix, segments in routes.items():
+                if (live[table], _sid(segments[0])) not in self.sid_rules:
+                    self.blackholes.add((table, prefix, segments[0]))
+
+
+def _sid(address):
+    try:
+        return str(ipaddress.IPv6Address(address))
+    except ValueError:
+        return address
 
 
 class InterfaceAlreadyExists(Exception):
@@ -91,6 +192,9 @@ class DataplaneTestCaseBase(base.BaseTestCase):
     def _with_domain(self):
         self.dp.domains[self.domain_id] = dataplane.DomainState(
             self.domain_id, FUNCTION_ID, VRF_TABLE, VRF_NAME)
+
+    def _fake_kernel(self):
+        self.kernel = FakeKernel(self.priv_seg6, {VRF_TABLE: VRF_NAME})
 
 
 class TestNodeInitialisation(DataplaneTestCaseBase):
@@ -992,93 +1096,71 @@ class TestRouteReconciliation(DataplaneTestCaseBase):
     def setUp(self):
         super().setUp()
         self._with_domain()
-        self.locators = {'node2': 'fc00:0:2::/48'}
-        self.priv_seg6.list_seg6_routes.side_effect = \
-            lambda table, family_v6=False: (
-                [] if family_v6 else ['10.90.1.11', '10.90.2.21'])
+        self._fake_kernel()
+        self.locators = {'node2': LOCATOR2}
+        self.kernel.routes[(VRF_TABLE, False)] = {
+            '10.90.1.11': ['fc00:0:2:7::'], '10.90.2.21': ['fc00:0:2:7::']}
 
     def _sync(self, routes):
         self.dp.sync_routes(self.domain_id, routes, self.locators, 'node1')
 
+    def _held(self, family_v6=False):
+        return sorted(self.kernel.table(VRF_TABLE, family_v6))
+
     def test_a_prefix_that_left_the_domain_loses_its_route(self):
         self._sync([{'prefix': '10.90.1.11/32', 'host': 'node2'}])
-        self.priv_seg6.delete_route.assert_called_once_with(
-            '10.90.2.21', VRF_TABLE, family_v6=False)
+        self.assertEqual(['10.90.1.11'], self._held())
 
     def test_a_host_route_is_not_deleted_by_its_own_prefix_length(self):
         # `ip route show` prints 10.90.2.21 where the payload says
         # 10.90.2.21/32. Comparing the strings deletes the whole table.
         self._sync([{'prefix': '10.90.1.11/32', 'host': 'node2'},
                     {'prefix': '10.90.2.21/32', 'host': 'node2'}])
+        self.assertEqual(['10.90.1.11', '10.90.2.21'], self._held())
         self.priv_seg6.delete_route.assert_not_called()
 
     def test_a_workload_that_moved_here_loses_its_encap_route(self):
         """The withdraw half of a migration.
 
-        add_routes skips a route whose host is this node rather than
-        removing it, so the old encap route survived the move and kept
-        sending local traffic out to the underlay and back.
+        A live migration to this node sends no withdrawal of the old host;
+        the route now names this node, and its encap route must go or it
+        keeps sending local traffic out to the underlay and back.
         """
         self._sync([{'prefix': '10.90.1.11/32', 'host': 'node2'},
                     {'prefix': '10.90.2.21/32', 'host': 'node1'}])
-        self.priv_seg6.delete_route.assert_called_once_with(
-            '10.90.2.21', VRF_TABLE, family_v6=False)
-
-    def _add(self, routes):
-        self.dp.add_routes(self.domain_id, routes, self.locators, 'node1')
-
-    def test_an_incremental_add_for_this_node_removes_its_encap_route(self):
-        """A live migration to this node sends no withdrawal of the old host.
-
-        Seen live: the source's flap re-advertised the guest on the old
-        host, the port then went down and changed host without a cast, and
-        add(new) was skipped here as local, so the destination kept an
-        encap route to the old host until the next full sync.
-        """
-        self._add([{'prefix': '10.90.2.21/32', 'host': 'node1'}])
-        self.priv_seg6.delete_route.assert_called_once_with(
-            '10.90.2.21', VRF_TABLE, family_v6=False)
-        self.priv_seg6.replace_seg6_route.assert_not_called()
-
-    def test_a_local_add_touches_only_its_own_prefix(self):
-        self._add([{'prefix': '10.90.9.9/32', 'host': 'node1'}])
-        self.priv_seg6.delete_route.assert_not_called()
-
-    def test_a_remote_add_reads_no_table(self):
-        self._add([{'prefix': '10.90.2.21/32', 'host': 'node2'}])
-        self.priv_seg6.list_seg6_routes.assert_not_called()
-        self.priv_seg6.delete_route.assert_not_called()
+        self.assertEqual(['10.90.1.11'], self._held())
 
     def test_a_domain_with_no_routes_left_keeps_none(self):
         self._sync([])
-        self.assertEqual(
-            sorted([mock.call('10.90.1.11', VRF_TABLE, family_v6=False),
-                    mock.call('10.90.2.21', VRF_TABLE, family_v6=False)],
-                   key=str),
-            sorted(self.priv_seg6.delete_route.call_args_list, key=str))
+        self.assertEqual([], self._held())
 
     def test_both_families_are_reconciled(self):
+        self.kernel.routes[(VRF_TABLE, True)] = {'fd00::5': ['fc00:0:2:7::']}
         self._sync([])
-        self.assertEqual(
-            [False, True],
-            [c[1]['family_v6']
-             for c in self.priv_seg6.list_seg6_routes.call_args_list])
+        self.assertEqual([], self._held(True))
 
     def test_a_route_that_failed_to_install_is_still_wanted(self):
         # Otherwise a transient install failure deletes what is there.
-        self.priv_seg6.replace_seg6_route.side_effect = RuntimeError('boom')
+        self.kernel.failing.add('10.90.2.21/32')
         self._sync([{'prefix': '10.90.1.11/32', 'host': 'node2'},
                     {'prefix': '10.90.2.21/32', 'host': 'node2'}])
-        self.priv_seg6.delete_route.assert_not_called()
+        self.assertEqual(['10.90.1.11', '10.90.2.21'], self._held())
+
+    def test_a_route_with_no_underlay_device_is_kept(self):
+        # It cannot be rewritten; a failed lookup must not delete it.
+        self.dp.underlay_interface = None
+        self._sync([{'prefix': '10.90.2.21/32', 'host': 'node2'}])
+        self.assertEqual(['10.90.2.21'], self._held())
+        self.priv_seg6.replace_seg6_route.assert_not_called()
 
     def test_a_table_that_cannot_be_read_deletes_nothing(self):
         self.priv_seg6.list_seg6_routes.side_effect = RuntimeError('boom')
         self._sync([])
-        self.priv_seg6.delete_route.assert_not_called()
+        self.assertEqual(['10.90.1.11', '10.90.2.21'], self._held())
 
     def test_reconciling_an_unknown_domain_is_a_noop(self):
         self.dp.sync_routes('no-such-domain', [], self.locators, 'node1')
-        self.priv_seg6.delete_route.assert_not_called()
+        self.assertEqual(['10.90.1.11', '10.90.2.21'], self._held())
 
 
 class TestRoutes(DataplaneTestCaseBase):
@@ -1086,78 +1168,64 @@ class TestRoutes(DataplaneTestCaseBase):
     def setUp(self):
         super().setUp()
         self._with_domain()
-        self.locators = {'node2': 'fc00:0:2::/48'}
+        self._fake_kernel()
+        self.locators = {'node2': LOCATOR2}
 
     def _route(self, prefix='10.0.0.5/32', host='node2'):
         return {'prefix': prefix, 'host': host, 'port_id': 'p1'}
 
+    def _sync(self, *routes, locators=None):
+        self.dp.sync_routes(self.domain_id, list(routes),
+                            locators or self.locators, 'node1')
+
     def test_remote_port_gets_an_encap_route(self):
         # The remote node's locator with *this domain's* function id: the
         # SID differs per node, the function id does not.
-        self.dp.add_routes(self.domain_id, [self._route()], self.locators,
-                           'node1')
+        self._sync(self._route())
         self.priv_seg6.replace_seg6_route.assert_called_once_with(
             '10.0.0.5/32', ['fc00:0:2:7::'], UNDERLAY, VRF_TABLE,
             family_v6=False)
+        self.assertEqual({'10.0.0.5': ['fc00:0:2:7::']},
+                         self.kernel.table(VRF_TABLE))
 
     def test_ipv6_prefix_selects_the_v6_family(self):
-        self.dp.add_routes(self.domain_id, [self._route('2001:db8::5/128')],
-                           self.locators, 'node1')
-        self.assertTrue(
-            self.priv_seg6.replace_seg6_route.call_args[1]['family_v6'])
+        self._sync(self._route('2001:db8::5/128'))
+        self.assertEqual(['2001:db8::5'],
+                         list(self.kernel.table(VRF_TABLE, True)))
 
     def test_local_port_is_skipped(self):
         # It is already reachable through the gateway port's connected
         # route; encapsulating would send local traffic out and back.
-        self.dp.add_routes(self.domain_id, [self._route(host='node1')],
-                           {'node1': LOCATOR}, 'node1')
-        self.priv_seg6.replace_seg6_route.assert_not_called()
+        self._sync(self._route(host='node1'), locators={'node1': LOCATOR})
+        self.assertEqual({}, self.kernel.table(VRF_TABLE))
 
     def test_host_without_a_locator_is_skipped(self):
-        self.dp.add_routes(self.domain_id, [self._route(host='node9')],
-                           self.locators, 'node1')
-        self.priv_seg6.replace_seg6_route.assert_not_called()
+        self._sync(self._route(host='node9'))
+        self.assertEqual({}, self.kernel.table(VRF_TABLE))
 
     def test_one_failed_route_does_not_stop_the_rest(self):
-        self.priv_seg6.replace_seg6_route.side_effect = [
-            RuntimeError('boom'), None]
-        self.dp.add_routes(
-            self.domain_id,
-            [self._route('10.0.0.5/32'), self._route('10.0.0.6/32')],
-            self.locators, 'node1')
-        self.assertEqual(2, self.priv_seg6.replace_seg6_route.call_count)
+        self.kernel.failing.add('10.0.0.5/32')
+        self._sync(self._route('10.0.0.5/32'), self._route('10.0.0.6/32'))
+        self.assertEqual(['10.0.0.6'], list(self.kernel.table(VRF_TABLE)))
 
     def test_routes_for_an_unknown_domain_are_ignored(self):
-        self.dp.add_routes('no-such-domain', [self._route()], self.locators,
-                           'node1')
+        self.dp.sync_routes('no-such-domain', [self._route()], self.locators,
+                            'node1')
         self.priv_seg6.replace_seg6_route.assert_not_called()
 
-    def test_remove_routes_targets_the_domain_table(self):
-        self.dp.remove_routes(self.domain_id, [self._route()])
-        self.priv_seg6.delete_route.assert_called_once_with(
-            '10.0.0.5/32', VRF_TABLE, family_v6=False)
-
-    def test_remove_routes_clears_the_domains_steer_tables_too(self):
-        # Another domain's steer table (svp-8-*) is not touched.
-        self.priv_seg6.list_steer_rules.return_value = [
-            ('10.0.1.9', 'svp-7-100', 70001, False),
-            ('10.0.2.9', 'svp-8-100', 70002, False)]
-        self.dp.remove_routes(self.domain_id, [self._route()])
-        self.assertEqual(
-            [mock.call('10.0.0.5/32', VRF_TABLE, family_v6=False),
-             mock.call('10.0.0.5/32', 70001, family_v6=False)],
-            self.priv_seg6.delete_route.call_args_list)
-
-    def test_add_routes_reports_what_it_wants(self):
-        self.assertEqual(
-            {'10.0.0.5/32'},
-            self.dp.add_routes(self.domain_id,
-                               [{'prefix': '10.0.0.5/32', 'host': 'node2'}],
-                               {'node2': 'fc00:0:2::/48'}, 'node1'))
-
-    def test_remove_routes_for_an_unknown_domain_is_a_noop(self):
-        self.dp.remove_routes('no-such-domain', [self._route()])
-        self.priv_seg6.delete_route.assert_not_called()
+    def test_a_route_that_goes_leaves_the_domains_steer_tables_too(self):
+        # A path to a deleted port goes with it and nothing else is pushed;
+        # left there it would capture a reused address. Another domain's
+        # steer table (svp-8-*) is not touched.
+        self.kernel.steer_rules = {('10.0.1.9', 'svp-7-100', 70001, False),
+                                   ('10.0.2.9', 'svp-8-100', 70002, False)}
+        self.kernel.routes[(70001, False)] = {'10.0.0.5': ['fc00:0:2:7::']}
+        self.kernel.routes[(70002, False)] = {'10.0.0.5': ['fc00:0:2:8::']}
+        self._sync()
+        self.assertEqual({}, self.kernel.table(70001))
+        self.assertEqual({('10.0.2.9', 'svp-8-100', 70002, False)},
+                         self.kernel.steer_rules)
+        self.assertEqual(['10.0.0.5'], list(self.kernel.table(70002)))
 
 
 class TestMtu(DataplaneTestCaseBase):
@@ -1322,8 +1390,8 @@ class TestSidRules(DataplaneTestCaseBase):
     encapsulates a packet that arrived on a gateway port, the kernel routes
     the outer IPv6 header in the same VRF, hit the unreachable default, and
     dropped every packet -- Ip6InNoRoutes one per echo request, on both
-    nodes. The mocks cannot model where that lookup happens, which is why
-    the unit tests never saw it; these pin the fix instead.
+    nodes. Call-order mocks could not model where that lookup happens;
+    FakeKernel's blackhole check does.
     """
 
     RED = 'sv6vrf-7'
@@ -1331,7 +1399,8 @@ class TestSidRules(DataplaneTestCaseBase):
     def setUp(self):
         super().setUp()
         self._with_domain()
-        self.locators = {'node2': 'fc00:0:2::/48', 'node3': 'fc00:0:3::/48'}
+        self._fake_kernel()
+        self.locators = {'node2': LOCATOR2, 'node3': LOCATOR3}
 
     def _route(self, prefix, host, segments=None):
         route = {'prefix': prefix, 'host': host, 'port_id': 'p'}
@@ -1339,116 +1408,93 @@ class TestSidRules(DataplaneTestCaseBase):
             route['segments'] = segments
         return route
 
-    def _added(self):
-        return [c[0] for c in self.priv_seg6.add_sid_rule.call_args_list]
-
-    def _deleted(self):
-        return [c[0] for c in self.priv_seg6.delete_sid_rule.call_args_list]
+    def _sync(self, *routes, locators=None):
+        self.dp.sync_routes(self.domain_id, list(routes),
+                            locators or self.locators, 'node1')
 
     def test_one_rule_per_remote_node_not_per_route(self):
-        self.dp.add_routes(self.domain_id,
-                           [self._route('10.0.0.5/32', 'node2'),
-                            self._route('10.0.0.6/32', 'node2'),
-                            self._route('10.0.0.7/32', 'node3')],
-                           self.locators, 'node1')
-        self.assertEqual([(self.RED, 'fc00:0:2:7::'),
-                          (self.RED, 'fc00:0:3:7::')], self._added())
+        self._sync(self._route('10.0.0.5/32', 'node2'),
+                   self._route('10.0.0.6/32', 'node2'),
+                   self._route('10.0.0.7/32', 'node3'))
+        self.assertEqual({(self.RED, 'fc00:0:2:7::'),
+                          (self.RED, 'fc00:0:3:7::')}, self.kernel.sid_rules)
+        self.assertEqual(2, self.priv_seg6.add_sid_rule.call_count)
 
-    def test_the_rule_comes_before_the_route(self):
+    def test_no_route_ever_lacks_its_rule(self):
         # Make before break: a route re-steered through a new first segment
         # dropped its packets in the VRF until the rule toward that segment
         # followed, ~0.4 s per drain on the Clos.
-        self.dp.add_routes(self.domain_id,
-                           [self._route('10.0.0.5/32', 'node2')],
-                           self.locators, 'node1')
-        names = [c[0] for c in self.priv_seg6.mock_calls]
-        self.assertLess(names.index('add_sid_rule'),
-                        names.index('replace_seg6_route'))
+        self._sync(self._route('10.0.0.5/32', 'node2'))
+        self._sync(self._route('10.0.0.5/32', 'node3'))
+        self.assertEqual(set(), self.kernel.blackholes)
+        self.assertEqual({(self.RED, 'fc00:0:3:7::')}, self.kernel.sid_rules)
 
     def test_a_local_route_needs_no_rule(self):
-        self.dp.add_routes(self.domain_id,
-                           [self._route('10.0.0.5/32', 'node1')],
-                           {'node1': LOCATOR}, 'node1')
-        self.priv_seg6.add_sid_rule.assert_not_called()
+        self._sync(self._route('10.0.0.5/32', 'node1'),
+                   locators={'node1': LOCATOR})
+        self.assertEqual(set(), self.kernel.sid_rules)
 
     def test_an_existing_rule_is_not_added_again(self):
-        self.priv_seg6.list_sid_rules.return_value = [
-            (self.RED, 'fc00:0:2:7::')]
-        self.dp.add_routes(self.domain_id,
-                           [self._route('10.0.0.5/32', 'node2')],
-                           self.locators, 'node1')
+        self.kernel.sid_rules = {(self.RED, 'fc00:0:2:7::')}
+        self._sync(self._route('10.0.0.5/32', 'node2'))
         self.priv_seg6.add_sid_rule.assert_not_called()
 
     def test_the_kernel_spelling_matches_ours(self):
         # `ip rule show` may print a SID differently from format_sid.
-        self.priv_seg6.list_sid_rules.return_value = [
-            (self.RED, 'fc00:0:2:7:0:0:0:0')]
-        self.dp.add_routes(self.domain_id,
-                           [self._route('10.0.0.5/32', 'node2')],
-                           self.locators, 'node1')
+        self.kernel.sid_rules = {(self.RED, 'fc00:0:2:7:0:0:0:0')}
+        self._sync(self._route('10.0.0.5/32', 'node2'))
         self.priv_seg6.add_sid_rule.assert_not_called()
+        self.priv_seg6.delete_sid_rule.assert_not_called()
 
     def test_a_transit_first_segment_gets_no_rule(self):
         # Letting a VRF reach an End SID lets a tenant craft an SRH through
         # it toward another domain. Fail closed while the edge filter is not
         # active -- and nothing applied it here (TestEndSidRules has both).
-        self.dp.add_routes(
-            self.domain_id,
-            [self._route('10.0.0.5/32', 'node2', ['fc00:0:3:fff0::'])],
-            self.locators, 'node1')
-        self.priv_seg6.add_sid_rule.assert_not_called()
-        self.assertTrue(self.priv_seg6.replace_seg6_route.called)
+        self._sync(self._route('10.0.0.5/32', 'node2', ['fc00:0:3:fff0::']))
+        self.assertEqual(set(), self.kernel.sid_rules)
+        self.assertEqual(['10.0.0.5'], list(self.kernel.table(VRF_TABLE)))
 
     def test_an_add_failure_is_contained(self):
-        self.priv_seg6.add_sid_rule.side_effect = [RuntimeError('boom'),
-                                                   None]
-        self.dp.add_routes(self.domain_id,
-                           [self._route('10.0.0.5/32', 'node2'),
-                            self._route('10.0.0.7/32', 'node3')],
-                           self.locators, 'node1')
-        self.assertEqual(2, self.priv_seg6.add_sid_rule.call_count)
+        self.kernel.failing.add('fc00:0:2:7::')
+        self._sync(self._route('10.0.0.5/32', 'node2'),
+                   self._route('10.0.0.7/32', 'node3'))
+        self.assertEqual({(self.RED, 'fc00:0:3:7::')}, self.kernel.sid_rules)
 
-    def test_the_incremental_path_never_prunes(self):
-        self.priv_seg6.list_sid_rules.return_value = [
-            (self.RED, 'fc00:0:3:7::')]
-        self.dp.add_routes(self.domain_id,
-                           [self._route('10.0.0.5/32', 'node2')],
-                           self.locators, 'node1')
-        self.priv_seg6.delete_sid_rule.assert_not_called()
-
-    def test_a_full_sync_prunes_rules_no_route_uses(self):
-        self.priv_seg6.list_sid_rules.return_value = [
-            (self.RED, 'fc00:0:2:7::'), (self.RED, 'fc00:0:3:7::'),
-            ('sv6vrf-9', 'fc00:0:3:9::')]
-        self.dp.sync_routes(self.domain_id,
-                            [self._route('10.0.0.5/32', 'node2')],
-                            self.locators, 'node1')
+    def test_rules_no_route_uses_are_pruned(self):
+        self.kernel.sid_rules = {(self.RED, 'fc00:0:2:7::'),
+                                 (self.RED, 'fc00:0:3:7::'),
+                                 ('sv6vrf-9', 'fc00:0:3:9::')}
+        self._sync(self._route('10.0.0.5/32', 'node2'))
         # Only this VRF's stale rule; another domain's is never touched.
-        self.assertEqual([(self.RED, 'fc00:0:3:7::')], self._deleted())
+        self.assertEqual({(self.RED, 'fc00:0:2:7::'),
+                          ('sv6vrf-9', 'fc00:0:3:9::')}, self.kernel.sid_rules)
 
     def test_an_unreadable_rule_list_prunes_nothing(self):
         self.priv_seg6.list_sid_rules.side_effect = RuntimeError('boom')
-        self.dp.sync_routes(self.domain_id, [], self.locators, 'node1')
+        self._sync()
         self.priv_seg6.delete_sid_rule.assert_not_called()
+
+    def test_unreadable_steer_rules_prune_no_rule(self):
+        # A steer table may be the one user of a rule; unseen, it is kept.
+        self.kernel.sid_rules = {(self.RED, 'fc00:0:3:fff0::')}
+        self.priv_seg6.list_steer_rules.side_effect = RuntimeError('boom')
+        self._sync(self._route('10.0.0.5/32', 'node2'))
+        self.assertIn((self.RED, 'fc00:0:3:fff0::'), self.kernel.sid_rules)
 
     def test_delete_removes_only_this_vrfs_rules_before_the_device(self):
         self.ip_lib.device_exists.return_value = True
-        self.priv_seg6.list_sid_rules.return_value = [
-            (self.RED, 'fc00:0:2:7::'), ('sv6vrf-9', 'fc00:0:2:9::')]
-        order = []
-        self.priv_seg6.delete_sid_rule.side_effect = \
-            lambda *a: order.append('rule')
+        self.kernel.sid_rules = {(self.RED, 'fc00:0:2:7::'),
+                                 ('sv6vrf-9', 'fc00:0:2:9::')}
+        at_vrf_delete = []
         self.priv_ip_lib.delete_interface.side_effect = \
-            lambda *a: order.append('vrf')
+            lambda *a: at_vrf_delete.append(set(self.kernel.sid_rules))
         self.dp.delete_domain(self.domain_id)
-        self.assertEqual([(self.RED, 'fc00:0:2:7::')], self._deleted())
-        self.assertEqual(['rule', 'vrf'], order)
+        self.assertEqual([{('sv6vrf-9', 'fc00:0:2:9::')}], at_vrf_delete)
 
     def test_a_rule_without_its_vrf_is_still_an_orphan(self):
         # `[detached]` after the VRF device went: GC must still see it.
         self.priv_seg6.list_vrf_names.return_value = ['sv6vrf-7']
-        self.priv_seg6.list_sid_rules.return_value = [
-            ('sv6vrf-9', 'fc00:0:2:9::')]
+        self.kernel.sid_rules = {('sv6vrf-9', 'fc00:0:2:9::')}
         self.assertEqual({7, 9}, self.dp.present_function_ids())
 
     def test_an_unreadable_rule_list_still_reports_the_vrfs(self):
@@ -1467,14 +1513,15 @@ class TestSegments(DataplaneTestCaseBase):
     def setUp(self):
         super().setUp()
         self._with_domain()
+        self._fake_kernel()
 
     def _segs(self, segments):
-        self.dp.add_routes(
+        self.dp.sync_routes(
             self.domain_id,
             [{'prefix': '10.0.0.5/32', 'host': 'node2', 'port_id': 'p1',
               'segments': segments}],
-            {'node2': 'fc00:0:2::/48'}, 'node1')
-        return self.priv_seg6.replace_seg6_route.call_args[0][1]
+            {'node2': LOCATOR2}, 'node1')
+        return self.kernel.table(VRF_TABLE)['10.0.0.5']
 
     def test_transit_segments_go_before_the_decap_sid(self):
         self.assertEqual(['fc00:0:3:fff0::', 'fc00:0:2:7::'],
@@ -1631,6 +1678,7 @@ class TestEndSidRules(DataplaneTestCaseBase):
     def setUp(self):
         super().setUp()
         self._with_domain()
+        self._fake_kernel()
         self.locators = {'node2': LOCATOR2, 'node3': LOCATOR3}
 
     def _route(self, prefix='10.0.0.5/32', segments=None):
@@ -1639,28 +1687,26 @@ class TestEndSidRules(DataplaneTestCaseBase):
             route['segments'] = segments
         return route
 
-    def _add(self, *routes):
-        self.dp.add_routes(self.domain_id, list(routes), self.locators,
-                           'node1')
-
-    def _rules(self):
-        return [c[0] for c in self.priv_seg6.add_sid_rule.call_args_list]
+    def _sync(self, *routes):
+        self.dp.sync_routes(self.domain_id, list(routes), self.locators,
+                            'node1')
 
     def test_no_filter_no_rule(self):
-        self._add(self._route(segments=['fc00:0:2:fff0::']))
-        self.priv_seg6.add_sid_rule.assert_not_called()
+        self._sync(self._route(segments=['fc00:0:2:fff0::']))
+        self.assertEqual(set(), self.kernel.sid_rules)
 
     def test_a_failed_filter_no_rule(self):
         self.priv_nft.apply_ruleset.side_effect = RuntimeError('boom')
         self.dp.ensure_edge_filter([LOCATOR2])
-        self._add(self._route(segments=['fc00:0:2:fff0::']))
-        self.priv_seg6.add_sid_rule.assert_not_called()
+        self._sync(self._route(segments=['fc00:0:2:fff0::']))
+        self.assertEqual(set(), self.kernel.sid_rules)
 
     def test_via_the_destination_gets_its_end_sid_rule(self):
         # The G2 shape: the only depth-2 SRH two nodes can produce.
         self.dp.ensure_edge_filter([LOCATOR2])
-        self._add(self._route(segments=['fc00:0:2:fff0::']))
-        self.assertEqual([(self.RED, 'fc00:0:2:fff0::')], self._rules())
+        self._sync(self._route(segments=['fc00:0:2:fff0::']))
+        self.assertEqual({(self.RED, 'fc00:0:2:fff0::')},
+                         self.kernel.sid_rules)
         self.priv_seg6.replace_seg6_route.assert_called_once_with(
             '10.0.0.5/32', ['fc00:0:2:fff0::', 'fc00:0:2:7::'], UNDERLAY,
             VRF_TABLE, family_v6=False)
@@ -1668,54 +1714,50 @@ class TestEndSidRules(DataplaneTestCaseBase):
     def test_only_the_first_transit_gets_a_rule(self):
         # Later segments are reached from main by each waypoint's End.
         self.dp.ensure_edge_filter([LOCATOR2, LOCATOR3])
-        self._add(self._route(segments=['fc00:0:3:fff0::',
-                                        'fc00:0:2:fff0::']))
-        self.assertEqual([(self.RED, 'fc00:0:3:fff0::')], self._rules())
+        self._sync(self._route(segments=['fc00:0:3:fff0::',
+                                         'fc00:0:2:fff0::']))
+        self.assertEqual({(self.RED, 'fc00:0:3:fff0::')},
+                         self.kernel.sid_rules)
 
     def test_a_neighbour_keeps_its_decap_rule(self):
         self.dp.ensure_edge_filter([LOCATOR2])
-        self._add(self._route('10.0.0.5/32', ['fc00:0:2:fff0::']),
-                  self._route('10.0.0.6/32'))
-        # added in route order, each before its route (make before break)
-        self.assertEqual([(self.RED, 'fc00:0:2:fff0::'),
-                          (self.RED, 'fc00:0:2:7::')], self._rules())
+        self._sync(self._route('10.0.0.5/32', ['fc00:0:2:fff0::']),
+                   self._route('10.0.0.6/32'))
+        self.assertEqual({(self.RED, 'fc00:0:2:fff0::'),
+                          (self.RED, 'fc00:0:2:7::')}, self.kernel.sid_rules)
+        self.assertEqual(set(), self.kernel.blackholes)
 
     def test_a_leading_own_end_sid_is_not_the_rule(self):
         self.dp.ensure_edge_filter([LOCATOR3])
-        self._add(self._route(segments=['fc00:0:1:fff0::',
-                                        'fc00:0:3:fff0::']))
-        self.assertEqual([(self.RED, 'fc00:0:3:fff0::')], self._rules())
+        self._sync(self._route(segments=['fc00:0:1:fff0::',
+                                         'fc00:0:3:fff0::']))
+        self.assertEqual({(self.RED, 'fc00:0:3:fff0::')},
+                         self.kernel.sid_rules)
 
     def test_an_end_sid_the_filter_does_not_cover_gets_no_rule(self):
         # A routes_updated racing the domain_updated that carries node3's
         # locator: the filter is active, but not over node3 yet.
         self.dp.ensure_edge_filter([LOCATOR2])
-        self._add(self._route(segments=['fc00:0:3:fff0::']))
-        self.priv_seg6.add_sid_rule.assert_not_called()
+        self._sync(self._route(segments=['fc00:0:3:fff0::']))
+        self.assertEqual(set(), self.kernel.sid_rules)
 
     def test_removing_the_path_prunes_the_rule(self):
         # G4: PUT via_hosts [] -> the next full sync carries no segments.
         self.dp.ensure_edge_filter([LOCATOR2])
-        self.priv_seg6.list_sid_rules.return_value = [
-            (self.RED, 'fc00:0:2:fff0::'), (self.RED, 'fc00:0:2:7::')]
-        self.dp.sync_routes(self.domain_id, [self._route()], self.locators,
-                            'node1')
-        self.priv_seg6.delete_sid_rule.assert_called_once_with(
-            self.RED, 'fc00:0:2:fff0::')
+        self.kernel.sid_rules = {(self.RED, 'fc00:0:2:fff0::'),
+                                 (self.RED, 'fc00:0:2:7::')}
+        self._sync(self._route())
+        self.assertEqual({(self.RED, 'fc00:0:2:7::')}, self.kernel.sid_rules)
 
     def test_a_filter_that_goes_inactive_prunes_the_rule(self):
         self.dp.ensure_edge_filter([LOCATOR2])
         self.priv_nft.apply_ruleset.side_effect = RuntimeError('boom')
         self.dp.ensure_edge_filter([LOCATOR2])
-        self.priv_seg6.list_sid_rules.return_value = [
-            (self.RED, 'fc00:0:2:fff0::')]
-        self.dp.sync_routes(self.domain_id,
-                            [self._route(segments=['fc00:0:2:fff0::'])],
-                            self.locators, 'node1')
-        self.priv_seg6.delete_sid_rule.assert_called_once_with(
-            self.RED, 'fc00:0:2:fff0::')
+        self.kernel.sid_rules = {(self.RED, 'fc00:0:2:fff0::')}
+        self._sync(self._route(segments=['fc00:0:2:fff0::']))
+        self.assertEqual(set(), self.kernel.sid_rules)
         # The route itself stays, sealed: fail closed, not fail open.
-        self.assertTrue(self.priv_seg6.replace_seg6_route.called)
+        self.assertEqual(['10.0.0.5'], list(self.kernel.table(VRF_TABLE)))
 
 
 class TestSourceSegments(DataplaneTestCaseBase):
@@ -1732,6 +1774,7 @@ class TestSourceSegments(DataplaneTestCaseBase):
     def setUp(self):
         super().setUp()
         self._with_domain()
+        self._fake_kernel()
         self.locators = {'node2': LOCATOR2, 'node3': LOCATOR3}
 
     def _route(self, host='node2', segments=None, by_source=None):
@@ -1743,12 +1786,9 @@ class TestSourceSegments(DataplaneTestCaseBase):
         return route
 
     def _segs(self, route, local_host='node1'):
-        self.dp.add_routes(self.domain_id, [route], self.locators,
-                           local_host)
-        return self.priv_seg6.replace_seg6_route.call_args[0][1]
-
-    def _rules(self):
-        return [c[0] for c in self.priv_seg6.add_sid_rule.call_args_list]
+        self.dp.sync_routes(self.domain_id, [route], self.locators,
+                            local_host)
+        return self.kernel.table(VRF_TABLE)['10.0.0.5']
 
     def test_the_own_entry_is_used(self):
         # node1 is the source the path names: its list, not the default.
@@ -1785,32 +1825,29 @@ class TestSourceSegments(DataplaneTestCaseBase):
 
     def test_a_local_route_is_skipped_even_with_an_own_entry(self):
         # The destination's own node never encapsulates its VMs.
-        self.dp.add_routes(
+        self.dp.sync_routes(
             self.domain_id,
             [self._route(host='node1',
                          by_source={'node1': ['fc00:0:3:fff0::']})],
             dict(self.locators, node1=LOCATOR), 'node1')
-        self.priv_seg6.replace_seg6_route.assert_not_called()
+        self.assertEqual({}, self.kernel.table(VRF_TABLE))
 
     def test_the_rule_follows_the_chosen_first_segment(self):
         self.dp.ensure_edge_filter([LOCATOR2, LOCATOR3])
         self._segs(self._route(segments=['fc00:0:2:fff0::'],
                                by_source={'node1': ['fc00:0:3:fff0::']}))
-        self.assertEqual([(self.RED, 'fc00:0:3:fff0::')], self._rules())
+        self.assertEqual({(self.RED, 'fc00:0:3:fff0::')},
+                         self.kernel.sid_rules)
 
-    def test_a_full_sync_prunes_the_rule_of_the_old_list(self):
+    def test_the_rule_of_the_old_list_is_pruned(self):
         # The source path appeared: the any-source End SID rule is no
-        # longer used by this node, and the next full sync removes it.
+        # longer used by this node.
         self.dp.ensure_edge_filter([LOCATOR2, LOCATOR3])
-        self.priv_seg6.list_sid_rules.return_value = [
-            (self.RED, 'fc00:0:2:fff0::')]
-        self.dp.sync_routes(
-            self.domain_id,
-            [self._route(segments=['fc00:0:2:fff0::'],
-                         by_source={'node1': ['fc00:0:3:fff0::']})],
-            self.locators, 'node1')
-        self.priv_seg6.delete_sid_rule.assert_called_once_with(
-            self.RED, 'fc00:0:2:fff0::')
+        self.kernel.sid_rules = {(self.RED, 'fc00:0:2:fff0::')}
+        self._segs(self._route(segments=['fc00:0:2:fff0::'],
+                               by_source={'node1': ['fc00:0:3:fff0::']}))
+        self.assertEqual({(self.RED, 'fc00:0:3:fff0::')},
+                         self.kernel.sid_rules)
 
 
 class TestRouteMtu(DataplaneTestCaseBase):
@@ -1867,13 +1904,6 @@ class TestRouteMtu(DataplaneTestCaseBase):
                             [self._route(['fc00:0:2:fff0::'])],
                             {'node2': LOCATOR2}, 'node1')
         self.check_mtu.assert_not_called()
-
-    def test_the_incremental_path_checks_too(self):
-        self.dp.add_routes(self.domain_id,
-                           [self._route(['fc00:0:2:fff0::'])],
-                           {'node2': LOCATOR2}, 'node1',
-                           mtus={'net1': 1436})
-        self.assertEqual({('10.0.0.5/32', 2)}, self.dp._mtu_warned)
 
 
 # ----------------------------------------------------------------------
@@ -1989,7 +2019,7 @@ class TestUsidRoutes(DataplaneTestCaseBase):
         self.priv_seg6.list_sid_rules.return_value = []
 
     def _route(self, segments=None):
-        self.dp.add_routes(
+        self.dp.sync_routes(
             self.domain_id,
             [{'prefix': '10.0.0.5/32', 'host': 'node3', 'port_id': 'p1',
               'segments': segments}],
@@ -2010,7 +2040,7 @@ class TestUsidRoutes(DataplaneTestCaseBase):
             'sv6vrf-57349', 'fc00:0:2:3:e005::')
 
     def test_a_source_entry_is_packed_too(self):
-        self.dp.add_routes(
+        self.dp.sync_routes(
             self.domain_id,
             [{'prefix': '10.0.0.5/32', 'host': 'node3', 'port_id': 'p1',
               'segments_by_source': {'node1': ['fc00:0:2::']}}],
@@ -2049,7 +2079,7 @@ class TestUnderlayAutodetect(DataplaneTestCaseBase):
     def _route_devs(self, routes):
         self.dp.refresh_underlay([LOCATOR, LOCATOR2, LOCATOR3])
         self.priv_seg6.replace_seg6_route.reset_mock()
-        self.dp.add_routes(self.domain_id, routes, self.LOCATORS, 'node1')
+        self.dp.sync_routes(self.domain_id, routes, self.LOCATORS, 'node1')
         return {c[0][0]: c[0][2] for c in
                 self.priv_seg6.replace_seg6_route.call_args_list}
 
@@ -2133,9 +2163,8 @@ class TestSteering(DataplaneTestCaseBase):
     def setUp(self):
         super().setUp()
         self._with_domain()
+        self._fake_kernel()
         self.locators = {'node2': LOCATOR2, 'node3': LOCATOR3}
-        self.priv_seg6.list_steer_rules.return_value = []
-        self.priv_seg6.list_seg6_routes.return_value = []
 
     def _route(self, prefix='10.0.0.5/32', host='node2', vm_host='node1',
                segments=('fc00:0:3:fff0::',), port='vm1',
@@ -2151,123 +2180,104 @@ class TestSteering(DataplaneTestCaseBase):
                             'node1', gateway_ports={'net1': self.GW}
                             if ports is None else ports)
 
-    def _calls(self, *names):
-        return [(c[0], c[1]) for c in self.priv_seg6.mock_calls
-                if c[0] in names]
+    def _filter_on(self):
+        self.dp.ensure_edge_filter([LOCATOR2, LOCATOR3])
 
     def test_a_local_vm_gets_a_table_its_route_and_a_rule(self):
         self._sync(self._route())
         # the VRF route is untouched by the VM path: direct to node2
-        vrf, steer = self.priv_seg6.replace_seg6_route.call_args_list
-        self.assertEqual(('10.0.0.5/32', ['fc00:0:2:7::']), vrf[0][:2])
-        self.assertEqual(VRF_TABLE, vrf[0][3])
-        self.assertEqual(('10.0.0.5/32', ['fc00:0:3:fff0::', 'fc00:0:2:7::'],
-                          mock.ANY, self.BASE), steer[0][:4])
-        self.priv_seg6.add_steer_rule.assert_called_once_with(
-            '10.0.1.9/32', self.GW, self.BASE, family_v6=False)
+        self.assertEqual({'10.0.0.5': ['fc00:0:2:7::']},
+                         self.kernel.table(VRF_TABLE))
+        self.assertEqual({'10.0.0.5': ['fc00:0:3:fff0::', 'fc00:0:2:7::']},
+                         self.kernel.table(self.BASE))
+        self.assertEqual({('10.0.1.9', self.GW, self.BASE, False)},
+                         self.kernel.steer_rules)
 
-    def test_route_and_sid_rule_before_the_steer_rule(self):
-        self.priv_nft.apply_ruleset.return_value = None
-        self.dp.ensure_edge_filter([LOCATOR2, LOCATOR3])
-        self.priv_seg6.reset_mock()
-        self.priv_seg6.list_steer_rules.return_value = []
-        self.priv_seg6.list_seg6_routes.return_value = []
-        self.priv_seg6.list_sid_rules.return_value = []
+    def test_no_steered_packet_meets_the_seal(self):
+        # The steer table's route and SID rule exist before the steer
+        # rule that sends traffic there.
+        self._filter_on()
         self._sync(self._route())
-        order = [name for name, _a in self._calls(
-            'replace_seg6_route', 'add_sid_rule', 'add_steer_rule')]
-        # the VRF route's rule before the VRF route; the steer table's
-        # route and rule before the steer rule that sends traffic there
-        self.assertEqual(['add_sid_rule', 'replace_seg6_route',
-                          'replace_seg6_route', 'add_sid_rule',
-                          'add_steer_rule'], order)
-        self.assertIn(mock.call(VRF_NAME, 'fc00:0:3:fff0::'),
-                      self.priv_seg6.add_sid_rule.call_args_list)
+        self.assertEqual(set(), self.kernel.blackholes)
+        self.assertIn((VRF_NAME, 'fc00:0:3:fff0::'), self.kernel.sid_rules)
 
     def test_the_steer_sid_rule_is_not_pruned(self):
         # Without the rule the steered flow never connected
-        self.priv_nft.apply_ruleset.return_value = None
-        self.dp.ensure_edge_filter([LOCATOR2, LOCATOR3])
-        self.priv_seg6.list_sid_rules.return_value = [
-            (VRF_NAME, 'fc00:0:2:7::'), (VRF_NAME, 'fc00:0:3:fff0::')]
+        self._filter_on()
+        self.kernel.sid_rules = {(VRF_NAME, 'fc00:0:2:7::'),
+                                 (VRF_NAME, 'fc00:0:3:fff0::')}
         self._sync(self._route())
         self.priv_seg6.delete_sid_rule.assert_not_called()
 
     def test_a_vm_on_another_node_or_without_a_gateway_port_here(self):
         self._sync(self._route(vm_host='node3'))
         self._sync(self._route(), ports={})
-        self.priv_seg6.add_steer_rule.assert_not_called()
-        self.assertEqual(2, self.priv_seg6.replace_seg6_route.call_count)
+        self.assertEqual(set(), self.kernel.steer_rules)
+        self.assertEqual([(VRF_TABLE, False)], list(self.kernel.routes))
 
     def test_two_addresses_two_rules_one_table(self):
         self._sync(self._route(prefixes=('10.0.1.9/32', 'fd00::9/128')))
-        self.assertEqual(
-            [mock.call('10.0.1.9/32', self.GW, self.BASE, family_v6=False),
-             mock.call('fd00::9/128', self.GW, self.BASE, family_v6=True)],
-            self.priv_seg6.add_steer_rule.call_args_list)
+        self.assertEqual({('10.0.1.9', self.GW, self.BASE, False),
+                          ('fd00::9', self.GW, self.BASE, True)},
+                         self.kernel.steer_rules)
 
     def test_two_vms_two_tables(self):
         self._sync(self._route(),
                    self._route(prefix='10.0.0.6/32', port='vm2',
                                prefixes=('10.0.1.10/32',)))
         self.assertEqual({self.BASE, self.BASE + 1},
-                         {c[0][2] for c in
-                          self.priv_seg6.add_steer_rule.call_args_list})
+                         {t for _p, _i, t, _v in self.kernel.steer_rules})
+
+    def test_a_new_destination_joins_the_vms_table(self):
+        self._sync(self._route())
+        self._sync(self._route(), self._route(prefix='10.0.0.6/32'))
+        self.assertEqual(['10.0.0.5', '10.0.0.6'],
+                         sorted(self.kernel.table(self.BASE)))
+        self.assertEqual({('10.0.1.9', self.GW, self.BASE, False)},
+                         self.kernel.steer_rules)
 
     def test_a_vms_existing_table_is_reused_after_a_restart(self):
-        self.priv_seg6.list_steer_rules.return_value = [
-            ('10.0.1.9', self.GW, self.BASE + 7, False)]
+        self.kernel.steer_rules = {('10.0.1.9', self.GW, self.BASE + 7,
+                                    False)}
         self._sync(self._route())
-        self.assertEqual(self.BASE + 7, self.priv_seg6.replace_seg6_route
-                         .call_args_list[-1][0][3])
+        self.assertEqual(['10.0.0.5'], list(self.kernel.table(self.BASE + 7)))
         self.priv_seg6.add_steer_rule.assert_not_called()   # already there
         self.priv_seg6.delete_steer_rule.assert_not_called()
 
     def test_tables_of_other_domains_are_skipped(self):
-        self.priv_seg6.list_steer_rules.return_value = [
-            ('10.9.9.9', 'svp-8-100', self.BASE, False)]
+        theirs = ('10.9.9.9', 'svp-8-100', self.BASE, False)
+        self.kernel.steer_rules = {theirs}
         self._sync(self._route())
-        self.priv_seg6.add_steer_rule.assert_called_once_with(
-            '10.0.1.9/32', self.GW, self.BASE + 1, family_v6=False)
-        self.priv_seg6.delete_steer_rule.assert_not_called()
+        self.assertEqual({theirs, ('10.0.1.9', self.GW, self.BASE + 1,
+                                   False)}, self.kernel.steer_rules)
 
-    def test_a_vm_no_longer_steered_loses_rules_then_table(self):
-        self.priv_seg6.list_steer_rules.return_value = [
-            ('10.0.1.9', self.GW, self.BASE, False),
-            ('fd00::9', self.GW, self.BASE, True)]
+    def test_a_vm_no_longer_steered_loses_its_rules_and_table(self):
+        self.kernel.steer_rules = {('10.0.1.9', self.GW, self.BASE, False),
+                                   ('fd00::9', self.GW, self.BASE, True)}
+        self.kernel.routes[(self.BASE, False)] = {
+            '10.0.0.5': ['fc00:0:3:fff0::', 'fc00:0:2:7::']}
         self._sync({'prefix': '10.0.0.5/32', 'host': 'node2',
                     'port_id': 'p'})
-        names = [n for n, _a in self._calls(
-            'delete_steer_rule', 'flush_table') if _a[0] == self.BASE or
-            n == 'delete_steer_rule']
-        self.assertEqual(['delete_steer_rule', 'delete_steer_rule',
-                          'flush_table', 'flush_table'], names)
+        self.assertEqual(set(), self.kernel.steer_rules)
+        self.assertEqual({}, self.kernel.table(self.BASE))
 
     def test_a_stale_route_and_rule_in_a_kept_table_are_pruned(self):
-        self.priv_seg6.list_steer_rules.return_value = [
-            ('10.0.1.9', self.GW, self.BASE, False),
-            ('10.0.1.8', self.GW, self.BASE, False)]
-        self.priv_seg6.list_seg6_routes.side_effect = \
-            lambda table, family_v6=False: (['10.0.0.5', '10.0.0.99']
-                                            if table == self.BASE and
-                                            not family_v6 else [])
+        self.kernel.steer_rules = {('10.0.1.9', self.GW, self.BASE, False),
+                                   ('10.0.1.8', self.GW, self.BASE, False)}
+        self.kernel.routes[(self.BASE, False)] = {
+            '10.0.0.5': ['fc00:0:2:7::'], '10.0.0.99': ['fc00:0:2:7::']}
         self._sync(self._route())
-        self.priv_seg6.delete_steer_rule.assert_called_once_with(
-            '10.0.1.8/32', self.GW, self.BASE, family_v6=False)
-        self.priv_seg6.delete_route.assert_any_call(
-            '10.0.0.99', self.BASE, family_v6=False)
+        self.assertEqual({('10.0.1.9', self.GW, self.BASE, False)},
+                         self.kernel.steer_rules)
+        self.assertEqual(['10.0.0.5'], list(self.kernel.table(self.BASE)))
 
-    def test_an_incremental_add_only_adds(self):
-        self.priv_seg6.list_steer_rules.return_value = [
-            ('10.0.1.9', self.GW, self.BASE, False),
-            ('10.0.1.8', self.GW, self.BASE, False)]
-        self.dp.add_routes(self.domain_id, [self._route(prefix='10.0.0.6/32')],
-                           self.locators, 'node1',
-                           gateway_ports={'net1': self.GW})
-        self.assertEqual('10.0.0.6/32', self.priv_seg6.replace_seg6_route
-                         .call_args_list[-1][0][0])
-        self.priv_seg6.delete_steer_rule.assert_not_called()
-        self.priv_seg6.flush_table.assert_not_called()
+    def test_a_steered_route_with_no_underlay_device_is_kept(self):
+        self.kernel.steer_rules = {('10.0.1.9', self.GW, self.BASE, False)}
+        self.kernel.routes[(self.BASE, False)] = {
+            '10.0.0.5': ['fc00:0:3:fff0::', 'fc00:0:2:7::']}
+        self.dp.underlay_interface = None
+        self._sync(self._route())
+        self.assertEqual(['10.0.0.5'], list(self.kernel.table(self.BASE)))
 
     def test_unreadable_rules_change_nothing(self):
         self.priv_seg6.list_steer_rules.side_effect = RuntimeError('boom')
@@ -2275,28 +2285,81 @@ class TestSteering(DataplaneTestCaseBase):
         self.priv_seg6.add_steer_rule.assert_not_called()
 
     def test_no_free_table_is_logged(self):
-        self.priv_seg6.list_steer_rules.return_value = [
+        self.kernel.steer_rules = {
             ('10.9.9.%d' % (i % 250), 'svp-8-1', self.BASE + i, False)
-            for i in range(dataplane.constants.STEER_TABLE_SLOTS)]
+            for i in range(dataplane.constants.STEER_TABLE_SLOTS)}
         with mock.patch.object(dataplane.LOG, 'error') as error:
             self._sync(self._route())
         self.assertIn('no free steer table', error.call_args[0][0])
         self.priv_seg6.add_steer_rule.assert_not_called()
 
-    def test_deleting_the_domain_removes_its_steering_first(self):
-        self.priv_seg6.list_steer_rules.return_value = [
-            ('10.0.1.9', self.GW, self.BASE, False),
-            ('10.9.9.9', 'svp-8-100', self.BASE + 1, False)]
-        calls = mock.Mock()
-        calls.attach_mock(self.priv_seg6.delete_steer_rule, 'rule')
-        calls.attach_mock(self.priv_seg6.flush_table, 'flush')
+    def test_deleting_the_domain_removes_only_its_steering(self):
+        theirs = ('10.9.9.9', 'svp-8-100', self.BASE + 1, False)
+        self.kernel.steer_rules = {('10.0.1.9', self.GW, self.BASE, False),
+                                   theirs}
+        self.kernel.routes[(self.BASE, False)] = {'10.0.0.5': ['x']}
+        self.kernel.routes[(self.BASE + 1, False)] = {'10.0.0.5': ['y']}
         self.dp.delete_domain(self.domain_id)
-        self.assertEqual(
-            [mock.call.rule('10.0.1.9/32', self.GW, self.BASE,
-                            family_v6=False),
-             mock.call.flush(self.BASE, family_v6=False),
-             mock.call.flush(self.BASE, family_v6=True)],
-            calls.mock_calls[:3])
-        self.assertNotIn(mock.call.rule('10.9.9.9/32', 'svp-8-100',
-                                        self.BASE + 1, family_v6=False),
-                         calls.mock_calls)
+        self.assertEqual({theirs}, self.kernel.steer_rules)
+        self.assertEqual({}, self.kernel.table(self.BASE))
+        self.assertEqual({'10.0.0.5': ['y']},
+                         self.kernel.table(self.BASE + 1))
+
+
+class TestMakeBeforeBreak(DataplaneTestCaseBase):
+    """Every change of a domain leaves no reachable route without its rule.
+
+    The edge filter covers every node, so no path is sealed by design and
+    any window FakeKernel records is a real one.
+    """
+
+    GW = 'svp-7-100'
+
+    def setUp(self):
+        super().setUp()
+        self._with_domain()
+        self._fake_kernel()
+        self.dp.ensure_edge_filter([LOCATOR2, LOCATOR3])
+        self.locators = {'node2': LOCATOR2, 'node3': LOCATOR3}
+
+    def _sync(self, segments=None, vm_segments=None, host='node2'):
+        route = {'prefix': '10.0.0.5/32', 'host': host, 'port_id': 'p'}
+        if segments is not None:
+            route['segments'] = segments
+        if vm_segments is not None:
+            route['segments_by_source_port'] = {'vm1': {
+                'host': 'node1', 'network_id': 'net1',
+                'prefixes': ['10.0.1.9/32'], 'segments': vm_segments}}
+        self.dp.sync_routes(self.domain_id, [route],
+                            dict(self.locators, node1=LOCATOR), 'node1',
+                            gateway_ports={'net1': self.GW})
+
+    def test_a_route_re_steered_and_back(self):
+        self._sync()
+        self._sync(segments=['fc00:0:3:fff0::'])
+        self._sync(segments=['fc00:0:2:fff0::'])
+        self._sync()
+        self.assertEqual(set(), self.kernel.blackholes)
+        self.assertEqual({(VRF_NAME, 'fc00:0:2:7::')}, self.kernel.sid_rules)
+
+    def test_a_source_vm_path_that_moves_then_goes(self):
+        self._sync(vm_segments=['fc00:0:3:fff0::'])
+        self._sync(vm_segments=['fc00:0:2:fff0::'])
+        self._sync()
+        self.assertEqual(set(), self.kernel.blackholes)
+        self.assertEqual(set(), self.kernel.steer_rules)
+
+    def test_a_workload_that_moves_here(self):
+        self._sync(vm_segments=['fc00:0:3:fff0::'])
+        self._sync(host='node1')
+        self.assertEqual(set(), self.kernel.blackholes)
+        self.assertEqual({}, self.kernel.table(VRF_TABLE))
+        self.assertEqual(set(), self.kernel.sid_rules)
+
+    def test_a_domain_torn_down(self):
+        self._sync(segments=['fc00:0:3:fff0::'],
+                   vm_segments=['fc00:0:2:fff0::'])
+        self.dp.delete_domain(self.domain_id)
+        self.assertEqual(set(), self.kernel.blackholes)
+        self.assertEqual(set(), self.kernel.sid_rules)
+        self.assertEqual(set(), self.kernel.steer_rules)
