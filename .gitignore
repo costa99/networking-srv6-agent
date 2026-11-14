@@ -24,3 +24,6 @@ Claude outputs/
 .vexp/
 .vscode/
 
+
+# lab.sh: the local config
+lab/lab.conf

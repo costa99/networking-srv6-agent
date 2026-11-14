@@ -1,0 +1,31 @@
+# A small leaf-spine fabric for lab.sh (FABRIC=fabric.topo.example).
+#
+#   switch <name>                 a switch VM (up to 15 letters/digits/-/_)
+#   link <a> <b> <Mbit/s>         a virtual cable; a and b are switches or
+#                                 HOSTS from lab.conf; capacity per direction,
+#                                 used by the plugin's path computation
+#
+# Any connected graph works. Hosts are never transit, so a host may be
+# dual-homed (two links to two leaves).
+#
+#        spine1      spine2
+#          |  \     /  |
+#          |    \ /    |
+#          |    / \    |
+#        leaf1       leaf2
+#        /   \          \
+#     node1  node2     node3
+
+switch spine1
+switch spine2
+switch leaf1
+switch leaf2
+
+link spine1 leaf1 1000
+link spine1 leaf2 1000
+link spine2 leaf1 1000
+link spine2 leaf2 1000
+
+link leaf1 node1 1000
+link leaf1 node2 1000
+link leaf2 node3 1000

@@ -612,7 +612,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
                 # Not programmed here; activation takes the routes from a
                 # full sync, not from this message. An instance that
                 # arrives here (live migration) wakes it now: the server
-                # waits for this node before it tells the others (H2).
+                # waits for this node before it tells the others.
                 if arriving:
                     LOG.info("SRv6: an instance of dormant domain %s "
                              "arrives; resyncing to program it", domain_id)
@@ -636,7 +636,7 @@ class Srv6AgentExtension(l2_extension.L2AgentExtension):
             self._announce_gateways(domain_id, arriving)
 
     def _announce_gateways(self, domain_id, routes):
-        """Gratuitous ARP of the gateway to instances that are local now (H4).
+        """Gratuitous ARP of the gateway to instances that are local now.
 
         Caller holds the lock. In a background thread: arping takes about
         2 s, and the server waits for this handler during a migration

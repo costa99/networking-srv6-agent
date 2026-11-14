@@ -1,0 +1,46 @@
+# lab.conf -- copy to lab.conf and edit. Sourced by lab.sh (bash syntax).
+
+# --- where the nodes are ------------------------------------------------------
+# VM mode: lab.sh creates every node as a KVM VM on this machine and reaches
+# them through it. It needs libvirt, virt-install, cloud-image-utils, curl,
+# nested KVM, and sudo for this login. About 8 GB RAM for the controller,
+# 4 GB per other host, under 1 GB per switch; disk ~12 GB + ~7 GB per host.
+VM_HOST=user@kvm-server
+
+# Own machines: leave VM_HOST empty. Each host runs Ubuntu 24.04, its host
+# name is the name given below, and SSH_USER logs in with a key and has
+# passwordless sudo. All hosts share one L2 segment (FABRIC=none).
+#VM_HOST=
+#SSH_USER=stack
+
+# --- the OpenStack nodes --------------------------------------------------------
+# The first is the controller (also a compute). Names are the Neutron host
+# names. VM mode: names only. Own machines: name=address.
+HOSTS="node1 node2 node3"
+#HOSTS="node1=10.0.0.11 node2=10.0.0.12 node3=10.0.0.13"
+
+# --- underlay -------------------------------------------------------------------
+# none: the hosts reach each other on their management segment.
+# A topology file (VM mode): switches as VMs, one virtual cable per link,
+# the plugin's topology_file and the fabric telemetry agents -- link state,
+# TE through switches and automatic steering. See fabric.topo.example.
+FABRIC=none
+#FABRIC=fabric.topo.example
+
+# --- software -------------------------------------------------------------------
+DEVSTACK_BRANCH=stable/2026.2
+PLUGIN_REPO=https://github.com/costa99/networking-srv6-agent.git
+PLUGIN_BRANCH=main
+ENCODING=usid                 # usid (microSID) or encap (full SIDs)
+ADMIN_PASSWORD=secret
+# Extra lines for every node's local.conf, e.g.
+#LOCAL_CONF_EXTRA='disable_service horizon'   # Horizon (with the SRv6 panels) is on by default
+
+# --- VM mode sizes and places (defaults shown) -----------------------------------
+#VM_PREFIX=lab-               # libvirt names: lab-node1, lab-spine1, ...
+#MGMT_NET=192.168.150         # the lab's NAT network, .1 = VM host, hosts .11.., switches .101..
+#CTRL_RAM=8192 CTRL_CPUS=4
+#HOST_RAM=4096 HOST_CPUS=4 HOST_DISK=40G
+#SWITCH_RAM=768
+#IMG_DIR=/var/lib/libvirt/images/lab
+#SSH_PUBKEY=~/.ssh/id_ed25519.pub   # put into every VM; default: the first key found

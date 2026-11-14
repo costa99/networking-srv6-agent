@@ -33,7 +33,7 @@ ROUTES_UPDATED = 'routes_updated'
 SYNC_STATE = 'sync_state'
 
 # Seconds the server waits for the destination of a live migration to apply
-# the instance's route before it tells everybody else (handover H2). It
+# the instance's route before it tells everybody else. It
 # delays nova's binding activation by as much at worst; then the fanout
 # goes ahead unordered, as before.
 HANDOVER_CALL_TIMEOUT = 2

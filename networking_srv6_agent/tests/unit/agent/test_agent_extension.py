@@ -808,9 +808,9 @@ class TestRouteMtus(AgentExtensionTestCaseBase):
 
 
 class TestGatewayAnnouncement(AgentExtensionTestCaseBase):
-    """H4: an instance that is local now hears its gateway's MAC here.
+    """An instance that is local now hears its gateway's MAC here.
 
-    Each node's gateway port has its own MAC (TECH-DOC-NOTES N13); a
+    Each node's gateway port has its own MAC; a
     live-migrated instance would keep sending to the old node's.
     """
 
@@ -1243,7 +1243,7 @@ class TestDormantDomains(AgentExtensionTestCaseBase):
         self.cctxt.call.assert_not_called()
 
     def test_an_arriving_instance_wakes_it_at_once(self):
-        # H2: the server waits for the live migration's destination before
+        # The server waits for the live migration's destination before
         # it tells the other nodes, so the destination programs the domain
         # now rather than when its OVS agent reports the port up
         self._dormant()

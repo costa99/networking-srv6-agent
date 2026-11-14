@@ -1062,7 +1062,7 @@ class Srv6LinuxDataplane:
     def announce_gateway(port_name, address):
         """Gratuitous ARP for a gateway address on its gateway port.
 
-        Each node's gateway port has its own MAC (N13), so an instance
+        Each node's gateway port has its own MAC, so an instance
         that live-migrated here still has the old node's in its ARP cache
         and would send its traffic back there. The gateway's ARP never
         crosses nodes (dropped at the tunnel ingress), so only this node's

@@ -284,8 +284,8 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         routes = []
         ports = plugin.get_ports(
             context, filters={'network_id': list(network_ids)})
-        # A port DOWN in the middle of a live migration keeps its route
-        # (N12): a resync in that window must not prune it everywhere.
+        # A port DOWN in the middle of a live migration keeps its route:
+        # a resync in that window must not prune it everywhere.
         migrating = srv6_db.get_migrating_port_ids(
             context, [p['id'] for p in ports
                       if p.get('status') != n_const.PORT_STATUS_ACTIVE])
@@ -1689,7 +1689,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
         first_host gets the add before everybody else and is waited for
         (bounded): the live-migration handover, where the new node must
         stop routing the address back to the old one before any node sends
-        it there, or the two loop (N11).
+        it there, or the two loop.
         """
         if not port:
             return
@@ -1827,7 +1827,7 @@ class Srv6Plugin(srv6_ext.Srv6PluginBase):
                 # there now and its port is wired (pre-plugged). Advertise
                 # it at once, new node first, instead of when the
                 # destination reports the port up 1-2 s later, by which
-                # time the old node may have dropped the network (N10).
+                # time the old node may have dropped the network.
                 # The add also turns the old node's route into a pointer
                 # to the new node. The ACTIVE add later repeats it.
                 self._notify_port(context, port, migrating=True,

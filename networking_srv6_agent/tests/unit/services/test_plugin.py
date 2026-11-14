@@ -586,7 +586,7 @@ class TestPortSelection(PluginUnitTestCaseBase):
         self.core.get_ports.assert_not_called()
 
     def test_a_live_migrating_down_port_keeps_its_route(self):
-        # N12: a resync between nova's binding activation and the port
+        # A resync between nova's binding activation and the port
         # going ACTIVE on the destination must not prune it everywhere
         moving = _port(status=n_const.PORT_STATUS_DOWN)
         stopped = _port(status=n_const.PORT_STATUS_DOWN,
@@ -866,7 +866,7 @@ class TestPortEvents(PortEventsTestCaseBase):
         self.agent_rpc.routes_updated.assert_not_called()
 
     def test_binding_activation_advertises_the_new_node_first(self):
-        # H1 + H2: nova activated the destination binding (host changes,
+        # Nova activated the destination binding (host changes,
         # port DOWN, migrating_to only on the old binding's profile). The
         # route moves now, not when the port turns ACTIVE, and the new
         # node is told and waited for before everybody else.

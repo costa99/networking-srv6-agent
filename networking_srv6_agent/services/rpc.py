@@ -127,7 +127,7 @@ class Srv6AgentNotifyAPI:
                                remove=None):
         """routes_updated to one agent, waiting until it has applied them.
 
-        The live-migration handover (PLAN-MIGRATION-HANDOVER H2): the new
+        The live-migration handover: the new
         node must stop sending the address back to the old one before any
         other node starts sending it to the new one. The agent's fanout
         consumer also listens on its host's direct queue, so this needs no
